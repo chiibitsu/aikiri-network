@@ -270,3 +270,17 @@ def test_cli_deploy_adopts_or_refuses(monkeypatch, tmp_path, base):
     assert dep["contract"] == addr and dep["genesisHash"] == L.read(0).hash and dep["gasUsed"] > 0
     with pytest.raises(SystemExit):  # deployed once
         cli.main(["--ledger", str(L.root), "deploy", "--rpc", "x", "--chain-id", "1"])
+
+
+def test_base_receipt_carries_cost(ledger, key, journal, base):
+    from aikiri_ledger.witness import write_base_receipt
+    w3, compiled = base
+    bw = BaseWitness(w3, None, compiled["abi"], account=w3.eth.accounts[0])
+    bw.deploy(ledger.read(0).hash, compiled["bytecode"])
+    ledger.seal(Root(kind="journal", sha256=sha256_file(journal), ref="03_human/journal/decision-journal.md"))
+    b1 = ledger.block(key)
+    tx = bw.anchor(b1)
+    p = write_base_receipt(ledger, b1, tx, bw.contract.address, 8453, rcpt=bw.last_receipt)
+    d = json.loads(p.read_text())
+    assert d["index"] == 1 and d["hash"] == b1.hash and d["tx"] == tx and d["gasUsed"] > 0 and d["baseBlock"] > 0
+    assert "journal" not in p.read_text()  # receipt holds no content, only refs and numbers

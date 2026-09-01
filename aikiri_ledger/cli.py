@@ -179,8 +179,10 @@ def main(argv=None):
         cfg = _cfg(L); b = L.read(a.index)
         base = _base(L, cfg, need_signer=True)
         if base:
+            if (L.blocks_dir / f"{b.index:06d}.base.json").exists():
+                raise SystemExit(f"block {b.index} already has a Base receipt; a block is anchored once")
             tx = base.anchor(b)
-            p = write_base_receipt(L, b, tx, cfg["contract"], cfg.get("chainId", 0))
+            p = write_base_receipt(L, b, tx, cfg["contract"], cfg.get("chainId", 0), rcpt=base.last_receipt)
             print(f"Base: anchored block {b.index} tx {tx} -> {p.name}")
         else:
             print("Base: no rpc/contract in config.json; skipped")

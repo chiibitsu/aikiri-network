@@ -1,0 +1,78 @@
+name: block
+# Writes the next block from the sealed queue, anchors it on Base, stamps it on Bitcoin,
+# and commits block + proofs. Runs when a hash-only ledger/queue.json is pushed, or by hand.
+# Sealing happens where the content lives; only hashes reach this repo.
+on:
+  push:
+    paths: ["ledger/queue.json"]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: ledger-write
+jobs:
+  block:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[bitcoin]"
+      - name: preflight
+        run: |
+          test -s ledger/queue.json || { echo "nothing sealed: ledger/queue.json is missing or empty"; exit 1; }
+          echo "queue:"; cat ledger/queue.json
+          aikiri-ledger --ledger ledger verify
+      - name: block
+        env:
+          AIKIRI_VALIDATOR_KEY: ${{ secrets.AIKIRI_VALIDATOR_KEY }}
+        run: |
+          test -n "$AIKIRI_VALIDATOR_KEY" || { echo "secret AIKIRI_VALIDATOR_KEY is not set"; exit 1; }
+          aikiri-ledger block --keyfile /nonexistent
+          echo "INDEX=$(cut -d' ' -f1 ledger/HEAD)" >> "$GITHUB_ENV"
+      - name: witness (Base anchor + OTS stamp)
+        env:
+          BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
+        run: |
+          test -n "$BASE_PRIVATE_KEY" || { echo "secret BASE_PRIVATE_KEY is not set"; exit 1; }
+          aikiri-ledger witness "$INDEX"
+      - name: price the anchor in USD
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          p = f"ledger/blocks/{int(os.environ['INDEX']):06d}.base.json"
+          d = json.load(open(p))
+          try:
+              r = json.load(urllib.request.urlopen("https://api.coinbase.com/v2/prices/ETH-USD/spot", timeout=20))
+              d["ethUsdAtAnchor"] = float(r["data"]["amount"])
+              d["feeUsd"] = round(d["totalWei"] / 1e18 * d["ethUsdAtAnchor"], 6)
+          except Exception as e:
+              d["ethUsdAtAnchor"] = None; d["feeUsd"] = None; print("price lookup failed:", e)
+          open(p, "w").write(json.dumps(d, indent=2) + "\n")
+          print(json.dumps(d, indent=2))
+          PY
+      - name: commit block and proofs
+        run: |
+          B=$(printf "%06d" "$INDEX")
+          HASH=$(python -c "import json;print(json.load(open('ledger/blocks/$B.json'))['hash'])")
+          ROOTS=$(python -c "import json;print('\n'.join(f\"{r['kind']:<12}{r['sha256']}  {r.get('ref','')}\" for r in json.load(open('ledger/blocks/$B.json'))['roots']))")
+          TX=$(python -c "import json;print(json.load(open('ledger/blocks/$B.base.json'))['tx'])")
+          USD=$(python -c "import json;print(json.load(open('ledger/blocks/$B.base.json')).get('feeUsd'))")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ledger/HEAD "ledger/blocks/$B.json" "ledger/blocks/$B.base.json"
+          [ -e "ledger/blocks/$B.hash" ] && git add "ledger/blocks/$B.hash" "ledger/blocks/$B.hash.ots" || echo "no OTS proof to commit"
+          git rm -q --cached --ignore-unmatch ledger/queue.json
+          git commit --author="Angeline S. Viray <chii@chiibitsu.com>" -F- <<MSG
+          Block $INDEX
+
+          hash  $HASH
+          $ROOTS
+          Base  tx $TX  (\$$USD)
+          OTS   pending; upgrade after ~1 Bitcoin block
+          MSG
+          git push origin HEAD:${GITHUB_REF_NAME}
+          { echo "## block $INDEX"; echo; echo "- hash: \`$HASH\`"; echo "- Base tx: \`$TX\`"; echo "- fee USD: $USD"; echo; echo '```'; echo "$ROOTS"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: verify (chain, Base, Bitcoin)
+        run: |
+          for i in 1 2 3 4 5 6; do aikiri-ledger verify && exit 0; echo "retry $i"; sleep 10; done; exit 1

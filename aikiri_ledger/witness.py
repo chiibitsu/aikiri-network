@@ -250,7 +250,13 @@ def verify_all(ledger: Ledger, base: BaseWitness | None = None, bitcoin: Bitcoin
     return True, report
 
 
-def write_base_receipt(ledger: Ledger, block: Block, tx_hash: str, contract_address: str, chain_id: int) -> Path:
+def write_base_receipt(ledger: Ledger, block: Block, tx_hash: str, contract_address: str, chain_id: int, rcpt=None) -> Path:
+    """Proof file beside the block: which tx on which contract anchored which hash,
+    plus what it cost. Numbers and hashes only."""
     p = ledger.blocks_dir / f"{block.index:06d}.base.json"
-    p.write_text(json.dumps({"index": block.index, "hash": block.hash, "tx": tx_hash, "contract": contract_address, "chainId": chain_id}, indent=2) + "\n")
+    d = {"index": block.index, "hash": block.hash, "tx": tx_hash, "contract": contract_address, "chainId": chain_id}
+    if rcpt is not None:
+        d["baseBlock"] = int(rcpt["blockNumber"])
+        d.update(receipt_cost(rcpt))
+    p.write_text(json.dumps(d, indent=2) + "\n")
     return p
