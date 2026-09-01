@@ -1,0 +1,84 @@
+name: deploy
+# Manual, once. Deploys contracts/AikiriLedger.sol to Base mainnet with the genesis hash,
+# signed locally with the BASE_PRIVATE_KEY secret. Sends exactly one transaction.
+# If the wallet already deployed a contract with this genesis hash, it is adopted and nothing is sent.
+# Commits ledger/config.json and ledger/deploy.json (no keys).
+# Two ways to run it: the Actions "Run workflow" button, or pushing a request file
+# at .github/requests/deploy (the run removes it). See genesis.yml for why.
+on:
+  push:
+    paths: [".github/requests/deploy"]
+  workflow_dispatch:
+    inputs:
+      rpc:
+        description: Base RPC URL
+        default: https://mainnet.base.org
+        required: true
+      chain_id:
+        description: expected chainId
+        default: "8453"
+        required: true
+      adopt_only:
+        description: only record a contract this wallet already deployed; never send
+        type: boolean
+        default: false
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: preflight
+        run: |
+          test -e ledger/blocks/000000.json || { echo "no genesis; run the genesis workflow first"; exit 1; }
+          aikiri-ledger verify
+      - name: deploy
+        env:
+          BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
+        run: |
+          test -n "$BASE_PRIVATE_KEY" || { echo "secret BASE_PRIVATE_KEY is not set"; exit 1; }
+          FLAGS=""
+          if [ "${{ inputs.adopt_only }}" = "true" ] || grep -qs adopt-only .github/requests/deploy; then FLAGS="--adopt-only"; fi
+          aikiri-ledger deploy --rpc "${{ inputs.rpc || 'https://mainnet.base.org' }}" --chain-id "${{ inputs.chain_id || '8453' }}" $FLAGS
+      - name: price the gas in USD
+        run: |
+          python - <<'PY'
+          import json, urllib.request
+          d = json.load(open("ledger/deploy.json"))
+          try:
+              r = json.load(urllib.request.urlopen("https://api.coinbase.com/v2/prices/ETH-USD/spot", timeout=20))
+              eth_usd = float(r["data"]["amount"])
+              d["ethUsdAtDeploy"] = eth_usd
+              d["feeUsd"] = round(d["totalWei"] / 1e18 * eth_usd, 6)
+          except Exception as e:
+              d["ethUsdAtDeploy"] = None; d["feeUsd"] = None; print("price lookup failed:", e)
+          json.dump(d, open("ledger/deploy.json", "w"), indent=2); open("ledger/deploy.json", "a").write("\n")
+          print(json.dumps(d, indent=2))
+          PY
+      - name: verify against the live contract
+        run: aikiri-ledger verify
+      - name: commit config
+        run: |
+          ADDR=$(python -c "import json;print(json.load(open('ledger/config.json'))['contract'])")
+          TX=$(python -c "import json;print(json.load(open('ledger/deploy.json'))['tx'])")
+          USD=$(python -c "import json;print(json.load(open('ledger/deploy.json'))['feeUsd'])")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q --ignore-unmatch .github/requests/deploy
+          git add ledger/config.json ledger/deploy.json
+          git commit -F- <<MSG
+          Deploy AikiriLedger to Base mainnet
+
+          contract  $ADDR
+          tx        $TX
+          fee       \$$USD
+
+          Genesis hash baked into the constructor. Owner-only anchoring, sequential, no re-anchoring.
+          MSG
+          git push origin HEAD:${GITHUB_REF_NAME}
+          { echo "## deploy"; echo; echo "- contract: \`$ADDR\`"; echo "- tx: \`$TX\`"; echo "- fee USD: $USD"; echo; echo '```'; cat ledger/deploy.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

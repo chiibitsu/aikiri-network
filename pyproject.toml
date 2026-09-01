@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aikiri-ledger"
+version = "0.1.0"
+description = "The Aikiri Network's ledger: its own chain, witnessed by Base and Bitcoin. Hashes, roots, signatures. Never content. No token."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Angeline S. Viray" }]
+dependencies = [
+  "pynacl>=1.5",
+  "web3>=7",
+  "py-solc-x>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "web3[tester]"]
+bitcoin = ["opentimestamps-client"]
+
+[project.scripts]
+aikiri-ledger = "aikiri_ledger.cli:main"
+
+[tool.setuptools]
+packages = ["aikiri_ledger"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

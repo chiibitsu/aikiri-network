@@ -1,0 +1,8 @@
+*.key
+*.env
+__pycache__/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+ledger/blocks/*.tmp

@@ -1,0 +1,16 @@
+{
+  "hash": "69e7256e4f12a359863fbb1408a8c41c5643cfa13909b6e95104e1880fbaed5b",
+  "index": 1,
+  "merkle_root": "77b40243ddbfb10be8bf36ee8d4e895228a88a68a842c1ffee8166a3656e41c1",
+  "prev_hash": "73715608c05be3f134036de0f5a1606b348098e2bebf34c8102680be08650ea8",
+  "roots": [
+    {
+      "kind": "journal",
+      "ref": "03_human/journal/decision-journal.md",
+      "sha256": "77b40243ddbfb10be8bf36ee8d4e895228a88a68a842c1ffee8166a3656e41c1"
+    }
+  ],
+  "signature": "de588ad22447da96f2209340e042d9bf0e3a7e3a988cf7560c615bad7cfb3744e2c1b40ec0def085f23c006cfb4862615bc1dbaeb01a51dae85c5f79cd291b03",
+  "timestamp": "2026-09-02T04:53:52.868213+08:00",
+  "validator": "d16ab31e87e945b56a8a4e48905fbe883330405773a92d2ece8ddcb112ec63ba"
+}

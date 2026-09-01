@@ -1,0 +1,52 @@
+name: genesis
+# Manual, once. Writes block 0 with the validator key from the AIKIRI_VALIDATOR_KEY secret
+# and commits it. That commit is the network's genesis. The key never touches the repo.
+# Two ways to run it: the Actions "Run workflow" button, or pushing a request file
+# at .github/requests/genesis (the run removes it). The second exists because
+# workflow_dispatch is only indexed once the workflow lives on the default branch.
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/requests/genesis"]
+permissions:
+  contents: write
+jobs:
+  genesis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: refuse if a genesis already exists
+        run: test ! -e ledger/blocks/000000.json || { echo "ledger already has block 0"; exit 1; }
+      - name: init
+        env:
+          AIKIRI_VALIDATOR_KEY: ${{ secrets.AIKIRI_VALIDATOR_KEY }}
+        run: |
+          test -n "$AIKIRI_VALIDATOR_KEY" || { echo "secret AIKIRI_VALIDATOR_KEY is not set"; exit 1; }
+          aikiri-ledger init --keyfile /nonexistent | tee init.log
+          aikiri-ledger verify
+      - name: commit block 0
+        run: |
+          HASH=$(python -c "import json;print(json.load(open('ledger/blocks/000000.json'))['hash'])")
+          PUB=$(python -c "import json;print(json.load(open('ledger/blocks/000000.json'))['validator'])")
+          TS=$(python -c "import json;print(json.load(open('ledger/blocks/000000.json'))['timestamp'])")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q --ignore-unmatch .github/requests/genesis
+          git add ledger/blocks/000000.json ledger/HEAD
+          git commit --author="Angeline S. Viray <chii@chiibitsu.com>" -F- <<MSG
+          Genesis: block 0 of the Aikiri Network
+
+          This commit is the network's genesis.
+
+          hash       $HASH
+          validator  $PUB
+          timestamp  $TS
+
+          No content, only hashes, roots, and signatures. Witnessed by Base and Bitcoin from here on.
+          MSG
+          git push origin HEAD:${GITHUB_REF_NAME}
+          { echo "## genesis"; echo; echo "- hash: \`$HASH\`"; echo "- validator: \`$PUB\`"; echo "- timestamp: $TS"; } >> "$GITHUB_STEP_SUMMARY"
