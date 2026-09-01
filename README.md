@@ -51,8 +51,16 @@ solc 0.8.26 is fetched by py-solc-x. If that download is blocked, place `solc-st
 
 ## Workflows
 - `ci.yml` ~ tests on every push.
-- `genesis.yml` ~ manual, once: `init`, commit block 0. That commit is the network's genesis.
-- `deploy.yml` ~ manual, once: deploy the contract to Base with the genesis hash, commit `config.json` and `deploy.json`.
+- `genesis.yml` ~ once: `init`, commit block 0. That commit is the network's genesis.
+- `deploy.yml` ~ once: deploy the contract to Base with the genesis hash, commit `config.json` and `deploy.json`. If the wallet already deployed it, adopt it; never deploy twice.
+- `block.yml` ~ when a hash-only `ledger/queue.json` is pushed: sign the next block, anchor on Base, stamp on Bitcoin, commit block + proofs, verify.
+- `nightly.yml` ~ Manila midnight: upgrade yesterday's Bitcoin proofs, seal the vault's decision journal (hash only, vault checked out outside the repo), block, witness, commit. Needs the `AIKIRI_GARDEN_TOKEN` secret (read access to the vault).
+
+Secrets: `AIKIRI_VALIDATOR_KEY`, `BASE_PRIVATE_KEY`, `AIKIRI_GARDEN_TOKEN`. Never in the repo.
+
+## On chain
+- Contract: `0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e` on Base (chainId 8453). See `ledger/deploy.json`.
+- Genesis: block 0, hash `73715608c05be3f134036de0f5a1606b348098e2bebf34c8102680be08650ea8`.
 
 ## Not in v1
 Members, witness ring, L3, scenario schema beyond a hash, acceptance links, legacy rules, any UI beyond the CLI, any token.
