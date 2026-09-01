@@ -129,6 +129,48 @@ class BaseWitness:
         return {"blockHash": h.hex(), "anchoredAt": int(at), "by": by}
 
 
+def create_address(deployer: str, nonce: int) -> str:
+    """Address a CREATE from `deployer` at `nonce` lands on: keccak(rlp([sender, nonce]))[12:]."""
+    import rlp
+    from eth_utils import keccak, to_checksum_address
+    raw = keccak(rlp.encode([bytes.fromhex(deployer[2:]), nonce]))[12:]
+    return to_checksum_address(raw)
+
+
+def wait_for_code(w3: Web3, address: str, timeout: float = 120.0, poll: float = 3.0) -> bool:
+    """Public RPCs are load balanced; the node that mined the receipt is not always
+    the node that answers the next call. Wait until code is visible at `address`."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        if w3.eth.get_code(address):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def find_deployment(w3: Web3, deployer: str, abi: list, genesis_hash_hex: str, max_nonce: int = 64):
+    """Look for an AikiriLedger already deployed by `deployer` that carries this
+    genesis hash, by walking its past nonces. Returns (address, creation receipt)
+    or None. Sends nothing."""
+    nonce = w3.eth.get_transaction_count(deployer)
+    for n in range(min(nonce, max_nonce)):
+        addr = create_address(deployer, n)
+        if not w3.eth.get_code(addr):
+            continue
+        c = w3.eth.contract(address=addr, abi=abi)
+        try:
+            if c.functions.genesisHash().call().hex() != genesis_hash_hex:
+                continue
+        except Exception:
+            continue
+        logs = c.events.Anchored().get_logs(from_block=0, argument_filters={"index": 0})
+        rcpt = w3.eth.get_transaction_receipt(logs[0]["transactionHash"]) if logs else None
+        return addr, rcpt
+    return None
+
+
 def receipt_cost(rcpt) -> dict:
     """Gas actually paid, in wei. Base (OP Stack) receipts also carry an L1 data fee."""
     l2 = int(rcpt["gasUsed"]) * int(rcpt.get("effectiveGasPrice", 0))

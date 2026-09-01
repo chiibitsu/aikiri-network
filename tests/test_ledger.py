@@ -219,3 +219,50 @@ def test_cli_init_from_env_and_refuses_keygen_in_ci(monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["--ledger", str(tmp_path / "l2"), "init", "--keyfile", str(tmp_path / "nope.key")])
     assert not (tmp_path / "nope.key").exists()
+
+
+def test_find_existing_deployment_without_sending(ledger, key, base):
+    """If deploy ran but config.json was never written, the next deploy must
+    adopt the existing contract instead of sending a second transaction."""
+    from aikiri_ledger.witness import find_deployment, create_address, wait_for_code
+    w3, compiled = base
+    chii = w3.eth.accounts[0]
+    g = ledger.read(0)
+    assert find_deployment(w3, chii, compiled["abi"], g.hash) is None
+    w3.eth.send_transaction({"from": chii, "to": w3.eth.accounts[1], "value": 1})  # nonce 0 is not a CREATE
+    bw = BaseWitness(w3, None, compiled["abi"], account=chii)
+    addr = bw.deploy(g.hash, compiled["bytecode"])
+    assert addr == create_address(chii, 1)
+    assert wait_for_code(w3, addr, timeout=1)
+    found = find_deployment(w3, chii, compiled["abi"], g.hash)
+    assert found is not None and found[0] == addr
+    assert found[1]["transactionHash"] == bw.last_receipt["transactionHash"]
+    assert find_deployment(w3, chii, compiled["abi"], "f" * 64) is None  # a different genesis is not ours
+
+
+def test_cli_deploy_adopts_or_refuses(monkeypatch, tmp_path, base):
+    """CLI: with --adopt-only and no prior deployment, exit without sending;
+    after a deployment exists, deploy adopts it and writes config without sending."""
+    from aikiri_ledger import cli
+    w3, compiled = base
+    chii = w3.eth.accounts[0]
+    pk = w3.provider.ethereum_tester.backend.account_keys[0].to_hex()
+    sk = new_key(); L = Ledger(tmp_path / "ledger"); L.init(sk)
+    monkeypatch.setenv("BASE_PRIVATE_KEY", pk)
+    monkeypatch.setattr(cli, "_w3", lambda rpc, chain_id: w3)
+    monkeypatch.setattr(cli, "compile_contract", lambda: compiled)
+    nonce0 = w3.eth.get_transaction_count(chii)
+    with pytest.raises(SystemExit):
+        cli.main(["--ledger", str(L.root), "deploy", "--rpc", "x", "--chain-id", "1", "--adopt-only"])
+    assert w3.eth.get_transaction_count(chii) == nonce0 and not (L.root / "config.json").exists()
+    bw = BaseWitness(w3, None, compiled["abi"], account=chii)
+    addr = bw.deploy(L.read(0).hash, compiled["bytecode"])
+    nonce1 = w3.eth.get_transaction_count(chii)
+    assert cli.main(["--ledger", str(L.root), "deploy", "--rpc", "x", "--chain-id", "1", "--adopt-only"]) == 0
+    assert w3.eth.get_transaction_count(chii) == nonce1  # nothing sent
+    cfg = json.loads((L.root / "config.json").read_text())
+    dep = json.loads((L.root / "deploy.json").read_text())
+    assert cfg["contract"] == addr and cfg["account"] == chii and "key" not in json.dumps(cfg).lower()
+    assert dep["contract"] == addr and dep["genesisHash"] == L.read(0).hash and dep["gasUsed"] > 0
+    with pytest.raises(SystemExit):  # deployed once
+        cli.main(["--ledger", str(L.root), "deploy", "--rpc", "x", "--chain-id", "1"])

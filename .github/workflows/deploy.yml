@@ -1,6 +1,7 @@
 name: deploy
 # Manual, once. Deploys contracts/AikiriLedger.sol to Base mainnet with the genesis hash,
 # signed locally with the BASE_PRIVATE_KEY secret. Sends exactly one transaction.
+# If the wallet already deployed a contract with this genesis hash, it is adopted and nothing is sent.
 # Commits ledger/config.json and ledger/deploy.json (no keys).
 # Two ways to run it: the Actions "Run workflow" button, or pushing a request file
 # at .github/requests/deploy (the run removes it). See genesis.yml for why.
@@ -17,6 +18,10 @@ on:
         description: expected chainId
         default: "8453"
         required: true
+      adopt_only:
+        description: only record a contract this wallet already deployed; never send
+        type: boolean
+        default: false
 permissions:
   contents: write
 jobs:
@@ -37,7 +42,9 @@ jobs:
           BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
         run: |
           test -n "$BASE_PRIVATE_KEY" || { echo "secret BASE_PRIVATE_KEY is not set"; exit 1; }
-          aikiri-ledger deploy --rpc "${{ inputs.rpc || 'https://mainnet.base.org' }}" --chain-id "${{ inputs.chain_id || '8453' }}"
+          FLAGS=""
+          if [ "${{ inputs.adopt_only }}" = "true" ] || grep -qs adopt-only .github/requests/deploy; then FLAGS="--adopt-only"; fi
+          aikiri-ledger deploy --rpc "${{ inputs.rpc || 'https://mainnet.base.org' }}" --chain-id "${{ inputs.chain_id || '8453' }}" $FLAGS
       - name: price the gas in USD
         run: |
           python - <<'PY'

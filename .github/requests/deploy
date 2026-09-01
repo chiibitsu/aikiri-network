@@ -1,1 +1,1 @@
-Run the deploy workflow: deploy contracts/AikiriLedger.sol to Base mainnet (chainId 8453) with the genesis hash, signed with the BASE_PRIVATE_KEY secret. One transaction. Removed by the run.
+adopt-only: record the AikiriLedger this wallet already deployed (the first deploy run sent the transaction, then failed on a lagging RPC read before writing config). Never send a second deploy. Removed by the run.

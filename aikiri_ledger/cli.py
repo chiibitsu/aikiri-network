@@ -24,7 +24,8 @@ from pathlib import Path
 
 from .chain import Ledger, Root, new_key, save_key, load_key, sha256_file, key_from_env, VALIDATOR_KEY_ENV
 from .witness import (BaseWitness, BitcoinWitness, compile_contract, verify_all, write_base_receipt,
-                      base_key_from_env, receipt_cost, BASE_KEY_ENV)
+                      base_key_from_env, receipt_cost, BASE_KEY_ENV,
+                      find_deployment, wait_for_code)
 
 DEFAULT_KEYFILE = os.path.expanduser("~/.aikiri/chii.key")
 DEFAULT_BASE_ENV = os.path.expanduser("~/.aikiri/base.env")
@@ -98,6 +99,7 @@ def main(argv=None):
     sub.add_parser("block").add_argument("--keyfile", default=DEFAULT_KEYFILE)
     d = sub.add_parser("deploy"); d.add_argument("--rpc", required=True); d.add_argument("--chain-id", type=int, default=8453)
     d.add_argument("--max-fee-eth", type=float, default=0.0005, help="abort if worst-case deploy fee exceeds this")
+    d.add_argument("--adopt-only", action="store_true", help="only record a contract this wallet already deployed; never send")
     sub.add_parser("witness").add_argument("index", type=int)
     sub.add_parser("upgrade")
     sub.add_parser("verify")
@@ -144,10 +146,23 @@ def main(argv=None):
         c = compile_contract()
         bw = BaseWitness(w3, None, c["abi"], private_key=_base_key())
         bal = w3.from_wei(w3.eth.get_balance(bw.account), "ether")
-        print(f"deploying from {bw.account} (balance {bal} ETH) on chainId {a.chain_id}")
-        addr = bw.deploy(g.hash, c["bytecode"], max_fee_eth=a.max_fee_eth)
-        rcpt = bw.last_receipt
+        print(f"deployer {bw.account} (balance {bal} ETH) on chainId {a.chain_id}")
+        found = find_deployment(w3, bw.account, c["abi"], g.hash)
+        if found:
+            addr, rcpt = found
+            print(f"found AikiriLedger already deployed at {addr} with this genesis hash; adopting it, no transaction sent")
+            bw.contract = w3.eth.contract(address=addr, abi=c["abi"])
+        elif a.adopt_only:
+            raise SystemExit(f"--adopt-only: no AikiriLedger with this genesis hash found among {bw.account}'s past deployments; nothing sent")
+        else:
+            addr = bw.deploy(g.hash, c["bytecode"], max_fee_eth=a.max_fee_eth)
+            rcpt = bw.last_receipt
+            print(f"deployed AikiriLedger at {addr}  tx {rcpt['transactionHash'].hex()}")
+        if rcpt is None:
+            raise SystemExit(f"contract at {addr} found but its creation receipt was not; record it by hand")
         cost = receipt_cost(rcpt)
+        if not wait_for_code(w3, addr):
+            raise SystemExit(f"no code visible at {addr} after waiting; the RPC may be lagging, re-run later (nothing is lost)")
         assert bw.matches(g) and bw.genesis_hash() == g.hash, "contract does not carry the genesis hash"
         cfg = {"rpc": a.rpc, "chainId": a.chain_id, "contract": addr, "account": bw.account}
         cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -155,7 +170,7 @@ def main(argv=None):
                   "tx": rcpt["transactionHash"].hex(), "baseBlock": int(rcpt["blockNumber"]),
                   "solc": "0.8.26", "optimizer": {"enabled": True, "runs": 200}, **cost}
         (L.root / "deploy.json").write_text(json.dumps(deploy, indent=2) + "\n")
-        print(f"AikiriLedger at {addr}  tx {deploy['tx']}  Base block {deploy['baseBlock']}")
+        print(f"AikiriLedger at {addr}  tx {deploy['tx']}  Base block {deploy['baseBlock']}  owner {bw.owner()}")
         print(f"fee: {w3.from_wei(cost['totalWei'], 'ether')} ETH (L2 {cost['l2FeeWei']} wei + L1 {cost['l1FeeWei']} wei)")
         print(f"wrote {cfg_path} and {L.root / 'deploy.json'}")
         return 0
