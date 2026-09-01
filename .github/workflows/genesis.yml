@@ -1,8 +1,13 @@
 name: genesis
 # Manual, once. Writes block 0 with the validator key from the AIKIRI_VALIDATOR_KEY secret
 # and commits it. That commit is the network's genesis. The key never touches the repo.
+# Two ways to run it: the Actions "Run workflow" button, or pushing a request file
+# at .github/requests/genesis (the run removes it). The second exists because
+# workflow_dispatch is only indexed once the workflow lives on the default branch.
 on:
   workflow_dispatch:
+  push:
+    paths: [".github/requests/genesis"]
 permissions:
   contents: write
 jobs:
@@ -30,6 +35,7 @@ jobs:
           TS=$(python -c "import json;print(json.load(open('ledger/blocks/000000.json'))['timestamp'])")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -q --ignore-unmatch .github/requests/genesis
           git add ledger/blocks/000000.json ledger/HEAD
           git commit --author="Angeline S. Viray <chii@chiibitsu.com>" -F- <<MSG
           Genesis: block 0 of the Aikiri Network
