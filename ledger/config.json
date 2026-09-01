@@ -1,0 +1,6 @@
+{
+  "rpc": "https://mainnet.base.org",
+  "chainId": 8453,
+  "contract": "0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e",
+  "account": "0xB76B710cDa104DB946A619B1450E02D44cB97194"
+}

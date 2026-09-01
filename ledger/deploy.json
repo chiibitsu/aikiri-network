@@ -1,0 +1,20 @@
+{
+  "contract": "0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e",
+  "chainId": 8453,
+  "genesisHash": "73715608c05be3f134036de0f5a1606b348098e2bebf34c8102680be08650ea8",
+  "deployer": "0xB76B710cDa104DB946A619B1450E02D44cB97194",
+  "tx": "5a676ed613f98dbb28f193589ad646c7c6d05f24ba3c0656d6b9c12c9ed4e843",
+  "baseBlock": 50753088,
+  "solc": "0.8.26",
+  "optimizer": {
+    "enabled": true,
+    "runs": 200
+  },
+  "gasUsed": 397394,
+  "effectiveGasPrice": 6000000,
+  "l2FeeWei": 2384364000000,
+  "l1FeeWei": 5000586039,
+  "totalWei": 2389364586039,
+  "ethUsdAtDeploy": 2416.11,
+  "feeUsd": 0.005773
+}
