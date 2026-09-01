@@ -150,6 +150,19 @@ def wait_for_code(w3: Web3, address: str, timeout: float = 120.0, poll: float = 
         time.sleep(poll)
 
 
+def find_creation_block(w3: Web3, address: str) -> int:
+    """First block where `address` has code. Binary search over eth_getCode, so it
+    never asks a public RPC for a wide log range."""
+    lo, hi = 0, w3.eth.block_number
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if w3.eth.get_code(address, block_identifier=mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
 def find_deployment(w3: Web3, deployer: str, abi: list, genesis_hash_hex: str, max_nonce: int = 64):
     """Look for an AikiriLedger already deployed by `deployer` that carries this
     genesis hash, by walking its past nonces. Returns (address, creation receipt)
@@ -165,7 +178,8 @@ def find_deployment(w3: Web3, deployer: str, abi: list, genesis_hash_hex: str, m
                 continue
         except Exception:
             continue
-        logs = c.events.Anchored().get_logs(from_block=0, argument_filters={"index": 0})
+        born = find_creation_block(w3, addr)
+        logs = c.events.Anchored().get_logs(from_block=born, to_block=born, argument_filters={"index": 0})
         rcpt = w3.eth.get_transaction_receipt(logs[0]["transactionHash"]) if logs else None
         return addr, rcpt
     return None

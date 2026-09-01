@@ -1,1 +1,1 @@
-adopt-only: record the AikiriLedger this wallet already deployed (the first deploy run sent the transaction, then failed on a lagging RPC read before writing config). Never send a second deploy. Removed by the run.
+adopt-only: record the AikiriLedger this wallet already deployed. Attempt 2: log lookup bounded to the creation block (public RPC rejects wide ranges). Never send a second deploy. Removed by the run.

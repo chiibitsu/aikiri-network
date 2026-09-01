@@ -234,6 +234,10 @@ def test_find_existing_deployment_without_sending(ledger, key, base):
     addr = bw.deploy(g.hash, compiled["bytecode"])
     assert addr == create_address(chii, 1)
     assert wait_for_code(w3, addr, timeout=1)
+    from aikiri_ledger.witness import find_creation_block
+    for _ in range(3):  # bury the deployment under later blocks
+        w3.eth.send_transaction({"from": chii, "to": w3.eth.accounts[1], "value": 1})
+    assert find_creation_block(w3, addr) == bw.last_receipt["blockNumber"]
     found = find_deployment(w3, chii, compiled["abi"], g.hash)
     assert found is not None and found[0] == addr
     assert found[1]["transactionHash"] == bw.last_receipt["transactionHash"]
