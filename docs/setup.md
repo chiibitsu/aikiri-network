@@ -35,15 +35,32 @@ holds no vault credential. See §5.
 
 ## 3. Ruleset on `main`
 
-Settings → Rules → New ruleset, targeting `main`:
-- Require a pull request before merging.
-- Require status checks: `tests`.
-- Block force pushes.
-- Restrict deletions.
+Settings → Rules → New ruleset. Enforcement **Active**, target **Include default
+branch**, bypass list **empty**, and exactly two rules:
 
-The workflows that commit blocks push directly to `main`, so add
-`github-actions[bot]` to the bypass list for those pushes, or the block workflow
-cannot land its own commit.
+- Restrict deletions.
+- Block force pushes.
+
+Nothing else. In particular **not** "Require a pull request before merging" and
+**not** "Require status checks to pass", because both of them block the very
+thing this repository exists to do.
+
+The block workflow commits the block and its proofs straight to `main`. Under
+either rule that push is rejected, and the usual escape — putting the pusher on
+the bypass list — is not available here: the workflow pushes as
+`github-actions[bot]`, and on a user-owned repository the bypass picker offers
+only deploy keys, repository roles, and installed GitHub Apps. GitHub Actions is
+not among them. So the choice is not "protect the branch or not"; it is "let the
+ledger write or not".
+
+The two rules that remain are the ones the invariant actually needs: history
+cannot be rewritten and the branch cannot be deleted. CI still runs on every
+push and still reports red or green; it is simply not a gate.
+
+If the check names are ever wanted as a gate — when a second person arrives and
+pull requests become real — the names are the matrix job names, six of them:
+`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`. There is no
+check named `test` or `tests`; requiring one would block `main` forever.
 
 ## 4. What the workflows already enforce
 
