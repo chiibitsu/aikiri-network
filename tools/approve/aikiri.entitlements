@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Without a keychain access group the Secure Enclave key cannot be stored,
+       and SecKeyCreateRandomKey fails with -34018 errSecMissingEntitlement.
+       An unsigned binary has no group at all, which is why the tool must be
+       signed before it will run. -->
+  <key>keychain-access-groups</key>
+  <array>
+    <string>com.chiibitsu.aikiri</string>
+  </array>
+</dict>
+</plist>
