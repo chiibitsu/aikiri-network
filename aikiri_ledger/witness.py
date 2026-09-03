@@ -17,6 +17,7 @@ from pathlib import Path
 from web3 import Web3
 
 from .chain import Ledger, Block
+from .errors import QuorumError
 
 CONTRACT_SRC = Path(__file__).resolve().parent.parent / "contracts" / "AikiriLedger.sol"
 
@@ -119,10 +120,28 @@ class BaseWitness:
         return self.contract.functions.owner().call()
 
 
-    def matches(self, block: Block) -> bool:
+    @property
+    def address(self):
+        return self.contract.address if self.contract else None
+
+    def matches(self, block: Block, block_identifier=None) -> bool:
         if not self.contract:
             return False
-        return bool(self.contract.functions.matches(block.index, bytes.fromhex(block.hash)).call())
+        call = self.contract.functions.matches(block.index, bytes.fromhex(block.hash))
+        return bool(call.call(block_identifier=block_identifier) if block_identifier
+                    else call.call())
+
+    def latest_index(self, block_identifier=None) -> int:
+        call = self.contract.functions.latestIndex()
+        return int(call.call(block_identifier=block_identifier) if block_identifier else call.call())
+
+    def finalized_block(self) -> int:
+        """The height both sides of a quorum can agree on. Falls back to the head
+        where a node does not serve the finalized tag."""
+        try:
+            return int(self.w3.eth.get_block("finalized")["number"])
+        except Exception:  # noqa: BLE001
+            return int(self.w3.eth.block_number)
 
     def record(self, index: int) -> dict:
         h, at, by = self.contract.functions.blocks(index).call()
@@ -207,7 +226,8 @@ class BitcoinWitness:
         return shutil.which("ots") is not None
 
     def _digest_file(self, block: Block) -> Path:
-        p = self.ledger.blocks_dir / f"{block.index:06d}.hash"
+        self.ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+        p = self.ledger.proof_path(block.index, "hash")
         p.write_bytes(bytes.fromhex(block.hash))
         return p
 
@@ -215,15 +235,15 @@ class BitcoinWitness:
         """Creates <index>.hash.ots (pending until upgraded)."""
         p = self._digest_file(block)
         subprocess.run(["ots", "stamp", str(p)], check=True)
-        return p.with_suffix(".hash.ots")
+        return self.ledger.proof_path(block.index, "hash.ots")
 
     def upgrade(self, block: Block) -> bool:
-        ots = self.ledger.blocks_dir / f"{block.index:06d}.hash.ots"
+        ots = self.ledger.proof_path(block.index, "hash.ots")
         r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
         return r.returncode == 0
 
     def verify(self, block: Block) -> tuple[bool, str]:
-        ots = self.ledger.blocks_dir / f"{block.index:06d}.hash.ots"
+        ots = self.ledger.proof_path(block.index, "hash.ots")
         if not ots.exists():
             return False, "no .ots proof"
         r = subprocess.run(["ots", "verify", str(ots)], capture_output=True, text=True)
@@ -251,12 +271,84 @@ def verify_all(ledger: Ledger, base: BaseWitness | None = None, bitcoin: Bitcoin
 
 
 def write_base_receipt(ledger: Ledger, block: Block, tx_hash: str, contract_address: str, chain_id: int, rcpt=None) -> Path:
-    """Proof file beside the block: which tx on which contract anchored which hash,
-    plus what it cost. Numbers and hashes only."""
-    p = ledger.blocks_dir / f"{block.index:06d}.base.json"
+    """Proof beside the block, in proofs/: which tx on which contract anchored which
+    hash, plus what it cost. Numbers and hashes only."""
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    p = ledger.proof_path(block.index, "base.json")
     d = {"index": block.index, "hash": block.hash, "tx": tx_hash, "contract": contract_address, "chainId": chain_id}
     if rcpt is not None:
         d["baseBlock"] = int(rcpt["blockNumber"])
         d.update(receipt_cost(rcpt))
     p.write_text(json.dumps(d, indent=2) + "\n")
     return p
+
+
+class QuorumBase:
+    """Several independent readers of the same contract.
+
+    One RPC is one party's word. Requiring every endpoint to answer makes a
+    verifier that fails whenever a provider is down; requiring none makes a
+    verifier that believes whoever answers first. So: a majority must answer,
+    at a block height they all have, and they must agree. Disagreement is never
+    a success ~ it is the loudest possible signal that something is wrong.
+    """
+
+    def __init__(self, readers, quorum: int | None = None):
+        if not readers:
+            raise QuorumError("no RPC endpoints given")
+        self.readers = list(readers)
+        self.quorum = quorum or (len(self.readers) // 2 + 1)
+
+    def _gather(self, fn):
+        answers, errors = [], []
+        for r in self.readers:
+            try:
+                answers.append(fn(r))
+            except Exception as e:  # noqa: BLE001 - an endpoint that cannot answer does not vote
+                errors.append(repr(e))
+        if len(answers) < self.quorum:
+            raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
+                              f"{self.quorum} needed. {'; '.join(errors)}")
+        distinct = {repr(a) for a in answers}
+        if len(distinct) > 1:
+            raise QuorumError(f"endpoints disagree: {sorted(distinct)}")
+        return answers[0]
+
+    def common_block(self) -> int:
+        heights = []
+        for r in self.readers:
+            try:
+                heights.append(int(r.finalized_block()))
+            except Exception:  # noqa: BLE001
+                pass
+        if len(heights) < self.quorum:
+            raise QuorumError("too few endpoints reported a finalized block")
+        return min(heights)
+
+    # ---- the read interface the verifier uses ----
+    @property
+    def address(self):
+        return getattr(self.readers[0], "address", None)
+
+    def latest_index(self) -> int:
+        at = self._safe_common()
+        return self._gather(lambda r: r.latest_index(at))
+
+    def matches(self, block) -> bool:
+        at = self._safe_common()
+        return self._gather(lambda r: r.matches(block, at))
+
+    def genesis_hash(self):
+        return self._gather(lambda r: r.genesis_hash())
+
+    def owner(self):
+        return self._gather(lambda r: r.owner())
+
+    def record(self, index: int) -> dict:
+        return self._gather(lambda r: r.record(index))
+
+    def _safe_common(self):
+        try:
+            return self.common_block()
+        except QuorumError:
+            return None

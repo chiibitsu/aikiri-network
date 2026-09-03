@@ -1,89 +1,42 @@
 name: nightly
-# Manila midnight (16:00 UTC). The ritual: upgrade yesterday's Bitcoin proofs, seal
-# tonight's decision journal (hash only), write the block, anchor on Base, stamp on
-# Bitcoin, commit. Needs AIKIRI_GARDEN_TOKEN (read access to chiibitsu/aikiri-garden),
-# AIKIRI_VALIDATOR_KEY and BASE_PRIVATE_KEY as repository secrets. The vault is checked
-# out outside this repo and never committed here.
+# No longer writes anything. Blocks are written only when Chii approves a request
+# on one of her devices, so there is nothing for a schedule to sign. What is left
+# is worth doing nightly: fetch completed Bitcoin proofs, re-verify the whole
+# chain against Base, and say plainly which of the four states it is in.
 on:
   schedule:
     - cron: "0 16 * * *"
+  push:
+    branches: [main]
+    paths: [".github/workflows/nightly.yml"]
   workflow_dispatch:
 permissions:
   contents: write
 concurrency: ledger-write
-env:
-  JOURNAL: 03_human/journal/decision-journal.md
 jobs:
-  nightly:
+  witness:
     runs-on: ubuntu-latest
+    environment: ledger-readonly
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.11"
-      - run: pip install -e ".[bitcoin]"
-      - name: check out the vault (outside the repo)
-        uses: actions/checkout@v4
-        with:
-          repository: chiibitsu/aikiri-garden
-          token: ${{ secrets.AIKIRI_GARDEN_TOKEN }}
-          path: ../aikiri-garden
-          sparse-checkout: ${{ env.JOURNAL }}
-          sparse-checkout-cone-mode: false
+      - name: install, pinned by hash
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip install --no-deps -e .
+          pip install --no-deps opentimestamps-client opentimestamps
       - name: upgrade pending Bitcoin proofs
         run: aikiri-ledger upgrade || true
-      - name: seal the journal (hash only)
+      - name: commit any proof that completed
         run: |
-          test -f "../aikiri-garden/$JOURNAL" || { echo "journal not found in vault"; exit 1; }
-          aikiri-ledger seal "../aikiri-garden/$JOURNAL" --kind journal --ref "$JOURNAL"
-          echo "VAULT_SHA=$(git -C ../aikiri-garden rev-parse HEAD)" >> "$GITHUB_ENV"
-      - name: block
-        env:
-          AIKIRI_VALIDATOR_KEY: ${{ secrets.AIKIRI_VALIDATOR_KEY }}
-        run: |
-          test -n "$AIKIRI_VALIDATOR_KEY" || { echo "secret AIKIRI_VALIDATOR_KEY is not set"; exit 1; }
-          aikiri-ledger block --keyfile /nonexistent
-          echo "INDEX=$(cut -d' ' -f1 ledger/HEAD)" >> "$GITHUB_ENV"
-      - name: witness (Base anchor + OTS stamp)
-        env:
-          BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
-        run: |
-          test -n "$BASE_PRIVATE_KEY" || { echo "secret BASE_PRIVATE_KEY is not set"; exit 1; }
-          aikiri-ledger witness "$INDEX"
-      - name: price the anchor in USD
-        run: |
-          python - <<'PY'
-          import json, os, urllib.request
-          p = f"ledger/blocks/{int(os.environ['INDEX']):06d}.base.json"
-          d = json.load(open(p))
-          try:
-              r = json.load(urllib.request.urlopen("https://api.coinbase.com/v2/prices/ETH-USD/spot", timeout=20))
-              d["ethUsdAtAnchor"] = float(r["data"]["amount"])
-              d["feeUsd"] = round(d["totalWei"] / 1e18 * d["ethUsdAtAnchor"], 6)
-          except Exception as e:
-              d["ethUsdAtAnchor"] = None; d["feeUsd"] = None; print("price lookup failed:", e)
-          open(p, "w").write(json.dumps(d, indent=2) + "\n")
-          PY
-      - name: commit block and proofs
-        run: |
-          B=$(printf "%06d" "$INDEX")
-          HASH=$(python -c "import json;print(json.load(open('ledger/blocks/$B.json'))['hash'])")
-          ROOT=$(python -c "import json;print(json.load(open('ledger/blocks/$B.json'))['roots'][0]['sha256'])")
-          TX=$(python -c "import json;print(json.load(open('ledger/blocks/$B.base.json'))['tx'])")
-          USD=$(python -c "import json;print(json.load(open('ledger/blocks/$B.base.json')).get('feeUsd'))")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ledger/HEAD ledger/blocks
-          git rm -q --cached --ignore-unmatch ledger/queue.json
-          git commit --author="Angeline S. Viray <chii@chiibitsu.com>" -F- <<MSG
-          Block $INDEX
-
-          hash     $HASH
-          journal  $ROOT  ($JOURNAL @ $VAULT_SHA)
-          Base     tx $TX  (\$$USD)
-          OTS      pending; upgraded tomorrow night. Earlier proofs upgraded where complete.
-          MSG
-          git push origin HEAD:${GITHUB_REF_NAME}
-      - name: verify (chain, Base, Bitcoin)
-        run: |
-          for i in 1 2 3 4 5 6; do aikiri-ledger verify && exit 0; echo "retry $i"; sleep 10; done; exit 1
+          git add -A ledger/proofs
+          git diff --cached --quiet || {
+            git commit -m "Bitcoin proofs upgraded"
+            git push origin HEAD:main
+          }
+      - name: verify and report the state
+        run: aikiri-ledger verify --trust trust.json --require local | tee -a "$GITHUB_STEP_SUMMARY"
