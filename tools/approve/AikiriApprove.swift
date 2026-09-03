@@ -70,7 +70,6 @@ func createKey(device: String, strictBiometry: Bool) throws -> SecKey {
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
         kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
-        kSecUseDataProtectionKeychain as String: true,
         kSecPrivateKeyAttrs as String: [
             kSecAttrIsPermanent as String: true,
             kSecAttrApplicationTag as String: tag(for: device),
@@ -81,13 +80,11 @@ func createKey(device: String, strictBiometry: Bool) throws -> SecKey {
         let e = error!.takeRetainedValue()
         if "\(e)".contains("34018") {
             throw Fail("""
-                the keychain refused to store the key (-34018, missing entitlement).
-                The binary must be signed with a keychain access group before macOS
-                will keep a Secure Enclave key for it. Build it with:
-                    tools/approve/build.sh
-                and if ad-hoc signing is not enough, re-run that script with a real
-                identity:
-                    AIKIRI_SIGN_ID="Apple Development: ..." tools/approve/build.sh
+                the keychain refused to store the key (-34018).
+                The binary must carry a valid Apple code signature. Build it with
+                tools/approve/build.sh, which signs it, and check that
+                    security find-identity -v -p codesigning
+                reports a valid identity.
                 """)
         }
         throw Fail("the Secure Enclave refused to create a key: \(e)")
@@ -103,7 +100,6 @@ func loadKey(device: String, reason: String) throws -> SecKey {
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrApplicationTag as String: tag(for: device),
         kSecReturnRef as String: true,
-        kSecUseDataProtectionKeychain as String: true,
         kSecUseAuthenticationContext as String: context,
     ]
     var item: CFTypeRef?
