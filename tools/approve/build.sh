@@ -16,17 +16,24 @@ cd "$(dirname "$0")/../.."
 
 GROUP_SUFFIX="com.chiibitsu.aikiri"
 
+# Every lookup below ends in `|| true`. Without it, `set -e` plus a grep that
+# matches nothing exits the script silently, which looks exactly like the script
+# never running, and leaves a stale binary on disk to be killed later.
+ALL=$(security find-identity -v -p codesigning 2>/dev/null || true)
+echo "code signing identities on this Mac:"
+echo "${ALL:-  (none)}"
+echo
+
 IDENTITY="${AIKIRI_SIGN_ID:-}"
 if [ -z "$IDENTITY" ]; then
-    # Prefer an Apple-issued identity; fall back to any code signing identity,
-    # including a self-signed one made in Keychain Access.
-    IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-        | grep -E 'Apple Development|Developer ID Application' \
-        | head -1 | sed -E 's/.*"(.*)"/\1/')
+    # Prefer an Apple-issued identity; a self-signed one is a fallback.
+    IDENTITY=$(printf '%s\n' "$ALL" \
+        | grep -E 'Apple Development|Apple Distribution|Developer ID Application' \
+        | head -1 | sed -E 's/.*"(.*)"/\1/' || true)
 fi
 if [ -z "$IDENTITY" ]; then
-    IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-        | sed -nE 's/^ *[0-9]+\) [0-9A-F]+ "(.*)"$/\1/p' | head -1)
+    IDENTITY=$(printf '%s\n' "$ALL" \
+        | sed -nE 's/^ *[0-9]+\) [0-9A-F]+ "(.*)"$/\1/p' | head -1 || true)
 fi
 
 if [ -z "$IDENTITY" ]; then
@@ -52,7 +59,7 @@ fi
 # carry it as a prefix or the entitlement is ignored.
 TEAM=$(security find-certificate -c "$IDENTITY" -p 2>/dev/null \
     | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
-    | awk -F' = ' '/organizationalUnitName/ {print $2; exit}')
+    | awk -F' = ' '/organizationalUnitName/ {print $2; exit}' || true)
 
 if [ -z "$TEAM" ]; then
     # A self-signed certificate has no Team ID. Try the bare group; macOS may
@@ -82,11 +89,15 @@ cat > "$ENT" <<PLIST
 </plist>
 PLIST
 
+rm -f aikiri-approve   # a stale binary from a failed run must not be runnable
+
 swiftc -O -framework Security -framework LocalAuthentication \
     -o aikiri-approve tools/approve/AikiriApprove.swift
 
 codesign --force --options runtime --entitlements "$ENT" \
     --sign "$IDENTITY" aikiri-approve
+
+codesign -dv --entitlements - aikiri-approve 2>&1 | grep -E 'TeamIdentifier|keychain|Authority' || true
 
 echo "identity:      $IDENTITY"
 echo "access group:  ${GROUP}"
