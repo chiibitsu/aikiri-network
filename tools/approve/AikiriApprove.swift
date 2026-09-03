@@ -164,7 +164,7 @@ func argValue(_ name: String, _ args: [String]) -> String? {
 }
 
 func cmdEnroll(_ args: [String]) throws {
-    let device = argValue("--device", args) ?? die("enroll needs --device <name>")
+    guard let device = argValue("--device", args) else { die("enroll needs --device <name>") }
     let key = try createKey(device: device, strictBiometry: args.contains("--strict-biometry"))
     let pub = try publicKeyHex(key)
     print("device:  \(device)")
@@ -175,7 +175,7 @@ func cmdEnroll(_ args: [String]) throws {
 }
 
 func cmdPubkey(_ args: [String]) throws {
-    let device = argValue("--device", args) ?? die("pubkey needs --device <name>")
+    guard let device = argValue("--device", args) else { die("pubkey needs --device <name>") }
     let key = try loadKey(device: device, reason: "Read the Aikiri approval key")
     print(try publicKeyHex(key))
 }

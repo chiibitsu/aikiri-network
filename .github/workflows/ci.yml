@@ -22,3 +22,9 @@ jobs:
       - name: canonical bytes must be identical on every platform and version
         run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
       - run: python -m pytest -q
+      - name: the Secure Enclave signer must build
+        if: runner.os == 'macOS'
+        run: |
+          swiftc -O -framework Security -framework LocalAuthentication \
+            -o /tmp/aikiri-approve tools/approve/AikiriApprove.swift
+          /tmp/aikiri-approve | head -3
