@@ -21,7 +21,7 @@ Several of these were aspirations rather than facts in v1. What closed the gap i
 |---|---|---|
 | validator key | GitHub environment `ledger` | sign a block nobody approved: refused |
 | wallet key | GitHub environment `ledger` | anchor a hash nobody approved: refused |
-| approval key | Secure Enclave, Mac and iPhone | nothing on its own |
+| approval key | Secure Enclave, Mac (a second device is still to be enrolled) | nothing on its own |
 
 A block needs all three. Holding the two automated keys is not consent, because the witnesses stamp whatever they are given: they prove time and order, never approval. See `docs/approval.md`.
 
@@ -36,7 +36,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin via `ots`
 - `contracts/AikiriLedger.sol` ~ owner-only anchor, sequential, no re-anchoring
 - `ledger/` ~ `blocks/`, `proofs/`, `requests/`, `HEAD`, `config.json`, `deploy.json`
-- `tools/approve/` ~ the Secure Enclave signer (Swift, macOS and iOS)
+- `tools/approve/` ~ the Secure Enclave signer (Swift, macOS; the iOS half is not built yet, see `docs/setup.md` §7)
 - `tests/vectors/` ~ golden bytes and hashes, checked on Linux and macOS across Python 3.11–3.13
 
 ## Block (v2, from block 2)

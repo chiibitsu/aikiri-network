@@ -81,16 +81,21 @@ quietly regress:
 The public repository gets no credential to the vault. Nothing in a runner can
 reach private content, even if the runner is fully compromised.
 
-The flow runs the other way, from her machine:
+The flow runs the other way, from her machine. Run it from the **aikiri-network**
+checkout, not the vault: building a request needs the chain's head (its index and
+prev_hash), which lives in `ledger/`. The vault path is just an argument, and only
+its hash is read.
 
-    # in the vault checkout, on her Mac
-    aikiri-ledger request 03_human/journal/decision-journal.md --kind journal --out request.json
-    aikiri-approve sign request.json
-    # then push request.json to aikiri-network:ledger/requests/ on main
+    cd ~/aikiri-network
+    aikiri-ledger request ../aikiri-garden/03_human/journal/decision-journal.md \
+        --kind journal --out ledger/requests/next.json
+    aikiri-approve sign ledger/requests/next.json
+    git add ledger/requests/next.json && git commit -m "Request block N" && git push
 
-Only the hash travels. If a token is ever wanted for step three, it belongs in
-the vault, scoped to this repository, and it can only ever add a request that
-still needs her approval to become a block.
+That push is what starts the block workflow. Only the hash travels; the journal
+itself never leaves the vault. If a token is ever wanted so the vault can push the
+request itself, it belongs in the vault, scoped to this repository, and it can only
+ever add a request that still needs her approval to become a block.
 
 ## 6. Publish the trust anchor
 
@@ -99,10 +104,13 @@ reads its expectations from the thing it is checking proves nothing, and the cod
 says so out loud — a trust file loaded from inside this worktree is labelled
 `repo` and caps verification at `VALID LOCALLY`.
 
-    aikiri-approve enroll --device mac
-    aikiri-approve enroll --device iphone     # on the phone
+    # on the Mac
+    swiftc -O -framework Security -framework LocalAuthentication \
+        -o aikiri-approve tools/approve/AikiriApprove.swift
+    ./aikiri-approve enroll --device mac
     aikiri-ledger enroll --device mac --pubkey <hex> --out trust.json
-    aikiri-ledger enroll --device iphone --pubkey <hex> --out trust.json
+
+**The iPhone cannot be enrolled yet.** See §7.
 
 Then publish that file somewhere separate from this repository — the vault, a
 gist, the artifact, her site — and verify against the published copy:
@@ -111,3 +119,30 @@ gist, the artifact, her site — and verify against the published copy:
 
 Until the devices are enrolled, `aikiri-ledger block` refuses to run. That is the
 gate working, not a bug.
+
+## 7. The iPhone is not done
+
+Chii's ruling was two devices registered from the start, so that losing one does
+not stop the chain. What is shipped is a macOS command-line signer. There is no
+iOS app, so today only the Mac can hold an approval key, and the Mac is a single
+point of failure: lose it and the chain freezes.
+
+The verifier already handles two devices; nothing in the format or the trust
+anchor needs to change. What is missing is a way to create and use an enclave key
+on the phone. Three routes, in order of how much they cost:
+
+1. **A second Mac or MacBook.** Enroll it as `mac2` with the tool that already
+   exists. No new code, works today. It is not the phone, but it is a genuinely
+   separate device with a separate failure mode, which is the property that
+   matters.
+2. **A small iOS app**, built in Xcode and run on the phone. This is the ruling as
+   written. Two things need checking before relying on it, and neither can be
+   checked from here: whether a free personal provisioning profile is enough
+   (those apps expire after seven days and must be re-run from Xcode), and whether
+   deleting or re-installing the app destroys the enclave key with it. If it does,
+   the phone key is fragile in exactly the way a recovery factor must not be.
+3. **Wait**, and run on the Mac alone until rotation exists. Honest, and the worst
+   of the three: it is the single point of failure described above.
+
+Route 1 today, route 2 when there is time to verify it properly, is the
+recommendation. Either way this is Chii's call, not an implementation detail.
