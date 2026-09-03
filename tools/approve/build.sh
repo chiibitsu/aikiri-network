@@ -57,9 +57,12 @@ fi
 
 # The Team ID lives in the certificate's OU field, and the access group must
 # carry it as a prefix or the entitlement is ignored.
-TEAM=$(security find-certificate -c "$IDENTITY" -p 2>/dev/null \
+TEAM="${AIKIRI_TEAM_ID:-}"
+[ -n "$TEAM" ] || TEAM=$(security find-certificate -c "$IDENTITY" -p 2>/dev/null \
     | openssl x509 -noout -subject -nameopt multiline 2>/dev/null \
     | awk -F' = ' '/organizationalUnitName/ {print $2; exit}' || true)
+# An Apple Development certificate carries the Team ID in its OU. If that read
+# fails, pass it yourself: AIKIRI_TEAM_ID=XXXXXXXXXX tools/approve/build.sh
 
 if [ -z "$TEAM" ]; then
     # A self-signed certificate has no Team ID. Try the bare group; macOS may
