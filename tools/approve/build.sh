@@ -97,8 +97,27 @@ rm -f aikiri-approve   # a stale binary from a failed run must not be runnable
 swiftc -O -framework Security -framework LocalAuthentication \
     -o aikiri-approve tools/approve/AikiriApprove.swift
 
-codesign --force --options runtime --entitlements "$ENT" \
-    --sign "$IDENTITY" aikiri-approve
+# If codesign fails, the compiled binary must not survive: an unsigned one runs
+# happily and then fails at enroll with -34018, which looks like an enclave
+# problem rather than a signing problem.
+if ! codesign --force --options runtime --entitlements "$ENT" \
+        --sign "$IDENTITY" aikiri-approve; then
+    rm -f aikiri-approve
+    cat >&2 <<'MSG'
+
+codesign failed, so no binary was produced.
+
+"unable to build chain to self-signed root" means the Apple intermediate
+certificate is missing, and your certificate cannot be traced to Apple's root.
+Install it, then run this script again:
+
+    cd ~/Downloads && curl -sSLO https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+    open AppleWWDRCAG3.cer
+
+    security find-identity -v -p codesigning     # should now say 1 valid identity
+MSG
+    exit 1
+fi
 
 codesign -dv --entitlements - aikiri-approve 2>&1 | grep -E 'TeamIdentifier|keychain|Authority' || true
 
