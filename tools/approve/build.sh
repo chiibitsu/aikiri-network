@@ -18,9 +18,15 @@ GROUP_SUFFIX="com.chiibitsu.aikiri"
 
 IDENTITY="${AIKIRI_SIGN_ID:-}"
 if [ -z "$IDENTITY" ]; then
+    # Prefer an Apple-issued identity; fall back to any code signing identity,
+    # including a self-signed one made in Keychain Access.
     IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
         | grep -E 'Apple Development|Developer ID Application' \
         | head -1 | sed -E 's/.*"(.*)"/\1/')
+fi
+if [ -z "$IDENTITY" ]; then
+    IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -nE 's/^ *[0-9]+\) [0-9A-F]+ "(.*)"$/\1/p' | head -1)
 fi
 
 if [ -z "$IDENTITY" ]; then
@@ -49,8 +55,16 @@ TEAM=$(security find-certificate -c "$IDENTITY" -p 2>/dev/null \
     | awk -F' = ' '/organizationalUnitName/ {print $2; exit}')
 
 if [ -z "$TEAM" ]; then
-    echo "could not read the Team ID out of '$IDENTITY'" >&2
-    exit 1
+    # A self-signed certificate has no Team ID. Try the bare group; macOS may
+    # refuse the entitlement, which shows up as -34018 at enroll time. If it
+    # does, an Apple-issued identity is the only way, and Xcode mints one free.
+    echo "note: '$IDENTITY' carries no Team ID, so it is not Apple-issued." >&2
+    echo "      Trying an unprefixed access group. If enroll reports -34018," >&2
+    echo "      this certificate cannot carry the entitlement and you need an" >&2
+    echo "      Apple Development identity (Xcode, Settings -> Accounts)." >&2
+    GROUP="$GROUP_SUFFIX"
+else
+    GROUP="${TEAM}.${GROUP_SUFFIX}"
 fi
 
 ENT=$(mktemp -t aikiri-entitlements)
@@ -62,7 +76,7 @@ cat > "$ENT" <<PLIST
 <dict>
   <key>keychain-access-groups</key>
   <array>
-    <string>${TEAM}.${GROUP_SUFFIX}</string>
+    <string>${GROUP}</string>
   </array>
 </dict>
 </plist>
@@ -75,7 +89,6 @@ codesign --force --options runtime --entitlements "$ENT" \
     --sign "$IDENTITY" aikiri-approve
 
 echo "identity:      $IDENTITY"
-echo "team:          $TEAM"
-echo "access group:  ${TEAM}.${GROUP_SUFFIX}"
+echo "access group:  ${GROUP}"
 echo
 echo "next:  ./aikiri-approve enroll --device mac"
