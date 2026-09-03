@@ -1,6 +1,8 @@
 """aikiri-ledger.
 
   keygen                    create the validator key, outside any repository
+  approve-keygen            create the approval key, encrypted with a passphrase
+  approve <request>         approve a sealed request, passphrase required
   init                      write block 0
   enroll                    register an approval device in a trust file
   request <path>            vault side: the payload a device is asked to approve
@@ -32,6 +34,7 @@ from .chain import (Ledger, VALIDATOR_KEY_ENV, key_from_env, load_key, new_key, 
                     sha256_file)
 from .errors import SchemaError, TrustError
 from .request import Request, new_nonce, parse_roots
+from . import softkey
 from .trust import Trust
 from .verify import State, verify_all
 from .witness import (BASE_KEY_ENV, BaseWitness, BitcoinWitness, QuorumBase, base_key_from_env,
@@ -127,6 +130,13 @@ def main(argv=None):
     ap.add_argument("--trust", default=None, help="path to an external trust anchor")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    ak = sub.add_parser("approve-keygen")
+    ak.add_argument("--device", default="mac")
+    ak.add_argument("--keyfile", default=None)
+    ap_ = sub.add_parser("approve"); ap_.add_argument("path")
+    ap_.add_argument("--device", default="mac"); ap_.add_argument("--keyfile", default=None)
+    ap_.add_argument("--out", default=None)
+
     k = sub.add_parser("keygen"); k.add_argument("--keyfile", default=DEFAULT_KEYFILE)
     k.add_argument("--show", action="store_true", help="print the seed once, to paste into a secret")
     sub.add_parser("init").add_argument("--keyfile", default=DEFAULT_KEYFILE)
@@ -171,6 +181,57 @@ def main(argv=None):
         if a.show:
             print(f"{VALIDATOR_KEY_ENV}={sk.encode().hex()}")
             print("that line is now in your shell history; clear it when you are done")
+        return 0
+
+    if a.cmd == "approve-keygen":
+        import getpass
+        kf = Path(a.keyfile) if a.keyfile else softkey.default_path(a.device)
+        if _in_worktree(kf):
+            raise SystemExit(f"refusing to write an approval key inside a git worktree ({kf})")
+        if kf.exists():
+            raise SystemExit(f"{kf} already exists; refusing to overwrite an approval key")
+        pw = getpass.getpass("passphrase for the approval key: ")
+        if pw != getpass.getpass("again: "):
+            raise SystemExit("the two passphrases do not match")
+        if len(pw) < 12:
+            raise SystemExit("use at least 12 characters; this passphrase is the only thing "
+                             "between the key file and someone who copies it")
+        pub = softkey.create(kf, a.device, pw)
+        print(f"approval key written to {kf} (never commit this, and back it up: "
+              f"lose it and no further block can be approved)")
+        print(f"device:  {a.device}")
+        print(f"pubkey:  {pub}")
+        print()
+        print("Register it, then publish the trust file outside this repository:")
+        print(f"  aikiri-ledger enroll --device {a.device} --pubkey {pub} --out trust.json")
+        return 0
+
+    if a.cmd == "approve":
+        import getpass
+        kf = Path(a.keyfile) if a.keyfile else softkey.default_path(a.device)
+        if not kf.exists():
+            raise SystemExit(f"no approval key at {kf}; run `aikiri-ledger approve-keygen`")
+        payload = loads_strict(Path(a.path).read_text())
+        try:
+            roots = parse_roots(payload["roots"], "roots")
+            index, prev_hash = payload["index"], payload["prev_hash"]
+            nonce, validator = payload["nonce"], payload["validator"]
+        except (KeyError, SchemaError) as e:
+            raise SystemExit(f"{a.path} is not a request payload: {e}")
+
+        # Show her what she is approving, before the passphrase.
+        print(f"Approve block {index} of the Aikiri Network")
+        print(f"  previous   {prev_hash}")
+        print(f"  {roots[0]['kind']:<10} {roots[0]['sha256']}")
+        print(f"  nonce      {nonce}")
+        print(f"  validator  {validator}")
+        print()
+        approver = softkey.load(kf, getpass.getpass("passphrase: "))
+        req = Request.build(index=index, prev_hash=prev_hash, roots=roots, nonce=nonce,
+                            validator=validator, approver=approver)
+        out = Path(a.out or a.path)
+        out.write_text(req.to_json())
+        print(f"approved by {approver.device}; sealed request written to {out}")
         return 0
 
     if a.cmd == "init":

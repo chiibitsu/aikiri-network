@@ -97,55 +97,65 @@ itself never leaves the vault. If a token is ever wanted so the vault can push t
 request itself, it belongs in the vault, scoped to this repository, and it can only
 ever add a request that still needs her approval to become a block.
 
-## 6. Publish the trust anchor
+## 6. The approval key, and publishing the trust anchor
+
+Create the approval key. It is a P-256 key in a passphrase-encrypted file outside
+the repository:
+
+    aikiri-ledger approve-keygen --device mac
+
+It asks for a passphrase twice, writes `~/.aikiri/approval-mac.key`, and prints
+the public key and the command to register it:
+
+    aikiri-ledger enroll --device mac --pubkey 04... --out trust.json
+
+**Back that key file up, and remember the passphrase.** Lose either and no
+further block can ever be approved. Rotation does not exist yet, so there is no
+way to add a replacement without a surviving approval key.
 
 `trust.json` in this repository is a template, not an anchor: a verifier that
 reads its expectations from the thing it is checking proves nothing, and the code
 says so out loud — a trust file loaded from inside this worktree is labelled
-`repo` and caps verification at `VALID LOCALLY`.
-
-    # on the Mac. The build script signs the binary, which is not optional:
-    # macOS refuses to keep a Secure Enclave key for a process with no
-    # keychain access group, and only honours that entitlement when the group
-    # carries a real Team ID. An unsigned binary fails with -34018; an ad-hoc
-    # signed one is killed at launch. A free Apple ID supplies the identity.
-    tools/approve/build.sh
-    ./aikiri-approve enroll --device mac
-    aikiri-ledger enroll --device mac --pubkey <the hex it prints> --out trust.json
-
-**The iPhone cannot be enrolled yet.** See §7.
-
-Then publish that file somewhere separate from this repository — the vault, a
-gist, the artifact, her site — and verify against the published copy:
+`repo` and caps verification at `VALID LOCALLY`. Publish a copy somewhere
+separate — the vault, a gist, the artifact, her site — and verify against that:
 
     aikiri-ledger verify --trust ~/aikiri-trust.json --rpc <a> --rpc <b> --rpc <c>
 
-Until the devices are enrolled, `aikiri-ledger block` refuses to run. That is the
+Until a device is enrolled, `aikiri-ledger block` refuses to run. That is the
 gate working, not a bug.
 
-## 7. The iPhone is not done
+## 7. Why the key is in a file and not the Secure Enclave
 
-Chii's ruling was two devices registered from the start, so that losing one does
-not stop the chain. What is shipped is a macOS command-line signer. There is no
-iOS app, so today only the Mac can hold an approval key, and the Mac is a single
-point of failure: lose it and the chain freezes.
+The ruling was an enclave key on the Mac and the iPhone. On macOS that is out of
+reach from a command-line tool, and the reason is structural rather than a bug to
+work around:
 
-The verifier already handles two devices; nothing in the format or the trust
-anchor needs to change. What is missing is a way to create and use an enclave key
-on the phone. Three routes, in order of how much they cost:
+  unsigned binary                          -34018, the keychain will not store it
+  ad-hoc signed with the entitlement       killed at launch by the kernel
+  Apple Development signed, no entitlement -34018 again
 
-1. **A second Mac or MacBook.** Enroll it as `mac2` with the tool that already
-   exists. No new code, works today. It is not the phone, but it is a genuinely
-   separate device with a separate failure mode, which is the property that
-   matters.
-2. **A small iOS app**, built in Xcode and run on the phone. This is the ruling as
-   written. Two things need checking before relying on it, and neither can be
-   checked from here: whether a free personal provisioning profile is enough
-   (those apps expire after seven days and must be re-run from Xcode), and whether
-   deleting or re-installing the app destroys the enclave key with it. If it does,
-   the phone key is fragile in exactly the way a recovery factor must not be.
-3. **Wait**, and run on the Mac alone until rotation exists. Honest, and the worst
-   of the three: it is the single point of failure described above.
+The keychain requires a `keychain-access-groups` entitlement to keep a Secure
+Enclave key. That entitlement is restricted: macOS honours it only for a bundle
+carrying a provisioning profile, and only an app bundle can carry one. A `swiftc`
+binary cannot become one. `tools/approve/AikiriApprove.swift` is kept as the
+starting point for that app.
 
-Route 1 today, route 2 when there is time to verify it properly, is the
-recommendation. Either way this is Chii's call, not an implementation detail.
+What the file-held key still delivers, which is what was actually ruled on:
+holding the validator key and the wallet key is not consent. Both of those live
+in a CI runner; this key does not, and it cannot be used without a passphrase
+typed by hand. A forged block still carries no valid approval and the verifier
+still refuses it.
+
+What it does not deliver, and the enclave would: resistance to malware already
+running on the Mac. A keylogger plus a copy of the file is enough. That is a
+smaller threat than a compromised runner, and it is the honest limit.
+
+The key is P-256, exactly like an enclave key would be, and the trust anchor
+holds a list of devices. So the upgrade path costs nothing: when an app exists,
+enroll it as a second device and publish an updated trust file. Blocks approved
+by the file-held key stay valid, correctly, because they were.
+
+Two devices was the ruling and one device is what exists, so the Mac is currently
+a single point of failure. The cheapest genuine second device is another machine
+with its own `approve-keygen` key and its own passphrase; the app is the better
+one. Chii's call.

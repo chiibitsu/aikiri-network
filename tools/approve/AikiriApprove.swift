@@ -1,4 +1,19 @@
-// aikiri-approve ~ the human factor.
+// aikiri-approve ~ Secure Enclave approval. NOT USABLE AS A COMMAND-LINE TOOL.
+//
+// This compiles and signs, and then macOS refuses to store the key:
+//   unsigned                        -> -34018 errSecMissingEntitlement
+//   ad-hoc signed with entitlements -> the kernel kills the process at launch
+//   Apple Development signed, no entitlement, login keychain -> -34018
+//
+// The keychain will not keep a Secure Enclave key for a process without a
+// `keychain-access-groups` entitlement; that entitlement is restricted and is
+// only honoured for a bundle carrying a provisioning profile; and only an app
+// bundle can carry one. A `swiftc` binary cannot. Finishing this means an Xcode
+// app target, which is docs/setup.md §7 route 2.
+//
+// The working approval signer today is `aikiri-ledger approve`, a P-256 key held
+// in a passphrase-encrypted file (aikiri_ledger/softkey.py). It produces the same
+// key and signature shapes, so this file stays as the starting point for the app.
 //
 // A P-256 key is created inside the Secure Enclave and never leaves it. There is
 // no export, no backup, no copy in a password manager: the private key is not

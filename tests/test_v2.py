@@ -583,3 +583,98 @@ def test_nightly_workflow_is_gone_and_replaced_by_request_driven_block():
     text = (wf / "block.yml").read_text()
     assert "ledger/requests/" in text, "blocks are driven by a sealed request pushed from the vault"
     assert "queue.json" not in text
+
+
+# ------------------------------------------------- approval key held in a file ----
+def test_softkey_roundtrip_and_wrong_passphrase(tmp_path):
+    from aikiri_ledger import softkey
+    kf = tmp_path / "approval-mac.key"
+    pub = softkey.create(kf, "mac", "correct horse battery staple")
+    assert pub.startswith("04") and len(pub) == 130
+    a = softkey.load(kf, "correct horse battery staple")
+    assert a.public_key_hex == pub and a.device == "mac"
+    with pytest.raises(softkey.BadPassphrase):
+        softkey.load(kf, "wrong passphrase entirely")
+    with pytest.raises(FileExistsError):
+        softkey.create(kf, "mac", "another one")
+
+
+def test_softkey_file_holds_no_usable_key_material(tmp_path):
+    from aikiri_ledger import softkey
+    from cryptography.hazmat.primitives import serialization
+    kf = tmp_path / "k.key"
+    softkey.create(kf, "mac", "correct horse battery staple")
+    text = kf.read_text()
+    sk = softkey.load(kf, "correct horse battery staple")._sk
+    raw = sk.private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8,
+                           serialization.NoEncryption())
+    assert raw.hex() not in text
+    assert oct(kf.stat().st_mode & 0o777) == "0o600"
+
+
+def test_softkey_file_is_tamper_evident(tmp_path):
+    """Swapping the recorded public key must not silently sign with another key."""
+    from aikiri_ledger import softkey
+    kf = tmp_path / "k.key"
+    softkey.create(kf, "mac", "correct horse battery staple")
+    d = json.loads(kf.read_text())
+    d["pubkey"] = "04" + "cd" * 64
+    kf.write_text(json.dumps(d))
+    with pytest.raises(softkey.BadPassphrase):
+        softkey.load(kf, "correct horse battery staple")
+
+    d = json.loads(kf.read_text())
+    d["device"] = "iphone"
+    kf.write_text(json.dumps(d))
+    with pytest.raises(softkey.BadPassphrase):
+        softkey.load(kf, "correct horse battery staple")
+
+
+def test_softkey_signs_a_block_the_verifier_accepts(tmp_path, ledger, sk, trust):
+    """A file-held key and an enclave key are the same thing to the verifier."""
+    from aikiri_ledger import softkey
+    kf = tmp_path / "k.key"
+    pub = softkey.create(kf, "mac", "correct horse battery staple")
+    approver = softkey.load(kf, "correct horse battery staple")
+    trust.approval_keys = [ApprovalKey("mac", pub)]
+
+    head = ledger.head()
+    r = Request.build(index=head.index + 1, prev_hash=head.hash,
+                      roots=[{"kind": "journal", "sha256": JOURNAL_SHA}], nonce="ab" * 32,
+                      validator=sk.verify_key.encode().hex(), approver=approver)
+    ledger.append_from_request(r, sk, now=datetime(2026, 9, 3, tzinfo=MANILA),
+                               registered=trust.approval_keys)
+    state, report = verify_chain(ledger, trust)
+    assert state == State.VALID_LOCALLY, report
+
+    trust.approval_keys = [ApprovalKey("mac", SoftwareApprover.from_seed(b"\x09" * 32,
+                                                                        "mac").public_key_hex)]
+    state, report = verify_chain(ledger, trust)
+    assert state == State.INVALID and any("approval" in x for x in report)
+
+
+def test_cli_approve_keygen_refuses_the_repository(monkeypatch, tmp_path):
+    from aikiri_ledger import cli
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)
+    with pytest.raises(SystemExit):
+        cli.main(["approve-keygen", "--keyfile", "ledger/approval.key"])
+    assert not Path("ledger/approval.key").exists()
+
+
+def test_cli_approve_seals_a_request(monkeypatch, tmp_path, ledger, sk, trust):
+    from aikiri_ledger import cli, softkey
+    kf = tmp_path / "k.key"
+    pub = softkey.create(kf, "mac", "correct horse battery staple")
+    head = ledger.head()
+    payload = Request.unsigned(index=head.index + 1, prev_hash=head.hash,
+                               roots=[{"kind": "journal", "sha256": JOURNAL_SHA}],
+                               validator=sk.verify_key.encode().hex())
+    req_path = tmp_path / "next.json"
+    req_path.write_text(json.dumps(payload, indent=2))
+    monkeypatch.setattr("getpass.getpass", lambda *_: "correct horse battery staple")
+    assert cli.main(["--ledger", str(ledger.root), "approve", str(req_path),
+                     "--keyfile", str(kf)]) == 0
+    sealed = Request.parse(req_path.read_text())
+    ok, why = sealed.verify([ApprovalKey("mac", pub)])
+    assert ok, why
+    assert sealed.nonce == payload["nonce"] and sealed.index == payload["index"]
