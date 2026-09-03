@@ -104,11 +104,14 @@ reads its expectations from the thing it is checking proves nothing, and the cod
 says so out loud — a trust file loaded from inside this worktree is labelled
 `repo` and caps verification at `VALID LOCALLY`.
 
-    # on the Mac
-    swiftc -O -framework Security -framework LocalAuthentication \
-        -o aikiri-approve tools/approve/AikiriApprove.swift
+    # on the Mac. The build script signs the binary, which is not optional:
+    # macOS refuses to keep a Secure Enclave key for a process with no
+    # keychain access group, and only honours that entitlement when the group
+    # carries a real Team ID. An unsigned binary fails with -34018; an ad-hoc
+    # signed one is killed at launch. A free Apple ID supplies the identity.
+    tools/approve/build.sh
     ./aikiri-approve enroll --device mac
-    aikiri-ledger enroll --device mac --pubkey <hex> --out trust.json
+    aikiri-ledger enroll --device mac --pubkey <the hex it prints> --out trust.json
 
 **The iPhone cannot be enrolled yet.** See §7.
 

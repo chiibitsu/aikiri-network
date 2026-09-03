@@ -22,10 +22,12 @@ jobs:
       - name: canonical bytes must be identical on every platform and version
         run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
       - run: python -m pytest -q
-      - name: the Secure Enclave signer must build and sign
+      - name: the Secure Enclave signer must compile
         if: runner.os == 'macOS'
         run: |
-          tools/approve/build.sh
-          ./aikiri-approve | head -3
-        # A runner is a VM with no Secure Enclave, so this proves the tool
-        # compiles and signs. It can never prove a key can be created.
+          swiftc -O -framework Security -framework LocalAuthentication \
+            -o /tmp/aikiri-approve tools/approve/AikiriApprove.swift
+          /tmp/aikiri-approve | head -3
+        # Compilation only. A runner has no signing identity and no Secure
+        # Enclave, so neither signing nor key creation can be tested here;
+        # both are exercised on a real Mac by tools/approve/build.sh.
