@@ -956,3 +956,71 @@ def test_finalized_block_zero_is_a_height_not_an_absence(ledger):
     bw.matches(ledger.read(0), block_identifier=0)
     bw.latest_index(block_identifier=0)
     assert seen == [0, 0], f"block 0 was dropped: {seen}"
+
+
+# ------------------------------------------------ codex findings, PR #2 ----
+
+def test_a_repo_trust_file_stays_repo_however_the_verifier_is_invoked(tmp_path, monkeypatch):
+    """Containment was decided by walking up from the process's working directory.
+    Run the verifier from anywhere else with absolute paths and the repo's own
+    trust file was relabelled external ~ which lifts the VALID LOCALLY ceiling and
+    lets a file the ledger's owner can rewrite certify the ledger as FULLY VERIFIED.
+    Where the verifier happens to be standing is not a security property."""
+    from aikiri_ledger.trust import REPO_DEFAULTS
+    worktree = tmp_path / "repo"
+    (worktree / ".git").mkdir(parents=True)
+    (worktree / "ledger").mkdir()
+    tf = worktree / "trust.json"
+    tf.write_text(json.dumps({"trust": REPO_DEFAULTS}))
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    t = Trust.load(tf, ledger_root=worktree / "ledger")
+    assert t.source == "repo", "a trust file beside the ledger it checks is not an anchor"
+    assert not t.is_external
+
+
+def test_a_trust_file_outside_the_ledgers_worktree_is_still_external(tmp_path, monkeypatch):
+    """The ceiling must not go the other way either: a genuine anchor kept
+    elsewhere stays external, including when the cwd happens to be the repo."""
+    from aikiri_ledger.trust import REPO_DEFAULTS
+    worktree = tmp_path / "repo"
+    (worktree / ".git").mkdir(parents=True)
+    (worktree / "ledger").mkdir()
+    tf = tmp_path / "anchor" / "trust.json"
+    tf.parent.mkdir()
+    tf.write_text(json.dumps({"trust": REPO_DEFAULTS}))
+    monkeypatch.chdir(worktree)
+    assert Trust.load(tf, ledger_root=worktree / "ledger").source == "external-unsigned"
+
+
+def test_the_block_workflow_supplies_the_enrolled_trust_file():
+    """`aikiri-ledger block` reads the registered devices from the trust file. With
+    no --trust it falls back to REPO_DEFAULTS, whose approval_keys list is empty, so
+    the workflow exits "no approval devices registered" for every sealed request ~
+    the one job this repository exists to run could never write a block."""
+    import re
+    root = Path(__file__).parent.parent
+    wf = (root / ".github" / "workflows" / "block.yml").read_text()
+    calls = [ln.strip() for ln in wf.splitlines() if "aikiri-ledger block" in ln]
+    assert calls, "no block invocation found in block.yml"
+    env_trust = re.search(r"AIKIRI_TRUST\s*:", wf)
+    for call in calls:
+        assert "--trust" in call or env_trust, f"no trust file reaches: {call}"
+
+
+def test_the_lock_carries_what_the_workflows_import():
+    """The workflows install requirements.lock and then `pip install --no-deps -e .`,
+    so anything in the lock is present and anything missing from it is not, whatever
+    pyproject declares. py-solc-x is imported by compile_contract, which reconcile
+    reaches on its first step."""
+    import re
+    root = Path(__file__).parent.parent
+    pyproject = (root / "pyproject.toml").read_text()
+    lock = (root / "requirements.lock").read_text().lower()
+    block = re.search(r"dependencies = \[(.*?)\]", pyproject, re.S).group(1)
+    needed = re.findall(r'"([A-Za-z0-9_.-]+)', block)
+    missing = [d for d in needed if re.sub(r"[-_.]+", "-", d.lower()) not in
+               re.sub(r"[-_.]+", "-", lock)]
+    assert not missing, f"installed by no workflow: {missing}"
