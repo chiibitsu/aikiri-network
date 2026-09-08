@@ -6,3 +6,9 @@ __pycache__/
 build/
 dist/
 ledger/blocks/*.tmp
+
+# the compiled approval signer, and anything else built locally
+/aikiri-approve
+*.entitlements
+.venv/
+venv/

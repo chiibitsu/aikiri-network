@@ -1,13 +1,11 @@
 name: deploy
-# Manual, once. Deploys contracts/AikiriLedger.sol to Base mainnet with the genesis hash,
-# signed locally with the BASE_PRIVATE_KEY secret. Sends exactly one transaction.
-# If the wallet already deployed a contract with this genesis hash, it is adopted and nothing is sent.
-# Commits ledger/config.json and ledger/deploy.json (no keys).
-# Two ways to run it: the Actions "Run workflow" button, or pushing a request file
-# at .github/requests/deploy (the run removes it). See genesis.yml for why.
+# Ran once. The contract is live at 0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e and
+# a second deploy is refused. Kept so the path is reviewable, and for the
+# multi-signer v2 contract when members arrive.
 on:
   push:
-    paths: [".github/requests/deploy"]
+    branches: [main]
+    paths: [".github/workflows/deploy.yml"]
   workflow_dispatch:
     inputs:
       rpc:
@@ -24,61 +22,44 @@ on:
         default: false
 permissions:
   contents: write
+concurrency: ledger-write
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment: ledger
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.11"
-      - run: pip install -e .
-      - name: preflight
+      - name: install, pinned by hash
         run: |
-          test -e ledger/blocks/000000.json || { echo "no genesis; run the genesis workflow first"; exit 1; }
-          aikiri-ledger verify
+          pip install --require-hashes -r requirements.lock
+          pip install --no-deps -e .
+      - name: pinned solc
+        run: |
+          mkdir -p ~/.solcx
+          curl -sSL -o ~/.solcx/solc-v0.8.26 \
+            https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
+          echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  $HOME/.solcx/solc-v0.8.26" \
+            | sha256sum -c -
+          chmod +x ~/.solcx/solc-v0.8.26
       - name: deploy
         env:
           BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
+          RPC: ${{ inputs.rpc }}
+          CHAIN_ID: ${{ inputs.chain_id }}
+          ADOPT_ONLY: ${{ inputs.adopt_only }}
         run: |
           test -n "$BASE_PRIVATE_KEY" || { echo "secret BASE_PRIVATE_KEY is not set"; exit 1; }
           FLAGS=""
-          if [ "${{ inputs.adopt_only }}" = "true" ] || grep -qs adopt-only .github/requests/deploy; then FLAGS="--adopt-only"; fi
-          aikiri-ledger deploy --rpc "${{ inputs.rpc || 'https://mainnet.base.org' }}" --chain-id "${{ inputs.chain_id || '8453' }}" $FLAGS
-      - name: price the gas in USD
+          [ "$ADOPT_ONLY" = "true" ] && FLAGS="--adopt-only"
+          aikiri-ledger deploy --rpc "$RPC" --chain-id "$CHAIN_ID" $FLAGS
+      - name: commit the deployment record
         run: |
-          python - <<'PY'
-          import json, urllib.request
-          d = json.load(open("ledger/deploy.json"))
-          try:
-              r = json.load(urllib.request.urlopen("https://api.coinbase.com/v2/prices/ETH-USD/spot", timeout=20))
-              eth_usd = float(r["data"]["amount"])
-              d["ethUsdAtDeploy"] = eth_usd
-              d["feeUsd"] = round(d["totalWei"] / 1e18 * eth_usd, 6)
-          except Exception as e:
-              d["ethUsdAtDeploy"] = None; d["feeUsd"] = None; print("price lookup failed:", e)
-          json.dump(d, open("ledger/deploy.json", "w"), indent=2); open("ledger/deploy.json", "a").write("\n")
-          print(json.dumps(d, indent=2))
-          PY
-      - name: verify against the live contract
-        run: aikiri-ledger verify
-      - name: commit config
-        run: |
-          ADDR=$(python -c "import json;print(json.load(open('ledger/config.json'))['contract'])")
-          TX=$(python -c "import json;print(json.load(open('ledger/deploy.json'))['tx'])")
-          USD=$(python -c "import json;print(json.load(open('ledger/deploy.json'))['feeUsd'])")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -q --ignore-unmatch .github/requests/deploy
           git add ledger/config.json ledger/deploy.json
-          git commit -F- <<MSG
-          Deploy AikiriLedger to Base mainnet
-
-          contract  $ADDR
-          tx        $TX
-          fee       \$$USD
-
-          Genesis hash baked into the constructor. Owner-only anchoring, sequential, no re-anchoring.
-          MSG
-          git push origin HEAD:${GITHUB_REF_NAME}
-          { echo "## deploy"; echo; echo "- contract: \`$ADDR\`"; echo "- tx: \`$TX\`"; echo "- fee USD: $USD"; echo; echo '```'; cat ledger/deploy.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          git commit -m "Record the AikiriLedger deployment"
+          git push origin HEAD:main
