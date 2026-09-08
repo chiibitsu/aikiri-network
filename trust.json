@@ -1,7 +1,11 @@
 {
-  "note": "Template. Not a trust anchor: a file inside the repository it checks proves nothing, and the verifier labels it `repo` and caps at VALID LOCALLY. Enroll your devices, then publish a copy outside this repository. See docs/setup.md.",
   "trust": {
-    "approval_keys": [],
+    "approval_keys": [
+      {
+        "device": "mac",
+        "pubkey": "048e47fb6f26243081481b9f19d9e64d8a90cc9a0d25e4fb72cf62cc022573b7f26bb675652da3197a826073c5abe97464f83c193584cd22b9d63cdac6bf135850"
+      }
+    ],
     "chainId": 8453,
     "code_keccak": null,
     "contract": "0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e",
