@@ -159,14 +159,30 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                     report.append(f"Base: {name} {live} does not match the pin {pin}")
                     failures += 1
 
-        if trust.code_keccak and getattr(base, "w3", None) is not None and addr:
-            from eth_utils import keccak
-            # Bare lowercase hex on both sides. `.lstrip("0x")` here would eat a
-            # digest's leading zeros and compare two different things.
-            live = keccak(base.w3.eth.get_code(addr)).hex()
-            if live != trust.code_keccak:
-                report.append("Base: deployed code hash does not match the pin")
+        if trust.code_keccak:
+            # A pin nobody evaluated is not a pin that held, so every path out of
+            # this block that is not a match counts as a failure. It goes through
+            # the witness rather than through `base.w3`, because a QuorumBase has
+            # no `w3` ~ reaching for one skipped the check on exactly the setup
+            # that was meant to be the more careful one.
+            reader = getattr(base, "code_hash", None)
+            if reader is None:
+                report.append("Base: a deployed code hash is pinned, and this witness "
+                              "offers no way to read it")
                 failures += 1
+            else:
+                try:
+                    live = reader()
+                except Exception as e:  # noqa: BLE001 - a witness that cannot answer is a failure
+                    report.append(f"Base: could not read the deployed code hash: {e}")
+                    failures += 1
+                else:
+                    # Bare lowercase hex on both sides. `.lstrip("0x")` here would eat
+                    # a digest's leading zeros and compare two different things.
+                    if live != trust.code_keccak:
+                        report.append(f"Base: deployed code hash {live} does not match "
+                                      f"the pin {trust.code_keccak}")
+                        failures += 1
 
         try:
             latest = base.latest_index()

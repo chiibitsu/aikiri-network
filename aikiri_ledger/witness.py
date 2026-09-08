@@ -128,12 +128,25 @@ class BaseWitness:
         if not self.contract:
             return False
         call = self.contract.functions.matches(block.index, bytes.fromhex(block.hash))
-        return bool(call.call(block_identifier=block_identifier) if block_identifier
-                    else call.call())
+        return bool(call.call(block_identifier=block_identifier)
+                    if block_identifier is not None else call.call())
 
     def latest_index(self, block_identifier=None) -> int:
         call = self.contract.functions.latestIndex()
-        return int(call.call(block_identifier=block_identifier) if block_identifier else call.call())
+        return int(call.call(block_identifier=block_identifier)
+                   if block_identifier is not None else call.call())
+
+    def code_hash(self, block_identifier=None) -> str:
+        """keccak of the deployed bytecode, bare lowercase hex ~ the form a pin
+        is stored in. Read at a height when one is given, so a quorum compares
+        the same code, not whatever each node has most recently seen."""
+        from eth_utils import keccak
+        addr = self.address
+        if addr is None:
+            raise ValueError("no contract to read code from")
+        code = (self.w3.eth.get_code(addr, block_identifier=block_identifier)
+                if block_identifier is not None else self.w3.eth.get_code(addr))
+        return keccak(bytes(code)).hex()
 
     def finalized_block(self) -> int:
         """The height both sides of a quorum can agree on.
@@ -340,6 +353,10 @@ class QuorumBase:
     def matches(self, block) -> bool:
         at = self.common_block()
         return self._gather(lambda r: r.matches(block, at))
+
+    def code_hash(self):
+        at = self.common_block()
+        return self._gather(lambda r: r.code_hash(at))
 
     def genesis_hash(self):
         return self._gather(lambda r: r.genesis_hash())
