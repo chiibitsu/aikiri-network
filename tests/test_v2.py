@@ -821,3 +821,31 @@ def test_a_code_hash_pin_is_normalised_not_stripped(tmp_path):
         p = tmp_path / "t.json"
         p.write_text(json.dumps({"trust": dict(REPO_DEFAULTS, code_keccak=written)}))
         assert Trust.load(p).code_keccak == digest
+
+
+def test_every_documented_command_parses():
+    """The four `verify --trust` invocations in this repo all put a global flag
+    after the subcommand, so every one of them exits with a usage error ~ including
+    the last step of the nightly and block workflows. Documentation that has never
+    been run is a guess. This runs it."""
+    import shlex
+    from aikiri_ledger.cli import build_parser
+    root = Path(__file__).parent.parent
+    files = [*(root / ".github" / "workflows").glob("*.yml"),
+             *(root / "docs").glob("*.md"), root / "README.md"]
+    found = []
+    for f in files:
+        for lineno, line in enumerate(f.read_text().splitlines(), 1):
+            s = line.strip().removeprefix("run: ").removeprefix("$ ")
+            if not s.startswith("aikiri-ledger "):
+                continue
+            s = s.split("|")[0].split("&&")[0].strip()  # drop shell plumbing
+            found.append((f.relative_to(root), lineno, s))
+    assert found, "no documented commands found; the scan is broken, not the docs"
+    broken = []
+    for path, lineno, cmd in found:
+        try:
+            build_parser().parse_args(shlex.split(cmd)[1:])
+        except SystemExit:
+            broken.append(f"{path}:{lineno}: {cmd}")
+    assert not broken, "commands that do not parse:\n  " + "\n  ".join(broken)
