@@ -881,3 +881,78 @@ def test_every_documented_command_parses():
                    for argv in itertools.product(*choices)):
             broken.append(f"{path}:{lineno}: {cmd}")
     assert not broken, "commands that do not parse:\n  " + "\n  ".join(broken)
+
+
+# ------------------------------------------- review findings, second pass ----
+
+class _Honest:
+    """A Base reader that agrees with the ledger about everything but the code."""
+    address = "0x" + "11" * 20
+
+    def __init__(self, code="ab" * 32, finalized=100):
+        self._code, self._finalized = code, finalized
+
+    def matches(self, b, block=None): return True
+    def latest_index(self, block=None): return 1
+    def genesis_hash(self): return None
+    def owner(self): return None
+    def record(self, i): return {"blockHash": None, "anchoredAt": 0, "by": None}
+    def finalized_block(self): return self._finalized
+    def code_hash(self, block=None): return self._code
+
+
+def test_a_quorum_still_checks_the_deployed_code_pin(ledger, sk, mac, trust):
+    """The pin was read through `base.w3`, which a QuorumBase does not have. So the
+    multi-endpoint setup ~ the one that is actually recommended ~ skipped the check
+    entirely and could still report BASE VERIFIED. More endpoints, fewer checks."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = "ab" * 32
+    q = QuorumBase([_Honest(), _Honest(), _Honest()])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state != State.INVALID, report
+
+    wrong = QuorumBase([_Honest(code="cd" * 32) for _ in range(3)])
+    state, report = verify_all(ledger, trust, base=wrong)
+    assert state == State.INVALID, report
+    assert any("code" in r.lower() for r in report), report
+
+
+def test_a_code_pin_that_cannot_be_read_is_not_a_pass(ledger, sk, mac, trust):
+    """A pin nobody evaluated is not a pin that held."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = "ab" * 32
+
+    class Mute(_Honest):
+        code_hash = None  # offers no way to read the deployed code
+
+    class Broken(_Honest):
+        def code_hash(self, block=None): raise ConnectionError("node refused")
+
+    for witness in (Mute(), Broken()):
+        state, report = verify_all(ledger, trust, base=witness)
+        assert state == State.INVALID, f"{type(witness).__name__}: {report}"
+
+
+def test_finalized_block_zero_is_a_height_not_an_absence(ledger):
+    """`if block_identifier` reads 0 as unset and silently falls back to the latest
+    state, which is the one thing reading at a finalized height exists to avoid."""
+    seen = []
+
+    class Call:
+        def call(self, **kw): seen.append(kw.get("block_identifier", "LATEST")); return 0
+
+    class Contract:
+        address = "0x" + "11" * 20
+        class functions:
+            @staticmethod
+            def matches(*_): return Call()
+            @staticmethod
+            def latestIndex(): return Call()
+
+    bw = BaseWitness.__new__(BaseWitness)
+    bw.contract = Contract()
+    bw.matches(ledger.read(0), block_identifier=0)
+    bw.latest_index(block_identifier=0)
+    assert seen == [0, 0], f"block 0 was dropped: {seen}"
