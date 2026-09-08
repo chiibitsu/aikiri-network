@@ -323,23 +323,38 @@ class Ledger:
 
     # ---- witnessing: broadcast is not the same event as confirmation ----
     def write_pending(self, index: int, tx: str | None, account: str,
-                      tx_nonce: int | None = None) -> Path:
+                      tx_nonce: int | None = None, *, exclusive: bool = False) -> Path:
         """Written before a transaction goes out. If the receipt lookup times out,
-        this marker is what stops the next run from sending a second one."""
+        this marker is what stops the next run from sending a second one.
+
+        `exclusive` makes the creation itself the lock: two runs cannot both find no
+        marker and both send, because O_EXCL means exactly one of them creates it.
+        Updates go through a temporary file and os.replace, so a run killed
+        mid-write leaves either the old marker or the new one, never half of one.
+        """
         self.proofs_dir.mkdir(parents=True, exist_ok=True)
         p = self.pending_path(index)
-        p.write_text(json.dumps({"index": index, "tx": tx, "account": account,
-                                 "txNonce": tx_nonce,
-                                 "sentAt": datetime.now(timezone.utc).isoformat()},
-                                indent=2, sort_keys=True) + "\n")
+        body = json.dumps({"index": index, "tx": tx, "account": account,
+                           "txNonce": tx_nonce,
+                           "sentAt": datetime.now(timezone.utc).isoformat()},
+                          indent=2, sort_keys=True) + "\n"
+        if exclusive:
+            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(body)
+                f.flush()
+                os.fsync(f.fileno())
+            return p
+        tmp = p.with_name(p.name + f".{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
         return p
 
     def anchor_with_marker(self, base, block: Block, on_broadcast=None) -> str:
         from .witness import write_base_receipt
-        if self.pending_path(block.index).exists():
-            raise RuntimeError(
-                f"block {block.index} has a pending anchor marker. A transaction may already "
-                f"be in flight. Run `aikiri-ledger reconcile` before anchoring again.")
         if self.proof_path(block.index, "base.json").exists():
             raise RuntimeError(f"block {block.index} is already anchored")
         tx_nonce = None
@@ -347,7 +362,16 @@ class Ledger:
             tx_nonce = base.w3.eth.get_transaction_count(base.account)
         except Exception:  # an adapter without a live node; the marker still matters
             pass
-        self.write_pending(block.index, None, getattr(base, "account", None), tx_nonce)
+        # Claim the block by creating the marker, not by asking whether one exists.
+        # The gap between an exists() check and a write is a gap in which a second
+        # run sends a second transaction.
+        try:
+            self.write_pending(block.index, None, getattr(base, "account", None), tx_nonce,
+                               exclusive=True)
+        except FileExistsError as e:
+            raise RuntimeError(
+                f"block {block.index} has a pending anchor marker. A transaction may already "
+                f"be in flight. Run `aikiri-ledger reconcile` before anchoring again.") from e
         if on_broadcast is not None:
             on_broadcast(self.pending_path(block.index))
         tx = base.anchor(block)
@@ -364,8 +388,17 @@ class Ledger:
         if not self.proofs_dir.exists():
             return done
         for p in sorted(self.proofs_dir.glob("*.base.pending.json")):
-            d = loads_strict(p.read_text())
-            index = int(d["index"])
+            try:
+                d = loads_strict(p.read_text())
+                index = exact_int(d["index"], "pending.index")
+            except (SchemaError, KeyError, OSError) as e:
+                # A marker is the only record that a transaction may be in flight.
+                # Unreadable, it is not something to step over quietly.
+                raise RuntimeError(
+                    f"{p.name} is not readable ({e}). It marks a possible in-flight anchor "
+                    f"for that block. Check the account's transactions on Base before "
+                    f"removing it; anchoring again while one is in flight sends a second."
+                ) from e
             block = self.read(index)
             if not base.matches(block):
                 continue  # still not on chain: leave the marker, do not re-send

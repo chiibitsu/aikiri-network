@@ -13,11 +13,12 @@ point. Publish it beside the receipt, not inside the thing being checked.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .approval import ApprovalKey, trust_message, verify_signature
-from .canonical import exact_int, hex64, loads_strict, plain_str, strict
+from .canonical import exact_int, hex64, hexstr, loads_strict, plain_str, strict
 from .errors import SchemaError, TrustError
 
 TRUST_FIELDS = ("v", "chainId", "contract", "owner", "code_keccak", "genesis_hash",
@@ -39,6 +40,39 @@ REPO_DEFAULTS = {
         "1": "69e7256e4f12a359863fbb1408a8c41c5643cfa13909b6e95104e1880fbaed5b",
     },
 }
+
+
+_DECIMAL = re.compile(r"0|[1-9][0-9]*")
+_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _legacy_key(k, name: str) -> int:
+    """A block index, written the one way `body()` writes it. " 1", "+1", "01" and
+    "1_0" are all accepted by int() and none of them round-trip."""
+    if not isinstance(k, str) or not _DECIMAL.fullmatch(k):
+        raise SchemaError(f"{name}: expected a decimal block index as a string, got {k!r}")
+    return int(k)
+
+
+def _address(value, name: str):
+    """A pin is compared against a live value later. Wrong type here is a broken
+    anchor, and it must say so now rather than as a TypeError mid-verification."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _ADDRESS.fullmatch(value):
+        raise SchemaError(f"{name}: expected a 0x-prefixed 20-byte address")
+    return value
+
+
+def _hash_or_none(value, name: str):
+    """Stored bare and lowercase, the one form everything else compares against.
+    A 0x prefix is accepted on the way in because that is how block explorers
+    print a hash and how a human will paste one."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value[:2].lower() == "0x":
+        value = value[2:]
+    return hex64(value.lower() if isinstance(value, str) else value, name)
 
 
 @dataclass
@@ -130,15 +164,20 @@ class Trust:
                 raise SchemaError("trust.approval_keys: device labels must be unique")
             if not isinstance(body["legacy"], dict):
                 raise SchemaError("trust.legacy: expected an object")
-            legacy = {exact_int(int(i), "trust.legacy key"): hex64(h, "trust.legacy value")
-                      for i, h in body["legacy"].items()}
+            legacy = {}
+            for i, h in body["legacy"].items():
+                legacy[_legacy_key(i, "trust.legacy key")] = hex64(h, f"trust.legacy[{i}]")
+            for k in keys:
+                hexstr(k.pubkey, f"trust.approval_keys[{k.device}].pubkey")
+            return cls(chain_id=exact_int(body["chainId"], "trust.chainId"),
+                       contract=_address(body["contract"], "trust.contract"),
+                       owner=_address(body["owner"], "trust.owner"),
+                       code_keccak=_hash_or_none(body["code_keccak"], "trust.code_keccak"),
+                       genesis_hash=_hash_or_none(body["genesis_hash"], "trust.genesis_hash"),
+                       validator=_hash_or_none(body["validator"], "trust.validator"),
+                       approval_keys=keys, legacy=legacy, source=source)
         except SchemaError as e:
             raise TrustError(str(e)) from e
-        return cls(chain_id=exact_int(body["chainId"], "trust.chainId"),
-                   contract=body["contract"], owner=body["owner"],
-                   code_keccak=body["code_keccak"], genesis_hash=body["genesis_hash"],
-                   validator=body["validator"], approval_keys=keys, legacy=legacy,
-                   source=source)
 
     def body(self) -> dict:
         return {"v": TRUST_VERSION, "chainId": self.chain_id, "contract": self.contract,

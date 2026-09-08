@@ -810,3 +810,14 @@ def test_reconcile_refuses_an_unreadable_marker(ledger, sk, mac):
     with pytest.raises(RuntimeError) as e:
         ledger.reconcile(object())
     assert p.name in str(e.value)
+
+
+def test_a_code_hash_pin_is_normalised_not_stripped(tmp_path):
+    """`"0x" + digest.hex().lstrip("0x")` ate the leading zeros of one digest in
+    sixteen and then compared it against a full one."""
+    from aikiri_ledger.trust import REPO_DEFAULTS
+    digest = "0a" + "cd" * 31
+    for written in (digest, "0x" + digest, "0X" + digest.upper()):
+        p = tmp_path / "t.json"
+        p.write_text(json.dumps({"trust": dict(REPO_DEFAULTS, code_keccak=written)}))
+        assert Trust.load(p).code_keccak == digest

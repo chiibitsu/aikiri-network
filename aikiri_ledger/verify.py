@@ -161,8 +161,10 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
 
         if trust.code_keccak and getattr(base, "w3", None) is not None and addr:
             from eth_utils import keccak
-            live = "0x" + keccak(base.w3.eth.get_code(addr)).hex().lstrip("0x")
-            if live.lower() != str(trust.code_keccak).lower():
+            # Bare lowercase hex on both sides. `.lstrip("0x")` here would eat a
+            # digest's leading zeros and compare two different things.
+            live = keccak(base.w3.eth.get_code(addr)).hex()
+            if live != trust.code_keccak:
                 report.append("Base: deployed code hash does not match the pin")
                 failures += 1
 

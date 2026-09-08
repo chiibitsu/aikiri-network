@@ -136,12 +136,13 @@ class BaseWitness:
         return int(call.call(block_identifier=block_identifier) if block_identifier else call.call())
 
     def finalized_block(self) -> int:
-        """The height both sides of a quorum can agree on. Falls back to the head
-        where a node does not serve the finalized tag."""
-        try:
-            return int(self.w3.eth.get_block("finalized")["number"])
-        except Exception:  # noqa: BLE001
-            return int(self.w3.eth.block_number)
+        """The height both sides of a quorum can agree on.
+
+        No fallback to the head: an unfinalized height can be reorged away, and a
+        node that cannot answer what is final does not get a vote on what is final.
+        `QuorumBase.common_block` already tolerates an endpoint that cannot answer;
+        answering with the wrong number is what it cannot tolerate."""
+        return int(self.w3.eth.get_block("finalized")["number"])
 
     def record(self, index: int) -> dict:
         h, at, by = self.contract.functions.blocks(index).call()
@@ -322,7 +323,9 @@ class QuorumBase:
             except Exception:  # noqa: BLE001
                 pass
         if len(heights) < self.quorum:
-            raise QuorumError("too few endpoints reported a finalized block")
+            raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
+                              f"finalized block; {self.quorum} needed. Reading at each node's "
+                              f"own head instead would drop the guarantee this class exists for")
         return min(heights)
 
     # ---- the read interface the verifier uses ----
@@ -331,11 +334,11 @@ class QuorumBase:
         return getattr(self.readers[0], "address", None)
 
     def latest_index(self) -> int:
-        at = self._safe_common()
+        at = self.common_block()
         return self._gather(lambda r: r.latest_index(at))
 
     def matches(self, block) -> bool:
-        at = self._safe_common()
+        at = self.common_block()
         return self._gather(lambda r: r.matches(block, at))
 
     def genesis_hash(self):
@@ -347,8 +350,3 @@ class QuorumBase:
     def record(self, index: int) -> dict:
         return self._gather(lambda r: r.record(index))
 
-    def _safe_common(self):
-        try:
-            return self.common_block()
-        except QuorumError:
-            return None

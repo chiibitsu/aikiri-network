@@ -58,7 +58,7 @@ class Request:
     def build(cls, *, index: int, prev_hash: str, roots: list, validator: str, approver,
               nonce: str | None = None) -> "Request":
         roots = parse_roots(roots)
-        nonce = nonce or new_nonce()
+        nonce = new_nonce() if nonce is None else hex64(nonce, "request.nonce")
         approval = approver.approve(index=index, prev_hash=prev_hash, roots=roots,
                                     nonce=nonce, validator=validator)
         return cls(REQUEST_VERSION, index, prev_hash, roots, nonce, validator, approval)
@@ -69,7 +69,8 @@ class Request:
         """The payload a device is asked to approve. Shown to Chii before she touches
         the sensor, so she approves something she can read."""
         return {"v": REQUEST_VERSION, "index": index, "prev_hash": prev_hash,
-                "roots": parse_roots(roots), "nonce": nonce or new_nonce(),
+                "roots": parse_roots(roots),
+                "nonce": new_nonce() if nonce is None else hex64(nonce, "request.nonce"),
                 "validator": validator}
 
     @classmethod
