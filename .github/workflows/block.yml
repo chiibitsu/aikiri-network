@@ -44,7 +44,7 @@ jobs:
           AIKIRI_VALIDATOR_KEY: ${{ secrets.AIKIRI_VALIDATOR_KEY }}
         run: |
           test -n "$AIKIRI_VALIDATOR_KEY" || { echo "secret AIKIRI_VALIDATOR_KEY is not set"; exit 1; }
-          aikiri-ledger block --keyfile /nonexistent
+          aikiri-ledger --trust trust.json block --keyfile /nonexistent
           echo "INDEX=$(cut -d' ' -f1 ledger/HEAD)" >> "$GITHUB_ENV"
       - name: witness on Base and Bitcoin
         env:

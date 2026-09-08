@@ -107,21 +107,38 @@ class Trust:
         return cls._from_body(REPO_DEFAULTS, "repo")
 
     @staticmethod
-    def _inside_this_repo(path: Path) -> bool:
-        """A trust file that lives in the repository it is checking is not an anchor,
-        however it is passed on the command line."""
+    def _worktree(p: Path) -> Path | None:
+        """The git worktree a path sits in, or None."""
         try:
-            path = path.resolve()
+            p = p.resolve()
         except OSError:
-            return False
-        here = Path.cwd().resolve()
-        root = next((d for d in [here, *here.parents] if (d / ".git").exists()), None)
-        if root is None:
-            return False
-        return root in path.parents or path.parent == root
+            return None
+        start = p if p.is_dir() else p.parent
+        return next((d for d in [start, *start.parents] if (d / ".git").exists()), None)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Trust":
+    def _inside_this_repo(cls, path: Path, ledger_root: str | Path | None = None) -> bool:
+        """A trust file that lives in the same worktree as the ledger it is checking
+        is not an anchor, however it is passed on the command line.
+
+        Decided from the two paths and never from the process's working directory:
+        otherwise `cd` somewhere else and pass absolute paths, and the repository's
+        own file is laundered into an anchor. Where the verifier is standing is not
+        a security property.
+
+        With no ledger to compare against, a trust file inside any worktree is
+        treated as `repo`. That direction fails closed: the cost is a ceiling on a
+        file that may have deserved better, not a ceiling missing from one that
+        did not."""
+        tree = cls._worktree(path)
+        if tree is None:
+            return False
+        if ledger_root is None:
+            return True
+        return cls._worktree(Path(ledger_root)) == tree
+
+    @classmethod
+    def load(cls, path: str | Path, ledger_root: str | Path | None = None) -> "Trust":
         path = Path(path)
         raw = loads_strict(path.read_text())
         if not isinstance(raw, dict) or "trust" not in raw:
@@ -144,7 +161,7 @@ class Trust:
             if not verify_signature(sig["pubkey"], trust_message(body), sig["sig"]):
                 raise TrustError("trust file signature does not cover its contents")
             trust.source = "external-signed"
-        if cls._inside_this_repo(path):
+        if cls._inside_this_repo(path, ledger_root):
             trust.source = "repo"
         return trust
 

@@ -1,3 +1,8 @@
+# Everything the workflows need at run time. They install this lock and then
+# `pip install --no-deps -e .`, so a package absent here is absent on the runner
+# whatever pyproject declares.
 pynacl>=1.5
 web3>=7
 cryptography>=41
+py-solc-x>=2
+opentimestamps-client

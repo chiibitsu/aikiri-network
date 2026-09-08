@@ -63,7 +63,7 @@ def _trust(args) -> Trust:
     path = getattr(args, "trust", None) or os.environ.get("AIKIRI_TRUST")
     if not path:
         return Trust.from_repo_defaults()
-    return Trust.load(path)
+    return Trust.load(path, ledger_root=getattr(args, "ledger", None))
 
 
 def _validator_key(keyfile: str, create: bool = False):

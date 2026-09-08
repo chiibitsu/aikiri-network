@@ -1001,13 +1001,25 @@ def test_the_block_workflow_supplies_the_enrolled_trust_file():
     the workflow exits "no approval devices registered" for every sealed request ~
     the one job this repository exists to run could never write a block."""
     import re
+    import shlex
+    from aikiri_ledger.cli import build_parser
     root = Path(__file__).parent.parent
     wf = (root / ".github" / "workflows" / "block.yml").read_text()
-    calls = [ln.strip() for ln in wf.splitlines() if "aikiri-ledger block" in ln]
-    assert calls, "no block invocation found in block.yml"
-    env_trust = re.search(r"AIKIRI_TRUST\s*:", wf)
-    for call in calls:
-        assert "--trust" in call or env_trust, f"no trust file reaches: {call}"
+    env_trust = re.search(r"AIKIRI_TRUST\s*:", wf) is not None
+    found = []
+    for line in wf.splitlines():
+        cmd = line.strip().removeprefix("run: ")
+        if not cmd.startswith("aikiri-ledger "):
+            continue
+        cmd_only = re.split(r"\||&&|;", cmd)[0]
+        # Only the subcommand and --trust matter here; stand run-time values down.
+        argv = [re.sub(r"\$\{?\w+\}?", "1", t) for t in shlex.split(cmd_only)[1:]]
+        a = build_parser().parse_args(argv)
+        if a.cmd == "block":
+            found.append((cmd, a.trust))
+    assert found, "no block invocation found in block.yml"
+    for cmd, trust in found:
+        assert trust or env_trust, f"no trust file reaches: {cmd}"
 
 
 def test_the_lock_carries_what_the_workflows_import():
@@ -1018,9 +1030,17 @@ def test_the_lock_carries_what_the_workflows_import():
     import re
     root = Path(__file__).parent.parent
     pyproject = (root / "pyproject.toml").read_text()
-    lock = (root / "requirements.lock").read_text().lower()
+
+    def norm(name): return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+    # Pinned requirement lines only. `# via py-solc-x` is a comment naming a
+    # package's dependants, not the package being installed, and reading the whole
+    # file as one string lets a comment stand in for the requirement.
+    pinned = {norm(m.group(1)) for line in
+              (root / "requirements.lock").read_text().splitlines()
+              if (m := re.match(r"^([A-Za-z0-9_.-]+)==", line))}
     block = re.search(r"dependencies = \[(.*?)\]", pyproject, re.S).group(1)
-    needed = re.findall(r'"([A-Za-z0-9_.-]+)', block)
-    missing = [d for d in needed if re.sub(r"[-_.]+", "-", d.lower()) not in
-               re.sub(r"[-_.]+", "-", lock)]
+    needed = [norm(d) for d in re.findall(r'"([A-Za-z0-9_.-]+)', block)]
+    missing = [d for d in needed if d not in pinned]
+    assert pinned, "no pinned requirements found; the scan is broken, not the lock"
     assert not missing, f"installed by no workflow: {missing}"

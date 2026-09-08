@@ -26,7 +26,6 @@ jobs:
         run: |
           pip install --require-hashes -r requirements.lock
           pip install --no-deps -e .
-          pip install --no-deps opentimestamps-client opentimestamps
       - name: upgrade pending Bitcoin proofs
         run: aikiri-ledger upgrade || true
       - name: commit any proof that completed
