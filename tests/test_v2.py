@@ -623,11 +623,14 @@ def test_softkey_file_is_tamper_evident(tmp_path):
     with pytest.raises(softkey.BadPassphrase):
         softkey.load(kf, "correct horse battery staple")
 
-    d = json.loads(kf.read_text())
+    # From a clean file, so the device label is what fails and not the forged pubkey.
+    kf2 = tmp_path / "k2.key"
+    softkey.create(kf2, "mac", "correct horse battery staple")
+    d = json.loads(kf2.read_text())
     d["device"] = "iphone"
-    kf.write_text(json.dumps(d))
+    kf2.write_text(json.dumps(d))
     with pytest.raises(softkey.BadPassphrase):
-        softkey.load(kf, "correct horse battery staple")
+        softkey.load(kf2, "correct horse battery staple")
 
 
 def test_softkey_signs_a_block_the_verifier_accepts(tmp_path, ledger, sk, trust):
@@ -678,3 +681,132 @@ def test_cli_approve_seals_a_request(monkeypatch, tmp_path, ledger, sk, trust):
     ok, why = sealed.verify([ApprovalKey("mac", pub)])
     assert ok, why
     assert sealed.nonce == payload["nonce"] and sealed.index == payload["index"]
+
+
+# ------------------------------------------------- review findings, PR #2 ----
+# CodeRabbit's read of the v2 branch. Each of these fails before the fix commit.
+
+def test_a_supplied_nonce_must_be_a_nonce(sk, mac):
+    """`nonce or new_nonce()` signs whatever it is handed and turns "" into a fresh
+    one silently. A nonce is the thing that makes a request unrepeatable; it is not
+    a field to be lenient about."""
+    roots = [{"kind": "journal", "sha256": JOURNAL_SHA}]
+    validator = sk.verify_key.encode().hex()
+    for bad in ("short", "zz" * 32, "AB" * 32, 1, None.__class__):
+        with pytest.raises(SchemaError):
+            Request.build(index=1, prev_hash="00" * 32, roots=roots,
+                          validator=validator, approver=mac, nonce=bad)
+        with pytest.raises(SchemaError):
+            Request.unsigned(index=1, prev_hash="00" * 32, roots=roots,
+                             validator=validator, nonce=bad)
+    with pytest.raises(SchemaError):
+        Request.unsigned(index=1, prev_hash="00" * 32, roots=roots,
+                         validator=validator, nonce="")
+
+
+def test_a_bad_legacy_key_is_a_trust_error(tmp_path):
+    """Every refusal to load a trust file must arrive as TrustError. `int(i)` raised
+    ValueError straight past the contract, and accepted keys that do not round-trip."""
+    from aikiri_ledger.trust import REPO_DEFAULTS
+    for bad in ("one", " 1", "+1", "1_0", "01", "-1", "1.0", ""):
+        body = dict(REPO_DEFAULTS, legacy={bad: "ab" * 32})
+        p = tmp_path / "t.json"
+        p.write_text(json.dumps({"trust": body}))
+        with pytest.raises(TrustError):
+            Trust.load(p)
+
+
+def test_trust_pins_must_have_the_shape_they_are_compared_against(tmp_path):
+    """A pin of the wrong type is a broken anchor, not a value to compare later."""
+    from aikiri_ledger.trust import REPO_DEFAULTS
+    for field, bad in (("validator", 123), ("genesis_hash", "nope"), ("contract", 5),
+                       ("owner", ["0x" + "11" * 20]), ("code_keccak", "xy" * 32)):
+        p = tmp_path / "t.json"
+        p.write_text(json.dumps({"trust": dict(REPO_DEFAULTS, **{field: bad})}))
+        with pytest.raises(TrustError):
+            Trust.load(p)
+
+
+def test_a_quorum_without_a_common_height_is_not_a_success():
+    """Readers that cannot agree on a height must not each answer at their own head.
+    Silently dropping the common block is the guarantee quietly going away."""
+    reads = []
+
+    class Live:
+        def latest_index(self, block=None):
+            reads.append(block)
+            return 1
+        def matches(self, b, block=None):
+            reads.append(block)
+            return True
+        def finalized_block(self): raise ConnectionError("no finalized tag")
+    with pytest.raises(QuorumError):
+        QuorumBase([Live(), Live(), Live()]).latest_index()
+    with pytest.raises(QuorumError):
+        QuorumBase([Live(), Live(), Live()]).matches(object())
+    assert reads == [], f"read at a height nobody agreed on: {reads}"
+
+
+def test_a_node_that_cannot_report_finality_does_not_vote_on_it():
+    """Returning the head for `finalized` calls a reorgable height final."""
+    w3 = Web3(EthereumTesterProvider())
+    bw = BaseWitness(w3, None, compile_contract()["abi"], account=w3.eth.accounts[0])
+
+    class NoTag:
+        def get_block(self, tag): raise ValueError("unknown block tag")
+        block_number = 999
+    bw.w3 = type("W3", (), {"eth": NoTag()})()
+    with pytest.raises(Exception) as e:
+        bw.finalized_block()
+    assert not isinstance(e.value, AssertionError)
+
+
+def test_a_pending_marker_is_created_exclusively(ledger, sk, mac):
+    """Two runs both pass an `exists()` check before either writes, and both send.
+    Creating the marker must be the thing that decides, not a check before it."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    ledger.write_pending(1, None, "0x" + "11" * 20, exclusive=True)
+    with pytest.raises(FileExistsError):
+        ledger.write_pending(1, None, "0x" + "11" * 20, exclusive=True)
+    ledger.write_pending(1, "ab" * 32, "0x" + "11" * 20)  # updating is not creating
+    assert loads_strict(ledger.pending_path(1).read_text())["tx"] == "ab" * 32
+
+
+def test_a_marker_appearing_mid_flight_stops_the_second_anchor(ledger, sk, mac):
+    """The window between the check and the write, closed."""
+    b1 = ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                                    now=datetime(2026, 9, 3, tzinfo=MANILA))
+    L = ledger
+
+    class Racer:
+        """Another run wins the race while this one is reading its nonce."""
+        account = "0x" + "11" * 20
+        contract = type("C", (), {"address": "0x" + "22" * 20})()
+        sent = []
+        class _Eth:
+            chain_id = 8453
+            def get_transaction_count(self, _):
+                L.write_pending(1, None, "0x" + "33" * 20, exclusive=True)
+                return 7
+        w3 = type("W3", (), {"eth": _Eth()})()
+        def anchor(self, block):
+            Racer.sent.append(block.index)
+            return "cd" * 32
+
+    with pytest.raises((RuntimeError, FileExistsError)):
+        L.anchor_with_marker(Racer(), b1)
+    assert Racer.sent == [], "a second transaction went out"
+
+
+def test_reconcile_refuses_an_unreadable_marker(ledger, sk, mac):
+    """A marker is the only record that a transaction may be in flight. Truncated,
+    it must stop the run loudly, never be stepped over."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    ledger.write_pending(1, "ab" * 32, "0x" + "11" * 20)
+    p = ledger.pending_path(1)
+    p.write_text(p.read_text()[: len(p.read_text()) // 2])  # killed mid-write
+    with pytest.raises(RuntimeError) as e:
+        ledger.reconcile(object())
+    assert p.name in str(e.value)

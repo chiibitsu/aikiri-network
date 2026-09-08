@@ -92,8 +92,11 @@ def test_a_block_needs_a_request(ledger, key):
     """Replaces test_refuses_empty_block: there is nothing to write without one."""
     assert not ledger.requests_dir.exists() or not list(ledger.requests_dir.glob("*.json"))
     from aikiri_ledger import cli
-    with pytest.raises(SystemExit):
-        cli.main(["--ledger", str(ledger.root), "block", "--keyfile", "/nonexistent"])
+    keyfile = ledger.root.parent / "keys" / "chii.key"  # a real key: the request is what is missing
+    assert keyfile.exists()
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--ledger", str(ledger.root), "block", "--keyfile", str(keyfile)])
+    assert "no sealed request" in str(e.value)
 
 
 def test_append_only(ledger, key, mac, journal):
