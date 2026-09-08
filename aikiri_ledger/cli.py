@@ -124,7 +124,8 @@ def _requests(ledger: Ledger) -> list[Path]:
     return sorted(ledger.requests_dir.glob("*.json")) if ledger.requests_dir.exists() else []
 
 
-def main(argv=None):
+def build_parser() -> argparse.ArgumentParser:
+    """Built apart from main() so a test can parse a command without running it."""
     ap = argparse.ArgumentParser(prog="aikiri-ledger")
     ap.add_argument("--ledger", default="ledger")
     ap.add_argument("--trust", default=None, help="path to an external trust anchor")
@@ -165,7 +166,11 @@ def main(argv=None):
     d.add_argument("--max-fee-eth", type=float, default=0.0005)
     d.add_argument("--adopt-only", action="store_true")
 
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     L = Ledger(a.ledger)
 
     if a.cmd == "keygen":

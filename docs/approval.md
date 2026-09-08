@@ -61,8 +61,10 @@ ledger prove nothing, because whoever can rewrite one can rewrite the other.
 1. On her Mac, against the vault: `aikiri-ledger request <path> --kind journal --out request.json`.
    This hashes the file and writes the unsigned payload. The content never leaves
    the vault; only the hash travels.
-2. `aikiri-approve sign request.json`. The terminal prints what is about to be
-   approved, then the sensor. The sealed request comes back with the approval.
+2. `aikiri-ledger approve request.json`. The terminal prints what is about to be
+   approved, then asks for the passphrase. The sealed request comes back with the
+   approval. (`aikiri-approve sign` is the enclave signer this step was designed
+   around; it cannot run as a command-line tool on macOS. See docs/setup.md §7.)
 3. Push the sealed request to `ledger/requests/` on `main`. That push, and only
    that push, starts the block workflow.
 4. The runner writes the block, anchors it on Base, stamps it on Bitcoin, commits

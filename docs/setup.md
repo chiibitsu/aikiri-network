@@ -89,7 +89,7 @@ its hash is read.
     cd ~/aikiri-network
     aikiri-ledger request ../aikiri-garden/03_human/journal/decision-journal.md \
         --kind journal --out ledger/requests/next.json
-    aikiri-approve sign ledger/requests/next.json
+    aikiri-ledger approve ledger/requests/next.json        # asks for the passphrase
     git add ledger/requests/next.json && git commit -m "Request block N" && git push
 
 That push is what starts the block workflow. Only the hash travels; the journal
@@ -119,7 +119,7 @@ says so out loud — a trust file loaded from inside this worktree is labelled
 `repo` and caps verification at `VALID LOCALLY`. Publish a copy somewhere
 separate — the vault, a gist, the artifact, her site — and verify against that:
 
-    aikiri-ledger verify --trust ~/aikiri-trust.json --rpc <a> --rpc <b> --rpc <c>
+    aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
 
 Until a device is enrolled, `aikiri-ledger block` refuses to run. That is the
 gate working, not a bug.

@@ -823,11 +823,21 @@ def test_a_code_hash_pin_is_normalised_not_stripped(tmp_path):
         assert Trust.load(p).code_keccak == digest
 
 
+def _parses(parser, argv) -> bool:
+    try:
+        parser.parse_args(argv)
+        return True
+    except SystemExit:
+        return False
+
+
 def test_every_documented_command_parses():
     """The four `verify --trust` invocations in this repo all put a global flag
     after the subcommand, so every one of them exits with a usage error ~ including
     the last step of the nightly and block workflows. Documentation that has never
     been run is a guess. This runs it."""
+    import itertools
+    import re
     import shlex
     from aikiri_ledger.cli import build_parser
     root = Path(__file__).parent.parent
@@ -835,17 +845,39 @@ def test_every_documented_command_parses():
              *(root / "docs").glob("*.md"), root / "README.md"]
     found = []
     for f in files:
-        for lineno, line in enumerate(f.read_text().splitlines(), 1):
-            s = line.strip().removeprefix("run: ").removeprefix("$ ")
-            if not s.startswith("aikiri-ledger "):
+        lines = f.read_text().splitlines()
+        for lineno, line in enumerate(lines, 1):
+            cmd = line.strip().removeprefix("run: ").removeprefix("$ ")
+            if not cmd.startswith("aikiri-ledger "):
                 continue
-            s = s.split("|")[0].split("&&")[0].strip()  # drop shell plumbing
-            found.append((f.relative_to(root), lineno, s))
+            while cmd.endswith("\\") and lineno < len(lines):  # a wrapped command
+                cmd = cmd[:-1] + " " + lines[lineno].strip()
+                lineno += 1
+            cmd = cmd.split("#")[0]
+            cmd = re.split(r"\||&&|;", cmd)[0].strip()  # drop shell plumbing
+            found.append((f.relative_to(root), lineno, cmd))
     assert found, "no documented commands found; the scan is broken, not the docs"
+    placeholder = re.compile(r"\$\{\{[^}]*\}\}|\$\{?\w+\}?|<[^>]*>")
     broken = []
     for path, lineno, cmd in found:
         try:
-            build_parser().parse_args(shlex.split(cmd)[1:])
-        except SystemExit:
+            tokens = shlex.split(cmd)[1:]
+        except ValueError as e:
+            broken.append(f"{path}:{lineno}: {cmd}  (unparseable shell: {e})")
+            continue
+        # A value filled in at run time is not what this checks. As a flag's value
+        # it stands down to "1", valid as a string and as an int. Standing alone it
+        # may expand to a positional, to a flag, or to nothing, and which is not
+        # knowable here ~ so the command passes if any of those readings parses.
+        choices = []
+        for i, t in enumerate(tokens):
+            if not placeholder.fullmatch(t):
+                choices.append([t])
+            elif i and tokens[i - 1].startswith("--"):
+                choices.append(["1"])
+            else:
+                choices.append(["1", None])
+        if not any(_parses(build_parser(), [t for t in argv if t is not None])
+                   for argv in itertools.product(*choices)):
             broken.append(f"{path}:{lineno}: {cmd}")
     assert not broken, "commands that do not parse:\n  " + "\n  ".join(broken)

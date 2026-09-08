@@ -39,4 +39,4 @@ jobs:
             git push origin HEAD:main
           }
       - name: verify and report the state
-        run: aikiri-ledger verify --trust trust.json --require local | tee -a "$GITHUB_STEP_SUMMARY"
+        run: aikiri-ledger --trust trust.json verify --require local | tee -a "$GITHUB_STEP_SUMMARY"

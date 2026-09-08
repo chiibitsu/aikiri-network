@@ -65,7 +65,7 @@ FULLY VERIFIED
 There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified.
 
 ```
-aikiri-ledger verify --trust ~/aikiri-trust.json --rpc <a> --rpc <b> --rpc <c>
+aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
 ```
 
 Several RPCs are read at a common finalized block. A majority must answer and they must agree; disagreement is never success. A trust file loaded from inside this repository is labelled `repo` and capped at `VALID LOCALLY`, because a verifier that reads its expectations from the thing it is checking proves nothing.
