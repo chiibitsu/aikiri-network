@@ -159,7 +159,10 @@ class _DropOnTransportFailure:
     retries, spends nothing and is dropped instead once its slow reads
     (over `slow` seconds each) have taken `budget` seconds in all this run.
     Only slow reads count, so a healthy endpoint never runs the budget down
-    however many blocks the ledger holds."""
+    however many blocks the ledger holds. The budget is checked between
+    reads, not inside one: an endpoint that trickles a single reply out
+    byte by byte is stopped only by the step's own timeout, which fails the
+    run rather than passing it."""
 
     def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
                  clock=None):
