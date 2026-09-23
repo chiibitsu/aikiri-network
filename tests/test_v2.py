@@ -1248,7 +1248,7 @@ def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, 
 def test_an_endpoint_that_exhausts_its_retries_is_not_asked_again(monkeypatch):
     """An endpoint can pass the chainId check and then 429 every read. Each
     read then costs the whole retry budget (80s with Retry-After: 10), and
-    the quorum asks its readers one after another, 4 + 3 reads per block ~
+    the quorum asks its readers one after another, several reads per block ~
     so one such endpoint outlasted the step's timeout at 4 blocks. Once it
     has run out of retries it is dropped for the rest of the run."""
     import threading
@@ -1383,7 +1383,7 @@ def test_a_refused_connection_does_not_drop_an_endpoint():
 def test_an_endpoint_that_answers_slowly_every_time_is_dropped_once_over_budget():
     """A read that succeeds on its last retry never spends its retries, so an
     endpoint answering every call after ~80s of 429s was never dropped and,
-    asked 4 + 3 reads per block, outlasted the step's timeout at 4 blocks.
+    asked several reads per block, outlasted the step's timeout at 4 blocks.
     Each endpoint gets a time budget per run; once over it, it is dropped."""
     from aikiri_ledger.cli import _DropOnTransportFailure
     now = [0.0]

@@ -151,18 +151,20 @@ class _Unreachable:
 class _DropOnTransportFailure:
     """One endpoint's reader, until a read exhausts its retries or times
     out. From then on every call fails at once. The quorum asks its readers
-    one after another, 4 + 3 reads per block, so an endpoint left in paying
-    its full retry budget or web3's 30s timeout each time would hold the job
-    past its timeout. A one-off reset or refusal costs nothing to try again
-    and fails only that read; a JSON-RPC error is an answer. Neither drops
-    it. An endpoint that answers every time, but only after most of its
-    retries, spends nothing and is dropped instead once its slow reads
-    (over `slow` seconds each) have taken `budget` seconds in all this run.
-    Only slow reads count, so a healthy endpoint never runs the budget down
-    however many blocks the ledger holds. The budget is checked between
-    reads, not inside one: an endpoint that trickles a single reply out
-    byte by byte is stopped only by the step's own timeout, which fails the
-    run rather than passing it."""
+    one after another, about 5 reads per run plus 2 per block, so an
+    endpoint left in paying its full retry budget or web3's 30s timeout each
+    time would hold the job past its timeout. A one-off reset or refusal
+    costs nothing to try again and fails only that read; a JSON-RPC error
+    is an answer. Neither drops it. An endpoint that answers every time but
+    only after its 7th or 8th retry spends nothing and is dropped instead
+    once its reads over `slow` seconds have taken `budget` seconds in all
+    this run. Only reads over `slow` count, so a healthy endpoint never runs
+    the budget down however many blocks the ledger holds; the cost is that
+    an endpoint just under `slow` on every read is never dropped, and what
+    it adds grows with the ledger. The budget is checked between reads, not
+    inside one: an endpoint that trickles a single reply out byte by byte is
+    stopped only by the step's own timeout. Both fail the run, never pass
+    it."""
 
     def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
                  clock=None):

@@ -305,7 +305,8 @@ class QuorumBase:
     One RPC is one party's word. Requiring every endpoint to answer makes a
     verifier that fails whenever a provider is down; requiring none makes a
     verifier that believes whoever answers first. So: a majority must answer,
-    at a block height a majority has reached, and they must agree. Disagreement is never
+    the per-block reads are made at one block height a majority has reached,
+    and they must agree. Disagreement is never
     a success ~ it is the loudest possible signal that something is wrong.
     """
 
