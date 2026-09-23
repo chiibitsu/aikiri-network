@@ -1491,3 +1491,14 @@ def test_nightly_verify_fails_its_step_when_verify_fails():
     step = step.split("\n      - name:")[0]
     assert "| tee" in step
     assert "shell: bash" in step, step  # GitHub runs `shell: bash` with -eo pipefail
+
+
+def test_the_retrying_read_path_does_not_stack_web3s_own_retry():
+    """web3 retries requests.Timeout five times itself, so a host that
+    silently dropped connections cost ten 30s attempts per call: our
+    session's two connect tries, each retried by web3. The session is the
+    one retry layer on the read path."""
+    from aikiri_ledger.cli import _w3
+    w3 = _w3("http://127.0.0.1:1", None, retrying=True)  # no chainId check: no request made
+    assert w3.provider.exception_retry_configuration is None
+    assert _w3("http://127.0.0.1:1", None).provider.exception_retry_configuration is not None
