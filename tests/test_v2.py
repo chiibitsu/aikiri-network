@@ -1293,3 +1293,28 @@ def test_an_endpoint_that_exhausts_its_retries_is_not_asked_again(monkeypatch):
     finally:
         for s in (*good, bad):
             s.shutdown()
+
+
+def test_one_endpoint_reporting_a_stale_height_cannot_hide_a_mismatch(ledger, sk, mac, trust):
+    """The quorum read Base at the lowest finalized height any endpoint
+    reported, so one endpoint claiming an old height pulled every read back
+    before the latest anchor: "Base holds a different hash" (INVALID) became
+    "written but not anchored" (VALID LOCALLY). It now reads at the height a
+    quorum of endpoints has reached."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+
+    class AnchoredAt100(_Honest):
+        """Block 1 was anchored at height 100, with a hash that is not ours."""
+        def latest_index(self, block=None): return 1 if block >= 100 else 0
+        def matches(self, b, block=None): return b.index == 0
+
+    honest = [AnchoredAt100(finalized=100) for _ in range(2)]
+    state, report = verify_all(ledger, trust, base=QuorumBase([*honest, AnchoredAt100()]))
+    assert state == State.INVALID, report  # control
+
+    stale = AnchoredAt100(finalized=50)
+    state, report = verify_all(ledger, trust, base=QuorumBase([honest[0], stale, honest[1]]))
+    assert state == State.INVALID, report
+    assert any("different hash" in r for r in report), report
