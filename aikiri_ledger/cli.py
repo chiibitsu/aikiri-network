@@ -126,7 +126,12 @@ def _retrying_session():
 
 def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
     from web3 import Web3
-    w3 = Web3(Web3.HTTPProvider(rpc, session=_retrying_session() if retrying else None))
+    if retrying:  # the session is the one retry layer; web3's own would multiply it
+        provider = Web3.HTTPProvider(rpc, session=_retrying_session(),
+                                     exception_retry_configuration=None)
+    else:
+        provider = Web3.HTTPProvider(rpc)
+    w3 = Web3(provider)
     if chain_id is not None and w3.eth.chain_id != chain_id:
         raise SystemExit(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
     return w3

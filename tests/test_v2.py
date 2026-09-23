@@ -1124,9 +1124,9 @@ def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
 
 def test_a_witness_that_cannot_answer_matches_is_a_failure_not_a_crash(ledger, sk, mac, trust):
     """The exact crash from block 2's first real run: base.matches() raised
-    straight out of verify_all with no try/except, while every neighbouring
-    Base read in the same function (genesis_hash, owner, latest_index, record)
-    already degrades to a reported failure instead of an unhandled traceback.
+    straight out of verify_all with no try/except, while the neighbouring
+    Base reads (genesis_hash, owner, latest_index) already degraded to a
+    reported failure; record was caught but swallowed, fixed separately.
     A witness that cannot answer is data the report is for, not a reason to
     die before printing one."""
     ledger.append_from_request(make_request(ledger, sk, mac), sk,
@@ -1405,7 +1405,7 @@ def test_an_endpoint_that_answers_slowly_every_time_is_dropped_once_over_budget(
 
 def test_healthy_endpoints_never_exhaust_the_budget_however_long_the_chain():
     """The budget counted every read, and a full verify reads each endpoint
-    ~3 times per block, so a long enough ledger dropped all three healthy
+    ~2 times per block, so a long enough ledger dropped all three healthy
     endpoints and failed every run. Only slow reads count against it."""
     from aikiri_ledger.cli import _DropOnTransportFailure
     now = [0.0]
@@ -1416,7 +1416,7 @@ def test_healthy_endpoints_never_exhaust_the_budget_however_long_the_chain():
             return 100
 
     r = _DropOnTransportFailure("https://healthy", Healthy(), budget=120.0, clock=lambda: now[0])
-    for _ in range(3000):  # ~1000 blocks' worth of reads, 900s in all
+    for _ in range(3000):  # ~1500 blocks' worth of reads, 900s in all
         assert r.finalized_block() == 100
 
 
