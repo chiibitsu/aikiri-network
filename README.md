@@ -93,7 +93,8 @@ solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-stati
 
 - `ci.yml` ~ tests on Linux and macOS, Python 3.11, 3.12, 3.13.
 - `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify.
-- `nightly.yml` ~ upgrade Bitcoin proofs and report the state. Writes no blocks.
+- `nightly.yml` ~ upgrade Bitcoin proofs and report the state. Writes no blocks,
+  and proposes any completed proof as a pull request rather than pushing it.
 - `deploy.yml`, `genesis.yml` ~ ran once each; both refuse to run again.
 
 Every action is SHA-pinned, dependencies are hash-pinned, and the keys live in a GitHub environment with a required reviewer. Setup is in `docs/setup.md`.

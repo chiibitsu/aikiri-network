@@ -22,7 +22,8 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs and reports.
+only upgrades Bitcoin proofs, proposes them as a pull request, and reports.
+See §8.
 
 ## 2. Move the secrets
 
@@ -159,3 +160,22 @@ Two devices was the ruling and one device is what exists, so the Mac is currentl
 a single point of failure. The cheapest genuine second device is another machine
 with its own `approve-keygen` key and its own passphrase; the app is the better
 one. Chii's call.
+
+## 8. Nightly proofs land as a pull request, not a push
+
+`nightly` runs with no secrets, in `ledger-readonly`, and it never had a path
+that could forge a block. But its token still had `contents: write` on `main`,
+used once a night to commit whatever proof had just finished stamping. That is
+a standing write credential for a job that only ever needed to touch one folder.
+
+It now opens a pull request instead: `ledger/proofs` only, one branch reused
+across nights so a stamped-but-unmerged night doesn't pile up new PRs. The
+token still carries `contents: write` ~ pushing the branch behind a PR needs
+it ~ but the workflow contains no path that writes to `main` on its own.
+Merging is a manual click. Nothing merges it for her.
+
+This is a small chore next to the ledger: a proof that lands has no urgency ~
+Bitcoin already confirmed it, and it has been sitting in the OpenTimestamps
+calendar as pending proof, correctly, since it was stamped. Merging late costs
+nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
+longer than it needed to.
