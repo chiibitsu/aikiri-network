@@ -1378,3 +1378,26 @@ def test_a_refused_connection_does_not_drop_an_endpoint():
         with pytest.raises(Exception) as e:
             r.get_block_number()
         assert "dropped" not in str(e.value), e.value
+
+
+def test_an_endpoint_that_answers_slowly_every_time_is_dropped_once_over_budget():
+    """A read that succeeds on its last retry never spends its retries, so an
+    endpoint answering every call after ~80s of 429s was never dropped and,
+    asked 5 + 3 reads per block, outlasted the step's timeout at 4 blocks.
+    Each endpoint gets a time budget per run; once over it, it is dropped."""
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    now = [0.0]
+    calls = []
+
+    class Slow:
+        def finalized_block(self):
+            calls.append(1)
+            now[0] += 80.0
+            return 100
+
+    r = _DropOnTransportFailure("https://slow", Slow(), budget=120.0, clock=lambda: now[0])
+    assert r.finalized_block() == 100   # 80s spent, under budget
+    assert r.finalized_block() == 100   # 160s spent: answered, then dropped
+    with pytest.raises(ConnectionError, match="budget"):
+        r.finalized_block()
+    assert len(calls) == 2
