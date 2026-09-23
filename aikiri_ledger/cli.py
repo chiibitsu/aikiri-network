@@ -98,9 +98,28 @@ def _base_key() -> str:
     raise SystemExit(f"no wallet key: set {BASE_KEY_ENV} or write it to {DEFAULT_BASE_ENV}")
 
 
+def _retrying_session():
+    """A public RPC rate-limits under load, and web3.py's own tolerance for
+    that is short: measured at 5 attempts total, giving up inside 2.4s. That
+    is enough for a blip, not for a rate limit that is still in effect
+    minutes later, which is what actually happened the first time block.yml
+    ran end to end. Retries apply to every JSON-RPC call, reads and the
+    signed-tx broadcast alike: rebroadcasting the same signed transaction is
+    exactly as idempotent as reading twice, since a node dedupes by tx hash."""
+    from requests import Session
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    retry = Retry(total=10, backoff_factor=0.05, status_forcelist=(429, 500, 502, 503, 504),
+                  allowed_methods=frozenset({"POST"}), respect_retry_after_header=True)
+    session = Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
 def _w3(rpc: str, chain_id: int | None):
     from web3 import Web3
-    w3 = Web3(Web3.HTTPProvider(rpc))
+    w3 = Web3(Web3.HTTPProvider(rpc, session=_retrying_session()))
     if chain_id is not None and w3.eth.chain_id != chain_id:
         raise SystemExit(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
     return w3

@@ -53,4 +53,6 @@ jobs:
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.
       - name: verify and report the state
-        run: aikiri-ledger --trust trust.json verify --require local | tee -a "$GITHUB_STEP_SUMMARY"
+        # Same quorum as block.yml's verify step, and for the same reason:
+        # one rate-limited public RPC should not be the whole check.
+        run: aikiri-ledger --trust trust.json verify --require local --rpc https://mainnet.base.org --rpc https://base.llamarpc.com --rpc https://base-rpc.publicnode.com | tee -a "$GITHUB_STEP_SUMMARY"

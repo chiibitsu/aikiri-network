@@ -73,4 +73,9 @@ jobs:
           MSG
           git push origin HEAD:main
       - name: verify
-        run: aikiri-ledger --trust trust.json verify --require local
+        # A single public RPC being rate-limited took this step down on its
+        # first real run, minutes after the fact and again from a fresh
+        # session. Three independent endpoints, quorum-tolerant of one dead
+        # (aikiri_ledger.witness.QuorumBase), so one provider's bad day does
+        # not fail the whole check.
+        run: aikiri-ledger --trust trust.json verify --require local --rpc https://mainnet.base.org --rpc https://base.llamarpc.com --rpc https://base-rpc.publicnode.com

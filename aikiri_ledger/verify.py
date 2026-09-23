@@ -198,7 +198,13 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
             for b in blocks:
                 if b.index > min(latest, local_head):
                     break
-                if not base.matches(b):
+                try:
+                    matched = base.matches(b)
+                except Exception as e:  # noqa: BLE001 - a witness that cannot answer is a failure
+                    report.append(f"block {b.index}: could not read Base: {e}")
+                    failures += 1
+                    continue
+                if not matched:
                     report.append(f"block {b.index}: Base holds a different hash")
                     failures += 1
                     continue
