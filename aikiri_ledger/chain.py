@@ -433,11 +433,11 @@ def parse_key(material: str | bytes) -> SigningKey:
         return SigningKey(material)
     text = material.decode("utf-8", "strict") if isinstance(material, bytes) else material
     text = text.strip()
-    if text.lower().startswith("0x"):
-        text = text[2:]
-    if len(text) == 64:
+    # Only a hex seed takes the 0x prefix; a base64 seed can begin "0x" too.
+    hexpart = text[2:] if text.lower().startswith("0x") else text
+    if len(hexpart) == 64:
         try:
-            return SigningKey(bytes.fromhex(text))
+            return SigningKey(bytes.fromhex(hexpart))
         except ValueError:
             pass
     try:
