@@ -1212,3 +1212,29 @@ def test_a_server_cannot_park_verify_on_retry_after():
     from aikiri_ledger.cli import _retrying_session
     retry = _retrying_session().get_adapter("https://x").max_retries
     assert retry.retry_after_max <= 10
+
+
+def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, mac, trust):
+    """The quorum raising on record() used to be swallowed, which skipped the
+    owner and anchoredAt checks for that block without a line in the report.
+    With three third-party endpoints, any one of them disagreeing could turn
+    INVALID into BASE VERIFIED. A record that cannot be read is a failure."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.owner, trust.code_keccak = "0x" + "44" * 20, None
+
+    class By(_Honest):
+        def __init__(self, by):
+            super().__init__()
+            self._by = by
+
+        def record(self, i): return {"blockHash": None, "anchoredAt": 0, "by": self._by}
+
+    truthful = "0x" + "33" * 20
+    state, report = verify_all(ledger, trust, base=QuorumBase([By(truthful)] * 3))
+    assert state == State.INVALID, report  # control: the evidence is visible
+
+    state, report = verify_all(ledger, trust,
+                               base=QuorumBase([By(truthful), By(truthful), By(trust.owner)]))
+    assert state == State.INVALID, report
+    assert any("record" in r.lower() for r in report), report
