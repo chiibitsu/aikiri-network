@@ -54,6 +54,10 @@ jobs:
             in this workflow does it for you.
       - name: verify and report the state
         timeout-minutes: 20
+        # bash here means -eo pipefail: without it the step exits with tee's
+        # status and goes green at INVALID. It carries the newest block's
+        # Base check, which block.yml's verify runs too early to make.
+        shell: bash
         # Same quorum as block.yml's verify step, and for the same reason:
         # one rate-limited public RPC should not be the whole check.
         run: aikiri-ledger --trust trust.json verify --require local --rpc https://mainnet.base.org --rpc https://base.llamarpc.com --rpc https://base-rpc.publicnode.com | tee -a "$GITHUB_STEP_SUMMARY"

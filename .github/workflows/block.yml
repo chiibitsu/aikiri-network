@@ -80,5 +80,5 @@ jobs:
         # (aikiri_ledger.witness.QuorumBase), so one provider rate-limiting,
         # down or on the wrong chain does not fail the whole check. The quorum reads at the finalized height,
         # which the anchor made minutes ago has usually not reached: this
-        # step checks the blocks before it, and the next nightly checks it.
+        # step checks the blocks before it, and nightly checks it once final.
         run: aikiri-ledger --trust trust.json verify --require local --rpc https://mainnet.base.org --rpc https://base.llamarpc.com --rpc https://base-rpc.publicnode.com
