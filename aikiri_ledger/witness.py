@@ -157,8 +157,10 @@ class BaseWitness:
         answering with the wrong number is what it cannot tolerate."""
         return int(self.w3.eth.get_block("finalized")["number"])
 
-    def record(self, index: int) -> dict:
-        h, at, by = self.contract.functions.blocks(index).call()
+    def record(self, index: int, block_identifier=None) -> dict:
+        call = self.contract.functions.blocks(index)
+        h, at, by = (call.call(block_identifier=block_identifier)
+                     if block_identifier is not None else call.call())
         return {"blockHash": h.hex(), "anchoredAt": int(at), "by": by}
 
 
@@ -375,5 +377,8 @@ class QuorumBase:
         return self._gather(lambda r: r.owner())
 
     def record(self, index: int) -> dict:
-        return self._gather(lambda r: r.record(index))
+        # Pinned like every other per-block read: at its own head, a node that
+        # had not reached the latest anchor answered with an all-zero record.
+        at = self.common_block()
+        return self._gather(lambda r: r.record(index, at))
 
