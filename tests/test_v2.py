@@ -1114,7 +1114,7 @@ def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453)
+        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453, retrying=True)
         assert w3.eth.chain_id == 8453
     finally:
         server.shutdown()

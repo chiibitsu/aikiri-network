@@ -99,30 +99,46 @@ def _base_key() -> str:
 
 
 def _retrying_session():
-    """A public RPC rate-limits under load, and web3.py's own tolerance for
-    that is short: measured at 5 attempts total, giving up inside 2.4s. That
-    is enough for a blip, not for a rate limit that is still in effect
-    minutes later, which is what actually happened the first time block.yml
-    ran end to end. Retries apply to every JSON-RPC call, reads and the
-    signed-tx broadcast alike: rebroadcasting the same signed transaction is
-    exactly as idempotent as reading twice, since a node dedupes by tx hash."""
+    """For reads only. A public RPC rate-limits under load, and web3.py's own
+    tolerance for that is short: measured at 5 attempts total, giving up
+    inside 2.4s. This stretches one call to 9 attempts, ~13s of backoff plus
+    at most 10s per honoured Retry-After. A rate limit longer than that is
+    the quorum's job, not this session's. The signing path keeps web3's
+    default: a retried broadcast can report "already known" for a
+    transaction that landed, and reconcile already owns that case."""
     from requests import Session
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    retry = Retry(total=10, backoff_factor=0.05, status_forcelist=(429, 500, 502, 503, 504),
-                  allowed_methods=frozenset({"POST"}), respect_retry_after_header=True)
+    retry = Retry(total=8, backoff_factor=0.05, status_forcelist=(429,),
+                  allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
+                  retry_after_max=10)
     session = Session()
     session.mount("https://", HTTPAdapter(max_retries=retry))
     session.mount("http://", HTTPAdapter(max_retries=retry))
     return session
 
 
-def _w3(rpc: str, chain_id: int | None):
+def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
     from web3 import Web3
-    w3 = Web3(Web3.HTTPProvider(rpc, session=_retrying_session()))
+    w3 = Web3(Web3.HTTPProvider(rpc, session=_retrying_session() if retrying else None))
     if chain_id is not None and w3.eth.chain_id != chain_id:
         raise SystemExit(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
     return w3
+
+
+class _Unreachable:
+    """An endpoint that failed its chainId check while the quorum was being
+    built. It stays in the count, so it votes against and never for, and
+    every read from it raises why it was dropped."""
+    address = None
+
+    def __init__(self, rpc: str, error: BaseException):
+        self.reason = f"rpc {rpc} unusable: {error}"
+
+    def __getattr__(self, name):
+        def fail(*a, **k):
+            raise ConnectionError(self.reason)
+        return fail
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
@@ -131,11 +147,18 @@ def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
     if not contract or not urls:
         return None
     abi = compile_contract()["abi"]
-    pk = _base_key() if need_signer else None
-    readers = [BaseWitness(_w3(u, trust.chain_id or cfg.get("chainId")), contract, abi,
-                           account=cfg.get("account"), private_key=pk) for u in urls]
-    if need_signer or len(readers) == 1:
-        return readers[0]
+    chain_id = trust.chain_id or cfg.get("chainId")
+    if need_signer or len(urls) == 1:
+        pk = _base_key() if need_signer else None
+        return BaseWitness(_w3(urls[0], chain_id, retrying=not need_signer), contract, abi,
+                           account=cfg.get("account"), private_key=pk)
+    readers = []
+    for u in urls:
+        try:
+            readers.append(BaseWitness(_w3(u, chain_id, retrying=True), contract, abi,
+                                       account=cfg.get("account")))
+        except (Exception, SystemExit) as e:  # noqa: BLE001 - dead or wrong-chain: it does not vote
+            readers.append(_Unreachable(u, e))
     return QuorumBase(readers)
 
 
