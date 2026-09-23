@@ -134,7 +134,7 @@ def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
 class _Unreachable:
     """An endpoint that could not be used while the quorum was being built:
     unreachable, still rate-limited, or on the wrong chain. It stays in the
-    count, so it votes against and never for, and every read from it raises
+    count, so it votes against and never for, and every call on it raises
     why it was dropped."""
     address = None
 
@@ -145,6 +145,34 @@ class _Unreachable:
         def fail(*a, **k):
             raise ConnectionError(self.reason)
         return fail
+
+
+class _DropOnTransportFailure:
+    """One endpoint's reader, until a read fails in transport: retries run
+    out, or it cannot be reached. From then on every call fails at once.
+    The quorum asks its readers one after another, 4 + 3 reads per block,
+    so an endpoint left in paying its full retry budget each time would
+    hold the job past its timeout. A JSON-RPC error is an answer, not a
+    transport failure, and does not drop it."""
+
+    def __init__(self, rpc: str, reader):
+        self._rpc, self._reader, self._dropped = rpc, reader, None
+
+    def __getattr__(self, name):
+        attr = getattr(self._reader, name)
+        if not callable(attr):
+            return attr
+
+        def call(*a, **k):
+            from requests.exceptions import RequestException
+            if self._dropped:
+                raise ConnectionError(self._dropped)
+            try:
+                return attr(*a, **k)
+            except RequestException as e:
+                self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
+                raise
+        return call
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
@@ -161,8 +189,8 @@ def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
     readers = []
     for u in urls:
         try:
-            readers.append(BaseWitness(_w3(u, chain_id, retrying=True), contract, abi,
-                                       account=cfg.get("account")))
+            readers.append(_DropOnTransportFailure(u, BaseWitness(
+                _w3(u, chain_id, retrying=True), contract, abi, account=cfg.get("account"))))
         except (Exception, SystemExit) as e:  # noqa: BLE001 - dead or wrong-chain: it does not vote
             readers.append(_Unreachable(u, e))
     return QuorumBase(readers)
