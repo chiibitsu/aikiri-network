@@ -1157,3 +1157,58 @@ def test_verify_reads_base_through_more_than_one_endpoint():
                 urls = re.findall(r"--rpc\s+(\S+)", line)
                 assert len(set(urls)) >= 3, \
                     f"{name}: verify reads Base through {len(urls)} endpoint(s), not a quorum: {line!r}"
+
+
+def _stub_rpc(answer):
+    """An RPC whose every reply is `answer(req)`: a JSON-RPC result or error."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Stub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], **answer(req)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(resp.encode())
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_one_endpoint_that_cannot_answer_does_not_stop_the_quorum_being_built():
+    """The quorum tolerated one dead reader only once it existed, and building
+    it asked every endpoint for its chainId first, unguarded ~ so one dead or
+    lying endpoint out of three still crashed verify before QuorumBase could
+    discount it. It stays in the count and votes against, never for."""
+    from aikiri_ledger.cli import _base_reader
+    good = [_stub_rpc(lambda r: {"result": "0x2105"}) for _ in range(2)]
+    dead = _stub_rpc(lambda r: {"error": {"code": -32005, "message": "rate limited"}})
+    liar = _stub_rpc(lambda r: {"result": "0x1"})
+    try:
+        for bad in (dead, liar):
+            urls = [f"http://127.0.0.1:{s.server_port}" for s in (good[0], bad, good[1])]
+            trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                          code_keccak=None, genesis_hash=None, validator=None)
+            q = _base_reader({}, trust, urls, need_signer=False)
+            assert isinstance(q, QuorumBase)
+            assert len(q.readers) == 3 and q.quorum == 2
+            with pytest.raises(Exception, match=urls[1]):
+                q.readers[1].latest_index(0)
+    finally:
+        for s in (*good, dead, liar):
+            s.shutdown()
+
+
+def test_a_server_cannot_park_verify_on_retry_after():
+    """Retry-After is honoured, but urllib3's own cap is 6 hours, and the
+    readers are asked one after another: one endpoint could hold the job,
+    and the ledger-write lock with it, until GitHub kills it."""
+    from aikiri_ledger.cli import _retrying_session
+    retry = _retrying_session().get_adapter("https://x").max_retries
+    assert retry.retry_after_max <= 10
