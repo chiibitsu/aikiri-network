@@ -1067,3 +1067,56 @@ def test_nightly_proposes_proofs_instead_of_pushing_to_main():
         "the PR must be scoped to ledger/proofs, not free to touch anything else"
     assert "branch: nightly/bitcoin-proofs" in text, \
         "reuse one branch across nights rather than opening a new PR each time"
+
+
+# --------------------------------------------------- RPC rate-limit retry ----
+
+def _flaky_server(fail_n: int):
+    """An RPC that 429s for the first `fail_n` requests, then answers."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    hits = []
+
+    class Flaky(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(1)
+            if len(hits) <= fail_n:
+                self.send_response(429)
+                self.send_header("Retry-After", "0")
+                self.end_headers()
+                return
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            req = json.loads(body)
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(resp.encode())
+
+        def log_message(self, *a):
+            pass  # the test output does not need the HTTP access log
+
+    server = HTTPServer(("127.0.0.1", 0), Flaky)
+    return server, hits
+
+
+def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
+    """Block 2's first real run: every write step succeeded, and the trailing
+    `verify` step died on a 429 from mainnet.base.org. web3.py already retries
+    a request a handful of times on its own (measured: 5 attempts, ~2.4s, then
+    it gives up) ~ which is why one isolated 429 was never the failure. What
+    actually happened was a *sustained* rate limit, outlasting that built-in
+    budget, exactly like her retry from a fresh Mac session hit again minutes
+    later. This needs its own retry budget past that point."""
+    import threading
+    from aikiri_ledger.cli import _w3
+
+    server, hits = _flaky_server(fail_n=8)  # past web3's own ~4-failure ceiling
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453)
+        assert w3.eth.chain_id == 8453
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+    assert len(hits) >= 9, f"gave up too early: only {len(hits)} attempts"
