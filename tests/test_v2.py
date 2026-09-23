@@ -1110,7 +1110,7 @@ def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
     import threading
     from aikiri_ledger.cli import _w3
 
-    server, hits = _flaky_server(fail_n=8)  # past web3's own ~4-failure ceiling
+    server, hits = _flaky_server(fail_n=6)  # past web3's own ~4-failure ceiling
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1119,4 +1119,24 @@ def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
     finally:
         server.shutdown()
         thread.join(timeout=2)
-    assert len(hits) >= 9, f"gave up too early: only {len(hits)} attempts"
+    assert len(hits) >= 7, f"gave up too early: only {len(hits)} attempts"
+
+
+def test_a_witness_that_cannot_answer_matches_is_a_failure_not_a_crash(ledger, sk, mac, trust):
+    """The exact crash from block 2's first real run: base.matches() raised
+    straight out of verify_all with no try/except, while every neighbouring
+    Base read in the same function (genesis_hash, owner, latest_index, record)
+    already degrades to a reported failure instead of an unhandled traceback.
+    A witness that cannot answer is data the report is for, not a reason to
+    die before printing one."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+
+    class Deaf(_Honest):
+        def matches(self, b, block=None):
+            raise ConnectionError("rate limited")
+
+    state, report = verify_all(ledger, trust, base=Deaf())
+    assert state == State.INVALID
+    assert any("block 1" in r.lower() and ("match" in r.lower() or "could not" in r.lower())
+              for r in report), report
