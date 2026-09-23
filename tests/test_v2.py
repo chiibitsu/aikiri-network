@@ -1479,3 +1479,15 @@ def test_a_lagging_endpoint_cannot_fail_verify_through_record(ledger, sk, mac, t
     q = QuorumBase([Node(100, 1000), Node(100, 1000), Node(90, 92)])
     state, report = verify_all(ledger, trust, base=q)
     assert not any("disagree" in r for r in report), report
+
+
+def test_nightly_verify_fails_its_step_when_verify_fails():
+    """`verify | tee` under GitHub's default `bash -e` exits with tee's
+    status, so nightly went green at INVALID. That mattered more once the
+    quorum moved the newest block's Base check from block.yml to nightly:
+    without pipefail, a bad newest anchor turned no run red at all."""
+    text = Path(".github/workflows/nightly.yml").read_text()
+    step = text[text.index("- name: verify and report the state"):]
+    step = step.split("\n      - name:")[0]
+    assert "| tee" in step
+    assert "shell: bash" in step, step  # GitHub runs `shell: bash` with -eo pipefail
