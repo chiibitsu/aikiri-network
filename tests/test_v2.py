@@ -1359,3 +1359,22 @@ def test_a_single_connection_reset_does_not_drop_an_endpoint():
         h.finalized_block()
     with pytest.raises(ConnectionError, match="dropped"):
         h.finalized_block()
+
+
+def test_a_refused_connection_does_not_drop_an_endpoint():
+    """urllib3's NewConnectionError subclasses ConnectTimeoutError, so a
+    refusal read as a timeout and dropped the endpoint for the run. A
+    refusal is instant and costs nothing to try again; only a real timeout
+    or spent retries should drop it."""
+    import socket
+    from web3 import Web3
+    from aikiri_ledger.cli import _DropOnTransportFailure, _retrying_session
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # closed once the block exits: connections are refused
+    w3 = Web3(Web3.HTTPProvider(f"http://127.0.0.1:{port}", session=_retrying_session()))
+    r = _DropOnTransportFailure("refused", w3.eth)
+    for _ in range(2):
+        with pytest.raises(Exception) as e:
+            r.get_block_number()
+        assert "dropped" not in str(e.value), e.value
