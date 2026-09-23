@@ -1053,11 +1053,17 @@ def test_nightly_proposes_proofs_instead_of_pushing_to_main():
     open (or update) a pull request, never push to main itself."""
     import re
     text = (Path(".github/workflows") / "nightly.yml").read_text()
-    assert "git push origin HEAD:main" not in text, \
+    # Not just the one spelling that used to be here: any shell push at main, in
+    # whatever form a future edit writes it.
+    assert not re.search(r"(?m)^\s*git\s+push\b.*(?:\bmain\b|refs/heads/main)", text), \
         "nightly must not push directly to main"
+    assert "contents: write" in text, \
+        "pushing the PR branch itself still needs contents: write"
     assert "pull-requests: write" in text, \
         "opening a PR needs pull-requests: write in permissions"
-    assert "create-pull-request" in text, \
-        "no pull-request mechanism found"
-    assert re.search(r"branch:\s*\S+", text), \
+    assert "uses: peter-evans/create-pull-request@" in text, \
+        "no pinned pull-request action found"
+    assert "add-paths: ledger/proofs" in text, \
+        "the PR must be scoped to ledger/proofs, not free to touch anything else"
+    assert "branch: nightly/bitcoin-proofs" in text, \
         "reuse one branch across nights rather than opening a new PR each time"
