@@ -119,6 +119,7 @@ def _retrying_session():
                   allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
                   retry_after_max=10)
     session = Session()
+    session.max_redirects = 0  # an endpoint may not send verify's POST anywhere else
     session.mount("https://", HTTPAdapter(max_retries=retry))
     session.mount("http://", HTTPAdapter(max_retries=retry))
     return session
