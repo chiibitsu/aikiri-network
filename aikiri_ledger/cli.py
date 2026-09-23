@@ -154,10 +154,14 @@ class _DropOnTransportFailure:
     its full retry budget or web3's 30s timeout each time would hold the job
     past its timeout. A one-off reset or refusal costs nothing to try again
     and fails only that read; a JSON-RPC error is an answer. Neither drops
-    it."""
+    it. An endpoint that answers every time, but only after most of its
+    retries, spends nothing and is dropped instead once its reads have taken
+    `budget` seconds in all this run."""
 
-    def __init__(self, rpc: str, reader):
+    def __init__(self, rpc: str, reader, budget: float = 120.0, clock=None):
+        import time
         self._rpc, self._reader, self._dropped = rpc, reader, None
+        self._budget, self._clock, self._spent_s = budget, clock or time.monotonic, 0.0
 
     def __getattr__(self, name):
         attr = getattr(self._reader, name)
@@ -167,12 +171,18 @@ class _DropOnTransportFailure:
         def call(*a, **k):
             if self._dropped:
                 raise ConnectionError(self._dropped)
+            start = self._clock()
             try:
                 return attr(*a, **k)
             except Exception as e:  # noqa: BLE001 - re-raised; only the kind decides a drop
                 if _spent(e):
                     self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
                 raise
+            finally:
+                self._spent_s += self._clock() - start
+                if not self._dropped and self._spent_s > self._budget:
+                    self._dropped = (f"rpc {self._rpc} dropped for this run: over its "
+                                     f"{self._budget:.0f}s budget ({self._spent_s:.0f}s)")
         return call
 
 
