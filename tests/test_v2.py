@@ -1243,3 +1243,53 @@ def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, 
                                base=QuorumBase([By(truthful), By(truthful), By(trust.owner)]))
     assert state == State.INVALID, report
     assert any("record" in r.lower() for r in report), report
+
+
+def test_an_endpoint_that_exhausts_its_retries_is_not_asked_again(monkeypatch):
+    """An endpoint can pass the chainId check and then 429 every read. Each
+    read then costs the whole retry budget (80s with Retry-After: 10), and
+    the quorum asks its readers one after another, 4 + 3 reads per block ~
+    so one such endpoint outlasted the step's timeout at 4 blocks. Once it
+    has run out of retries it is dropped for the rest of the run."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib3.util.retry import Retry
+    from aikiri_ledger.cli import _base_reader
+    monkeypatch.setattr(Retry, "get_backoff_time", lambda self: 0)
+    hits = []
+
+    class ChainIdThenLimited(BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if req["method"] != "eth_chainId":
+                hits.append(1)
+                self.send_response(429)
+                self.end_headers()
+                return
+            body = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    bad = HTTPServer(("127.0.0.1", 0), ChainIdThenLimited)
+    threading.Thread(target=bad.serve_forever, daemon=True).start()
+    good = [_stub_rpc(lambda r: {"result": "0x2105"}) for _ in range(2)]
+    try:
+        urls = [f"http://127.0.0.1:{s.server_port}" for s in (good[0], bad, good[1])]
+        trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                      code_keccak=None, genesis_hash=None, validator=None)
+        q = _base_reader({}, trust, urls, need_signer=False)
+        with pytest.raises(Exception):
+            q.readers[1].finalized_block()
+        first = len(hits)
+        assert first == 9, first
+        with pytest.raises(Exception, match=urls[1]):
+            q.readers[1].finalized_block()
+        assert len(hits) == first, "a dropped endpoint was asked again"
+    finally:
+        for s in (*good, bad):
+            s.shutdown()
