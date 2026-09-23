@@ -101,9 +101,10 @@ def _base_key() -> str:
 def _retrying_session():
     """For reads only. A public RPC rate-limits under load, and web3.py's own
     tolerance for that is short: measured at 5 attempts total, giving up
-    inside 2.4s. This stretches one call to 9 attempts: ~13s in all, or up
-    to 80s when the server sends Retry-After, since each wait is the backoff
-    step or that header capped at 10s instead. A rate limit longer than that is the quorum's job; with only
+    inside 2.4s. This stretches one call to 9 attempts. The waits between
+    them come to ~13s, or up to 80s when the server sends Retry-After (each
+    wait is the backoff step or that header capped at 10s instead); each
+    attempt can also take up to web3's 30s timeout before its 429 arrives. A rate limit longer than that is the quorum's job; with only
     one endpoint nothing outlasts it, and verify fails. The signing path keeps web3's
     default: a retried broadcast can report "already known" for a
     transaction that landed, and reconcile already owns that case."""
@@ -155,13 +156,17 @@ class _DropOnTransportFailure:
     past its timeout. A one-off reset or refusal costs nothing to try again
     and fails only that read; a JSON-RPC error is an answer. Neither drops
     it. An endpoint that answers every time, but only after most of its
-    retries, spends nothing and is dropped instead once its reads have taken
-    `budget` seconds in all this run."""
+    retries, spends nothing and is dropped instead once its slow reads
+    (over `slow` seconds each) have taken `budget` seconds in all this run.
+    Only slow reads count, so a healthy endpoint never runs the budget down
+    however many blocks the ledger holds."""
 
-    def __init__(self, rpc: str, reader, budget: float = 120.0, clock=None):
+    def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
+                 clock=None):
         import time
         self._rpc, self._reader, self._dropped = rpc, reader, None
-        self._budget, self._clock, self._spent_s = budget, clock or time.monotonic, 0.0
+        self._budget, self._slow, self._spent_s = budget, slow, 0.0
+        self._clock = clock or time.monotonic
 
     def __getattr__(self, name):
         attr = getattr(self._reader, name)
@@ -179,7 +184,9 @@ class _DropOnTransportFailure:
                     self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
                 raise
             finally:
-                self._spent_s += self._clock() - start
+                took = self._clock() - start
+                if took > self._slow:
+                    self._spent_s += took
                 if not self._dropped and self._spent_s > self._budget:
                     self._dropped = (f"rpc {self._rpc} dropped for this run: over its "
                                      f"{self._budget:.0f}s budget ({self._spent_s:.0f}s)")

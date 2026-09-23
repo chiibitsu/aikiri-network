@@ -68,7 +68,7 @@ There is no grace window. A block that is written but not yet anchored leaves th
 aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
 ```
 
-Several RPCs are read at a common finalized block. A majority must answer and they must agree; disagreement is never success. A trust file loaded from inside this repository is labelled `repo` and capped at `VALID LOCALLY`, because a verifier that reads its expectations from the thing it is checking proves nothing.
+Several RPCs are read at the finalized height a majority of them has reached. A majority must answer and they must agree; disagreement is never success. A trust file loaded from inside this repository is labelled `repo` and capped at `VALID LOCALLY`, because a verifier that reads its expectations from the thing it is checking proves nothing.
 
 ## Writing a block
 
