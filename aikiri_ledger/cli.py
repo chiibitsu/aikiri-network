@@ -181,11 +181,14 @@ def _spent(e: BaseException) -> bool:
     a retrying adapter as ConnectionError(MaxRetryError(ReadTimeoutError)),
     not as Timeout, so the reason is read off the wrapped error."""
     from requests.exceptions import RetryError, Timeout
-    from urllib3.exceptions import TimeoutError as Urllib3Timeout
+    from urllib3.exceptions import NewConnectionError, TimeoutError as Urllib3Timeout
     if isinstance(e, (RetryError, Timeout)):
         return True
     inner = e.args[0] if e.args else None
-    return isinstance(getattr(inner, "reason", None), Urllib3Timeout)
+    reason = getattr(inner, "reason", None)
+    # NewConnectionError subclasses ConnectTimeoutError, but a refusal is
+    # instant: it is not what makes an endpoint expensive to keep asking.
+    return isinstance(reason, Urllib3Timeout) and not isinstance(reason, NewConnectionError)
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
