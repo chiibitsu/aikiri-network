@@ -896,7 +896,7 @@ class _Honest:
     def latest_index(self, block=None): return 1
     def genesis_hash(self): return None
     def owner(self): return None
-    def record(self, i): return {"blockHash": None, "anchoredAt": 0, "by": None}
+    def record(self, i, block=None): return {"blockHash": None, "anchoredAt": 0, "by": None}
     def finalized_block(self): return self._finalized
     def code_hash(self, block=None): return self._code
 
@@ -1233,7 +1233,7 @@ def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, 
             super().__init__()
             self._by = by
 
-        def record(self, i): return {"blockHash": None, "anchoredAt": 0, "by": self._by}
+        def record(self, i, block=None): return {"blockHash": None, "anchoredAt": 0, "by": self._by}
 
     truthful = "0x" + "33" * 20
     state, report = verify_all(ledger, trust, base=QuorumBase([By(truthful)] * 3))
@@ -1447,3 +1447,35 @@ def test_the_quorum_reads_every_value_at_one_height_per_run(ledger, sk, mac, tru
     q = QuorumBase([FailsAfterFirst(), AnchoredAt95(finalized=100), AnchoredAt95(finalized=90)])
     state, report = verify_all(ledger, trust, base=q)
     assert not any("different hash" in r for r in report), report
+
+
+def test_a_lagging_endpoint_cannot_fail_verify_through_record(ledger, sk, mac, trust):
+    """record() was read at each node's own head while the other reads were
+    pinned. A node whose head had not reached the latest anchor answered it
+    with an all-zero record, the quorum saw disagreement, and an honest
+    ledger read INVALID. record() is now read at the run's height too."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+    zero = {"blockHash": "00" * 32, "anchoredAt": 0, "by": "0x" + "00" * 20}
+    real = {"blockHash": None, "anchoredAt": 2 ** 40, "by": None}
+
+    class Node(_Honest):
+        def __init__(self, finalized, head):
+            super().__init__(finalized=finalized)
+            self._head = head
+
+        def _at(self, block):
+            h = self._head if block is None else block
+            if h > self._head:
+                raise ConnectionError("block not found")
+            return h
+
+        def latest_index(self, block=None): return 1 if self._at(block) >= 95 else 0
+        def matches(self, b, block=None): return b.index == 0 or self._at(block) >= 95
+        def record(self, i, block=None):
+            return real if i == 0 or self._at(block) >= 95 else zero
+
+    q = QuorumBase([Node(100, 1000), Node(100, 1000), Node(90, 92)])
+    state, report = verify_all(ledger, trust, base=q)
+    assert not any("disagree" in r for r in report), report
