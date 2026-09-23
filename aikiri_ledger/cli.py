@@ -101,9 +101,9 @@ def _base_key() -> str:
 def _retrying_session():
     """For reads only. A public RPC rate-limits under load, and web3.py's own
     tolerance for that is short: measured at 5 attempts total, giving up
-    inside 2.4s. This stretches one call to 9 attempts, ~13s in all; each
-    wait is the backoff step, or the server's Retry-After capped at 10s
-    instead. A rate limit longer than that is the quorum's job; with only
+    inside 2.4s. This stretches one call to 9 attempts: ~13s in all, or up
+    to 80s when the server sends Retry-After, since each wait is the backoff
+    step or that header capped at 10s instead. A rate limit longer than that is the quorum's job; with only
     one endpoint nothing outlasts it, and verify fails. The signing path keeps web3's
     default: a retried broadcast can report "already known" for a
     transaction that landed, and reconcile already owns that case."""
