@@ -1502,3 +1502,44 @@ def test_the_retrying_read_path_does_not_stack_web3s_own_retry():
     w3 = _w3("http://127.0.0.1:1", None, retrying=True)  # no chainId check: no request made
     assert w3.provider.exception_retry_configuration is None
     assert _w3("http://127.0.0.1:1", None).provider.exception_retry_configuration is not None
+
+
+def test_an_endpoint_cannot_redirect_verify_elsewhere():
+    """requests follows redirects, so an endpoint answering 307 sent verify's
+    POST on to any address it named, the runner's own network included.
+    The read path follows none."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from aikiri_ledger.cli import _w3
+    sunk = []
+
+    class Sink(BaseHTTPRequestHandler):
+        def do_POST(self):
+            sunk.append(1)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    sink = HTTPServer(("127.0.0.1", 0), Sink)
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{sink.server_port}/")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    bad = HTTPServer(("127.0.0.1", 0), Redirect)
+    for s in (sink, bad):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(Exception):
+            _w3(f"http://127.0.0.1:{bad.server_port}", 8453, retrying=True)
+        assert sunk == [], "the POST was forwarded to the address the endpoint named"
+    finally:
+        for s in (sink, bad):
+            s.shutdown()
