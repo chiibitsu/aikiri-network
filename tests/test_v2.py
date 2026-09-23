@@ -1318,3 +1318,44 @@ def test_one_endpoint_reporting_a_stale_height_cannot_hide_a_mismatch(ledger, sk
     state, report = verify_all(ledger, trust, base=QuorumBase([honest[0], stale, honest[1]]))
     assert state == State.INVALID, report
     assert any("different hash" in r for r in report), report
+
+
+def test_a_single_connection_reset_does_not_drop_an_endpoint():
+    """Only exhausted retries or a timeout drop an endpoint for the run; a
+    one-off reset fails that read alone, or one blip on a healthy endpoint
+    plus one rate-limited endpoint would lose the quorum."""
+    from requests.exceptions import ConnectionError as Reset, RetryError
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    calls = []
+
+    class Flaky:
+        def finalized_block(self):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Reset("connection reset by peer")
+            if len(calls) == 3:
+                raise RetryError("too many 429 error responses")
+            return 100
+
+    r = _DropOnTransportFailure("https://flaky", Flaky())
+    with pytest.raises(Reset):
+        r.finalized_block()
+    assert r.finalized_block() == 100
+    with pytest.raises(RetryError):
+        r.finalized_block()
+    with pytest.raises(ConnectionError, match="dropped"):
+        r.finalized_block()
+    assert len(calls) == 3
+
+    # A hung read reaches us as ConnectionError(MaxRetryError(ReadTimeoutError)).
+    from urllib3.exceptions import MaxRetryError, ReadTimeoutError
+
+    class Hung:
+        def finalized_block(self):
+            raise Reset(MaxRetryError(None, "/", ReadTimeoutError(None, "/", "read timed out")))
+
+    h = _DropOnTransportFailure("https://hung", Hung())
+    with pytest.raises(Reset):
+        h.finalized_block()
+    with pytest.raises(ConnectionError, match="dropped"):
+        h.finalized_block()

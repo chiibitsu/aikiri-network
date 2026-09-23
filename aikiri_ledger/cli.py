@@ -148,12 +148,13 @@ class _Unreachable:
 
 
 class _DropOnTransportFailure:
-    """One endpoint's reader, until a read fails in transport: retries run
-    out, or it cannot be reached. From then on every call fails at once.
-    The quorum asks its readers one after another, 4 + 3 reads per block,
-    so an endpoint left in paying its full retry budget each time would
-    hold the job past its timeout. A JSON-RPC error is an answer, not a
-    transport failure, and does not drop it."""
+    """One endpoint's reader, until a read exhausts its retries or times
+    out. From then on every call fails at once. The quorum asks its readers
+    one after another, 4 + 3 reads per block, so an endpoint left in paying
+    its full retry budget or web3's 30s timeout each time would hold the job
+    past its timeout. A one-off reset or refusal costs nothing to try again
+    and fails only that read; a JSON-RPC error is an answer. Neither drops
+    it."""
 
     def __init__(self, rpc: str, reader):
         self._rpc, self._reader, self._dropped = rpc, reader, None
@@ -164,15 +165,27 @@ class _DropOnTransportFailure:
             return attr
 
         def call(*a, **k):
-            from requests.exceptions import RequestException
             if self._dropped:
                 raise ConnectionError(self._dropped)
             try:
                 return attr(*a, **k)
-            except RequestException as e:
-                self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
+            except Exception as e:  # noqa: BLE001 - re-raised; only the kind decides a drop
+                if _spent(e):
+                    self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
                 raise
         return call
+
+
+def _spent(e: BaseException) -> bool:
+    """Retries exhausted, or a timeout. requests reports a read timeout under
+    a retrying adapter as ConnectionError(MaxRetryError(ReadTimeoutError)),
+    not as Timeout, so the reason is read off the wrapped error."""
+    from requests.exceptions import RetryError, Timeout
+    from urllib3.exceptions import TimeoutError as Urllib3Timeout
+    if isinstance(e, (RetryError, Timeout)):
+        return True
+    inner = e.args[0] if e.args else None
+    return isinstance(getattr(inner, "reason", None), Urllib3Timeout)
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
