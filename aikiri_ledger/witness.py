@@ -303,7 +303,7 @@ class QuorumBase:
     One RPC is one party's word. Requiring every endpoint to answer makes a
     verifier that fails whenever a provider is down; requiring none makes a
     verifier that believes whoever answers first. So: a majority must answer,
-    at a block height they all have, and they must agree. Disagreement is never
+    at a block height a majority has reached, and they must agree. Disagreement is never
     a success ~ it is the loudest possible signal that something is wrong.
     """
 
@@ -339,7 +339,10 @@ class QuorumBase:
             raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
                               f"finalized block; {self.quorum} needed. Reading at each node's "
                               f"own head instead would drop the guarantee this class exists for")
-        return min(heights)
+        # The highest height a quorum has reached, not the lowest any one
+        # reported: the lowest let a single endpoint claiming an old height
+        # pull every read back before the latest anchor.
+        return sorted(heights, reverse=True)[self.quorum - 1]
 
     # ---- the read interface the verifier uses ----
     @property
