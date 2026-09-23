@@ -1044,3 +1044,26 @@ def test_the_lock_carries_what_the_workflows_import():
     missing = [d for d in needed if d not in pinned]
     assert pinned, "no pinned requirements found; the scan is broken, not the lock"
     assert not missing, f"installed by no workflow: {missing}"
+
+
+def test_nightly_proposes_proofs_instead_of_pushing_to_main():
+    """nightly runs with no secrets and never could forge a block, but a
+    standing `git push origin HEAD:main` is still a standing write credential
+    for a job that only ever touches ledger/proofs. It must propose instead:
+    open (or update) a pull request, never push to main itself."""
+    import re
+    text = (Path(".github/workflows") / "nightly.yml").read_text()
+    # Not just the one spelling that used to be here: any shell push at main, in
+    # whatever form a future edit writes it.
+    assert not re.search(r"(?m)^\s*git\s+push\b.*(?:\bmain\b|refs/heads/main)", text), \
+        "nightly must not push directly to main"
+    assert "contents: write" in text, \
+        "pushing the PR branch itself still needs contents: write"
+    assert "pull-requests: write" in text, \
+        "opening a PR needs pull-requests: write in permissions"
+    assert "uses: peter-evans/create-pull-request@" in text, \
+        "no pinned pull-request action found"
+    assert "add-paths: ledger/proofs" in text, \
+        "the PR must be scoped to ledger/proofs, not free to touch anything else"
+    assert "branch: nightly/bitcoin-proofs" in text, \
+        "reuse one branch across nights rather than opening a new PR each time"
