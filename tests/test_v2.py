@@ -1418,3 +1418,32 @@ def test_healthy_endpoints_never_exhaust_the_budget_however_long_the_chain():
     r = _DropOnTransportFailure("https://healthy", Healthy(), budget=120.0, clock=lambda: now[0])
     for _ in range(3000):  # ~1000 blocks' worth of reads, 900s in all
         assert r.finalized_block() == 100
+
+
+def test_the_quorum_reads_every_value_at_one_height_per_run(ledger, sk, mac, trust):
+    """common_block was recomputed on every read, so an endpoint that failed
+    after its first answer moved the height between reads: latestIndex at
+    100 saw block 1, matches at 90 did not, and an honest anchor made at 95
+    read as "Base holds a different hash". The height is now fixed per run."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+
+    class AnchoredAt95(_Honest):
+        def latest_index(self, block=None): return 1 if block >= 95 else 0
+        def matches(self, b, block=None): return b.index == 0 or block >= 95
+
+    class FailsAfterFirst(AnchoredAt95):
+        def __init__(self):
+            super().__init__(finalized=120)
+            self.asked = 0
+
+        def finalized_block(self):
+            self.asked += 1
+            if self.asked > 1:
+                raise ConnectionError("gone")
+            return 120
+
+    q = QuorumBase([FailsAfterFirst(), AnchoredAt95(finalized=100), AnchoredAt95(finalized=90)])
+    state, report = verify_all(ledger, trust, base=q)
+    assert not any("different hash" in r for r in report), report
