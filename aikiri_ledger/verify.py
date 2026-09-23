@@ -210,8 +210,10 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                     continue
                 try:
                     rec = base.record(b.index)
-                except Exception:  # noqa: BLE001
-                    rec = None
+                except Exception as e:  # noqa: BLE001 - an unread record skips the checks below
+                    report.append(f"block {b.index}: could not read Base record: {e}")
+                    failures += 1
+                    continue
                 if rec and rec.get("anchoredAt"):
                     if int(rec["anchoredAt"]) < int(b.when.timestamp()):
                         report.append(f"block {b.index}: Base anchoredAt "

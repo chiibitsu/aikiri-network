@@ -103,14 +103,18 @@ def _retrying_session():
     tolerance for that is short: measured at 5 attempts total, giving up
     inside 2.4s. This stretches one call to 9 attempts, ~13s in all; each
     wait is the backoff step, or the server's Retry-After capped at 10s
-    instead. A rate limit longer than that is
-    the quorum's job, not this session's. The signing path keeps web3's
+    instead. A rate limit longer than that is the quorum's job; with only
+    one endpoint nothing outlasts it, and verify fails. The signing path keeps web3's
     default: a retried broadcast can report "already known" for a
     transaction that landed, and reconcile already owns that case."""
     from requests import Session
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
-    retry = Retry(total=8, backoff_factor=0.05, status_forcelist=(429,),
+    # Only 429 is retried: a read that timed out is not retried (web3's own
+    # timeout is 30s, and nine of those would hold the job), a refused
+    # connection once.
+    retry = Retry(total=8, connect=1, read=0, status=8, backoff_factor=0.05,
+                  status_forcelist=(429,),
                   allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
                   retry_after_max=10)
     session = Session()
@@ -128,9 +132,10 @@ def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
 
 
 class _Unreachable:
-    """An endpoint that failed its chainId check while the quorum was being
-    built. It stays in the count, so it votes against and never for, and
-    every read from it raises why it was dropped."""
+    """An endpoint that could not be used while the quorum was being built:
+    unreachable, still rate-limited, or on the wrong chain. It stays in the
+    count, so it votes against and never for, and every read from it raises
+    why it was dropped."""
     address = None
 
     def __init__(self, rpc: str, error: BaseException):

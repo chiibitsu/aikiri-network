@@ -1212,6 +1212,11 @@ def test_a_server_cannot_park_verify_on_retry_after():
     from aikiri_ledger.cli import _retrying_session
     retry = _retrying_session().get_adapter("https://x").max_retries
     assert retry.retry_after_max <= 10
+    assert retry.read == 0  # a hung read is web3's 30s once, never nine times
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        step = text[text.index("- name: verify"):]
+        assert "timeout-minutes:" in step.split("run:")[0], name
 
 
 def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, mac, trust):
