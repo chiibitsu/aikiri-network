@@ -312,6 +312,7 @@ class QuorumBase:
             raise QuorumError("no RPC endpoints given")
         self.readers = list(readers)
         self.quorum = quorum or (len(self.readers) // 2 + 1)
+        self._at = None  # the height every read of this run is made at
 
     def _gather(self, fn):
         answers, errors = [], []
@@ -329,6 +330,11 @@ class QuorumBase:
         return answers[0]
 
     def common_block(self) -> int:
+        # Chosen once and kept: recomputed per read, an endpoint failing after
+        # its first answer moved the height between latestIndex and matches,
+        # and an honest anchor between the two heights read as a mismatch.
+        if self._at is not None:
+            return self._at
         heights = []
         for r in self.readers:
             try:
@@ -342,7 +348,8 @@ class QuorumBase:
         # The highest height a quorum has reached, not the lowest any one
         # reported: the lowest let a single endpoint claiming an old height
         # pull every read back before the latest anchor.
-        return sorted(heights, reverse=True)[self.quorum - 1]
+        self._at = sorted(heights, reverse=True)[self.quorum - 1]
+        return self._at
 
     # ---- the read interface the verifier uses ----
     @property
