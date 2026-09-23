@@ -1140,3 +1140,20 @@ def test_a_witness_that_cannot_answer_matches_is_a_failure_not_a_crash(ledger, s
     assert state == State.INVALID
     assert any("block 1" in r.lower() and ("match" in r.lower() or "could not" in r.lower())
               for r in report), report
+
+
+def test_verify_reads_base_through_more_than_one_endpoint():
+    """A single public RPC can be rate-limited for minutes at a time ~ block
+    2's first real run hit exactly that, and it was still in effect when
+    Chii retried from her own Mac afterward. No retry budget bounded to a
+    CI job's runtime reliably outlasts that. QuorumBase already tolerates
+    one dead reader out of three; the workflows just never gave it more
+    than one endpoint to be a quorum of."""
+    import re
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        for line in text.splitlines():
+            if "aikiri-ledger" in line and " verify " in line:
+                urls = re.findall(r"--rpc\s+(\S+)", line)
+                assert len(set(urls)) >= 3, \
+                    f"{name}: verify reads Base through {len(urls)} endpoint(s), not a quorum: {line!r}"
