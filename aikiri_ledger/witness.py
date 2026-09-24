@@ -257,7 +257,7 @@ class BitcoinWitness:
         try:
             p = self._digest_file(block)
             subprocess.run(["ots", "stamp", str(p)], check=True)
-        except (subprocess.CalledProcessError, OSError):
+        except BaseException:  # a failure, or an interrupt: what it left goes either way
             for path, existed in zip((ots, digest), had):
                 if not existed:
                     path.unlink(missing_ok=True)

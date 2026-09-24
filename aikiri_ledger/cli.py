@@ -12,6 +12,7 @@
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
   stamp                     stamp on Bitcoin every block with no .ots yet
+  proof-status <index>      what the block's Bitcoin proof file is, in one line
   verify                    report one of four states
   deploy                    deploy the contract (once)
 
@@ -163,6 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reconcile")
     sub.add_parser("upgrade")
     sub.add_parser("stamp")
+    sub.add_parser("proof-status").add_argument("index", type=int)
 
     v = sub.add_parser("verify")
     v.add_argument("--rpc", action="append", default=[])
@@ -361,6 +363,20 @@ def main(argv=None):
                 print(f"block {blk.index}: {_NOT_A_PROOF}")
                 continue
             print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
+        return 0
+
+    if a.cmd == "proof-status":
+        # block.yml's commit message reads this: main's history is never rewritten,
+        # so it says what is on disk, checked as a proof of the block.
+        blk = L.read(a.index)
+        if not L.proof_path(blk.index, "hash.ots").exists():
+            print("none; not stamped, nightly stamps it")
+        elif BitcoinWitness.available() and BitcoinWitness(L).holds_proof(blk):
+            print("pending; upgraded on a later run")
+        elif BitcoinWitness.available():
+            print("none; the file there is not a proof of this block")
+        else:
+            print("unknown; ots is not installed to read the file there")
         return 0
 
     if a.cmd == "stamp":

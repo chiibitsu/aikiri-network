@@ -1,8 +1,8 @@
 name: block
 # Writes the next block from a sealed request, anchors it on Base, stamps it on
 # Bitcoin, commits the block and its proofs. A stamp that fails does not stop the
-# commit (the Base anchor cannot be taken back); nightly stamps any block without
-# a proof, and the commit message says which it was.
+# commit (the Base anchor cannot be taken back); nightly stamps any block with no
+# .ots yet, and the commit message says what the proof file is.
 #
 # The request is produced in the vault and pushed here as hashes only. It carries
 # Chii's approval, signed in the Secure Enclave of one of her registered devices.
@@ -60,8 +60,7 @@ jobs:
           KIND=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['roots'][0]['kind'])" "ledger/blocks/$B.json")
           DEV=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['approval']['device'])" "ledger/blocks/$B.json")
           TX=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['tx'])" "ledger/proofs/$B.base.json")
-          if test -f "ledger/proofs/$B.hash.ots"; then OTS="pending; upgraded on a later run"
-          else OTS="none; not stamped, nightly stamps it"; fi
+          OTS=$(aikiri-ledger proof-status "$INDEX")
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -q --ignore-unmatch ledger/requests/*.json

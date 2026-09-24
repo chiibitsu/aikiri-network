@@ -1250,7 +1250,7 @@ def test_witness_goes_on_when_the_bitcoin_stamp_fails(ledger, monkeypatch, capsy
     # block.yml commits the block only after `witness`. If the stamp failed after
     # the Base anchor, the anchored block was never committed, and a rerun writes a
     # different block N that Base refuses (AlreadyAnchored). Nightly stamps any
-    # block without a proof, so a failed stamp can wait for it.
+    # block with no .ots, so a failed stamp can wait for it.
     from aikiri_ledger import cli, witness as W
     monkeypatch.setattr(W.subprocess, "run", _FakeOts(fail={"stamp"}))
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
@@ -1259,18 +1259,24 @@ def test_witness_goes_on_when_the_bitcoin_stamp_fails(ledger, monkeypatch, capsy
     assert not ledger.proof_path(0, "hash.ots").exists()
 
 
-@pytest.mark.parametrize("before", ["proof", "backup only"])
-def test_witness_settles_first_and_keeps_a_proof_it_finds(ledger, monkeypatch, capsys, before):
+@pytest.mark.parametrize("before, says", [
+    ("proof", "block 0 already has a proof"),
+    ("backup only", "block 0 already has a proof"),
+    ("not a proof", "not a proof of this block"),
+])
+def test_witness_settles_first_and_keeps_what_it_finds(ledger, monkeypatch, capsys, before, says):
     from aikiri_ledger import cli, witness as W
     fake = _FakeOts()
     monkeypatch.setattr(W.subprocess, "run", fake)
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ots, bak = _ots_paths(ledger, 0)
-    (ots if before == "proof" else bak).write_bytes(b"complete proof")
+    content = b"junk" if before == "not a proof" else b"complete proof"
+    (bak if before == "backup only" else ots).write_bytes(content)
     assert cli.main(["--ledger", str(ledger.root), "witness", "0"]) == 0
     assert not any(c[1] == "stamp" for c in fake.calls)
-    assert ots.read_bytes() == b"complete proof" and not bak.exists()
-    assert "block 0 already has a proof" in capsys.readouterr().out
+    assert ots.read_bytes() == content and not bak.exists()
+    out = capsys.readouterr().out
+    assert says in out and "nightly" not in out
 
 
 def test_a_failed_stamp_never_removes_a_proof_that_was_there(ledger, monkeypatch):
@@ -1300,6 +1306,18 @@ def test_a_stamp_that_cannot_write_the_digest_leaves_nothing(ledger, monkeypatch
     assert not ledger.proof_path(0, "hash").exists()
 
 
+@pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit])
+def test_a_stamp_interrupted_leaves_nothing(ledger, monkeypatch, stop):
+    # Ctrl-C or a signal while ots stamp runs: the cleanup runs all the same
+    from aikiri_ledger import witness as W
+    def interrupted(argv, **kw):
+        raise stop()
+    monkeypatch.setattr(W.subprocess, "run", interrupted)
+    with pytest.raises(stop):
+        W.BitcoinWitness(ledger).stamp(ledger.read(0))
+    assert not ledger.proof_path(0, "hash").exists()
+
+
 def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     text = (Path(".github/workflows") / "nightly.yml").read_text()
     assert "aikiri-ledger stamp" in text
@@ -1307,18 +1325,26 @@ def test_nightly_stamps_blocks_without_a_proof_before_proposing():
 
 
 def test_block_commit_says_whether_there_is_a_bitcoin_proof():
-    # witness goes on when the stamp fails, and main's history is never rewritten:
-    # the commit message must not claim a proof that was not made.
+    # witness goes on when the stamp fails or finds a file that is not a proof, and
+    # main's history is never rewritten: the commit's OTS line comes from what is
+    # on disk, checked as a proof of the block, not from whether a file exists.
     text = (Path(".github/workflows") / "block.yml").read_text()
     step = text[text.index("- name: commit the block and its proofs"):text.index("- name: verify")]
-    assert "OTS       pending; upgraded on a later run" not in step
-    lines = [l.strip() for l in step.splitlines()]
-    snippet = "\n".join(lines[lines.index(next(l for l in lines if l.startswith("if test -f"))):][:2])
-    for has_proof, word in ((True, "pending"), (False, "none")):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "ledger/proofs").mkdir(parents=True)
-            if has_proof:
-                (Path(d) / "ledger/proofs/000003.hash.ots").write_bytes(b"proof")
-            out = subprocess.run(["bash", "-ec", 'B=000003\n' + snippet + '\necho "$OTS"'],
-                                 cwd=d, capture_output=True, text=True, check=True).stdout
-            assert out.startswith(word), (has_proof, out)
+    assert 'OTS=$(aikiri-ledger proof-status "$INDEX")' in step
+    assert "test -f" not in step and "OTS       $OTS" in step
+
+
+@pytest.mark.parametrize("on_disk, says", [
+    ("proof", "pending; upgraded on a later run"),
+    ("junk", "none; the file there is not a proof of this block"),
+    (None, "none; not stamped, nightly stamps it"),
+])
+def test_proof_status_says_what_is_there(ledger, monkeypatch, capsys, on_disk, says):
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, _ = _ots_paths(ledger, 0)
+    if on_disk:
+        ots.write_bytes(b"pending proof" if on_disk == "proof" else b"junk")
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
+    assert capsys.readouterr().out.strip() == says
