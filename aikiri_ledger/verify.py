@@ -4,7 +4,7 @@
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
                                      or could not be checked here (no Bitcoin node, or
-                                     a calendar failing while ots asked it)
+                                     ots crashing inside its calendar client)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but
