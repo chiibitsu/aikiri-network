@@ -484,6 +484,76 @@ def test_no_bitcoin_node_does_not_hide_a_real_verdict(ledger, trust, msg):
     assert state == State.INVALID and any("FAILED" in r for r in report)
 
 
+class _Ran:
+    def __init__(self, returncode, out=""):
+        self.returncode, self.stdout, self.stderr = returncode, out, ""
+
+
+def test_bitcoin_proof_must_be_of_this_blocks_hash(ledger, trust, monkeypatch):
+    # ots checks a proof only against the .hash file beside it. A genuine proof of
+    # any other data, with that data in the .hash file, must not count for the block.
+    from aikiri_ledger import witness as W
+    base = _base_verified(ledger, trust)
+    ran = []
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: ran.append(a) or _Ran(0, "Success!"))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(b"proof of something else")
+    ledger.proof_path(0, "hash").write_bytes(b"something else")
+    state, report = verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
+    assert state == State.INVALID and not ran
+    assert any("FAILED" in r and "000000.hash" in r for r in report)
+
+
+def test_bitcoin_proof_of_this_blocks_hash_goes_to_ots(ledger, trust, monkeypatch):
+    from aikiri_ledger import witness as W
+    base = _base_verified(ledger, trust)
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: _Ran(0, "Success!"))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(b"proof")
+    ledger.proof_path(0, "hash").write_bytes(bytes.fromhex(ledger.read(0).hash))
+    state, _ = verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
+    assert state == State.FULLY_VERIFIED
+
+
+@pytest.mark.parametrize("verdict", [
+    "Bitcoin verification failed: Bad merkleroot",
+    "File does not match original!",
+])
+@pytest.mark.parametrize("root", ["/srv/ledger", "/srv/pending", "/srv/missing-incomplete"])
+def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, root):
+    # The pending check used to look for "pending"/"missing"/"incomplete" anywhere in
+    # the output, which also carries the ledger's own path.
+    base = _base_verified(ledger, trust)
+    state, report = verify_all(ledger, trust, base=base,
+                               bitcoin=_Ots(False, _PREAMBLE.format(root=root) + verdict))
+    assert state == State.INVALID and any("FAILED" in r for r in report)
+
+
+@pytest.mark.parametrize("msg", [
+    "no .ots proof",
+    # A calendar answering that Bitcoin has not confirmed it yet (a 404 body,
+    # opentimestamps/calendar.py), printed at otsclient/cmds.py:298
+    _PREAMBLE.format(root="/srv/ledger") +
+    "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",
+    # No calendar reachable (cmds.py:301): not yet known, not wrong
+    _PREAMBLE.format(root="/srv/ledger") +
+    "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
+    "Calendar https://bob.btc.calendar.opentimestamps.org: [Errno -3] Temporary failure in name resolution",
+])
+def test_a_proof_not_yet_complete_is_pending(ledger, trust, msg):
+    base = _base_verified(ledger, trust)
+    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+    assert state == State.BASE_VERIFIED
+    assert any("Bitcoin proof pending" in r for r in report)
+    assert not any("FAILED" in r for r in report)
+
+
+def test_an_ots_failure_that_says_nothing_is_a_failure(ledger, trust):
+    base = _base_verified(ledger, trust)
+    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, ""))
+    assert state == State.INVALID
+
+
 def test_truncated_chain_fails_against_contract_latest_index(ledger, sk, mac, trust):
     w3 = Web3(EthereumTesterProvider())
     c = compile_contract()
