@@ -181,7 +181,7 @@ nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
 longer than it needed to. The nightly runner reads the repository's own
 `trust.json`, so it never reports more than `VALID LOCALLY`. It has no Bitcoin
 node either, so it cannot check a complete proof; when `ots` gives no verdict but
-says it could not connect to one, verify reports the proof as not checked rather
-than failed.
+says it could not connect to one (or a calendar fails while `ots` asks it), verify
+reports the proof as not checked rather than failed.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin node.

@@ -3,7 +3,8 @@
   INVALID                            something is wrong; the report says what
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
-                                     or could not be checked here (no Bitcoin node)
+                                     or could not be checked here (no Bitcoin node, or
+                                     a calendar failing while ots asked it)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but
@@ -47,16 +48,21 @@ _NO_BITCOIN_NODE = ("could not connect to bitcoin node:",
 # calendar's "Not found" reads the same: the server can say it for a while about a
 # commitment it has only just taken (otsserver/rpc.py, its issue #10), and block.yml
 # verifies seconds after stamping.
-_OTS_PROGRESS = re.compile(r"got \d+ attestation\(s\) from \S+$|calendar \S+: ")
+_OTS_PROGRESS = re.compile(r"got \d+ attestation\(s\) from \S+$|calendar \S+:( |$)")
 # Lines that say nothing either way: the target it assumed when given no digest
 # (cmds.py:473), and a calendar off the whitelist, which it will never ask
 # (cmds.py:287).
 _OTS_NEUTRAL = re.compile(r"assuming target filename is "
                           r"|ignoring attestation from calendar \S+: calendar not in whitelist$")
-# It stopped on an exception: a calendar dropping the connection, or answering with
-# something that is not a proof (only URLError becomes a "Calendar" line). Every
-# verdict it reached was printed before this, and nothing follows it.
+# It stopped on an exception. Every verdict it reached was printed before this, and
+# nothing of its own follows. Excused only when a frame is in the calendar client: a
+# calendar dropping the connection, or answering with something that is not a proof
+# (a URLError becomes a "Calendar" line; these do not), and ots asks calendars only
+# while a proof is incomplete. Anything else, a Bitcoin node's RPC error about an
+# attestation for one, is about a proof that claims to be complete, and fails.
+# Frame paths are Python's own, not text a proof or a calendar can supply.
 _TRACEBACK = "traceback (most recent call last):"
+_CALENDAR_FRAME = re.compile(r'file "[^"]*/opentimestamps/calendar\.py", line \d+')
 _NO_PROOF = "no .ots proof"  # BitcoinWitness.verify, when there is no proof file at all
 
 
@@ -64,20 +70,24 @@ def _bitcoin_result(ok: bool, msg: str) -> tuple[str, str]:
     """(complete | unchecked | pending | failed, why), from ots's exit and output.
 
     Any line not described above is a verdict, and fails. A proof is pending only
-    while ots has a way to move it towards Bitcoin; one it finished with and said
-    nothing about has none, and fails.
+    when ots said something about moving it towards Bitcoin (its cache or a
+    calendar, even one that could not answer); one it finished with and said
+    nothing about has no way there, and fails.
     """
     if ok:
         return "complete", ""
     if msg == _NO_PROOF:
         return "pending", ""
     progress = no_node = False
-    for line in (msg or "").splitlines():
+    lines = (msg or "").splitlines()
+    for n, line in enumerate(lines):
         low = line.strip().lower()
         if not low:
             continue
         if low.startswith(_TRACEBACK):
-            return "unchecked", "ots stopped on an error"
+            if any(_CALENDAR_FRAME.match(t.strip().lower()) for t in lines[n + 1:]):
+                return "unchecked", "a calendar failed while ots asked it"
+            return "failed", ""
         if low.startswith(_NO_BITCOIN_NODE):
             no_node = True
         elif _OTS_NEUTRAL.match(low):

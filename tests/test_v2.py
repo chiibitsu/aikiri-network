@@ -518,7 +518,7 @@ def test_bitcoin_proof_is_checked_against_this_blocks_hash(ledger, trust, monkey
 
 
 def test_a_proof_of_other_data_fails(ledger, trust):
-    # what `ots verify -d` prints when the proof is not of that digest (cmds.py:451)
+    # what `ots verify -d` prints when the proof is not of that digest (cmds.py:461)
     base = _base_verified(ledger, trust)
     msg = ("Digest provided does not match digest in timestamp, "
            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824 (sha256)")
@@ -569,14 +569,16 @@ def test_a_proof_not_yet_complete_is_pending(ledger, trust, msg):
     base = _base_verified(ledger, trust)
     state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
     assert state == State.BASE_VERIFIED
-    assert any("Bitcoin proof pending" in r for r in report)
+    assert any(r.startswith("block 0: Bitcoin proof pending: " + msg.splitlines()[0])
+               for r in report), "the report carries what ots said"
     assert not any("FAILED" in r for r in report)
 
 
 @pytest.mark.parametrize("msg", [
     "",
     # A proof whose only attestations have no way to Bitcoin (unknown or Litecoin
-    # ones: verify_timestamp passes over them in silence) prints nothing but this
+    # ones: verify_timestamp passes over them in silence) prints nothing under -d,
+    # the "" above; without -d, only the preamble
     _PREAMBLE.format(root="/srv/ledger").strip(),
     # One whose only calendar is off the whitelist: ots will never ask it
     _PREAMBLE.format(root="/srv/ledger") +
@@ -608,7 +610,8 @@ _NODE_TRACEBACK = ("Traceback (most recent call last):\n"
 
 def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
     # A calendar that drops the connection, or answers with a page that is not a
-    # proof, stops ots with a traceback (only URLError becomes a "Calendar" line).
+    # proof, stops ots with a traceback (a URLError or a 404 becomes a "Calendar"
+    # line; these do not).
     # Calendars are asked only while a proof is incomplete, and every verdict ots
     # reached is printed before the traceback.
     base = _base_verified(ledger, trust)
