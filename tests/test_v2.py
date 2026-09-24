@@ -546,6 +546,10 @@ def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, roo
     # opentimestamps/calendar.py), printed at otsclient/cmds.py:298
     _PREAMBLE.format(root="/srv/ledger") +
     "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",
+    # A calendar answering with an empty body: "Calendar <url>:" and nothing after
+    # (opentimestamps/calendar.py get_sanitised_resp_msg, cmds.py:298)
+    "Calendar https://alice.btc.calendar.opentimestamps.org: \n"
+    "Calendar https://bob.btc.calendar.opentimestamps.org:",
     # No calendar reachable (cmds.py:301): not yet known, not wrong
     _PREAMBLE.format(root="/srv/ledger") +
     "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
@@ -587,7 +591,19 @@ def test_an_ots_failure_that_says_nothing_is_a_failure(ledger, trust, msg):
 _TRACEBACK = ("Traceback (most recent call last):\n"
               "  File \"/usr/local/bin/ots\", line 8, in <module>\n"
               "    sys.exit(main())\n"
+              "  File \"/usr/local/lib/python3.11/dist-packages/opentimestamps/calendar.py\", "
+              "line 94, in get_timestamp\n"
+              "    with urllib.request.urlopen(req, timeout=timeout) as resp:\n"
               "http.client.RemoteDisconnected: Remote end closed connection without response")
+# What ots prints when a Bitcoin node answers an RPC it does not catch: a forged
+# attestation at a height past 2^31 gets "JSON integer out of range" (cmds.py:421-431)
+_NODE_TRACEBACK = ("Traceback (most recent call last):\n"
+                   "  File \"/usr/local/lib/python3.11/dist-packages/otsclient/cmds.py\", "
+                   "line 413, in verify_timestamp\n"
+                   "    blockhash = proxy.getblockhash(attestation.height)\n"
+                   "  File \"/usr/local/lib/python3.11/dist-packages/bitcoin/rpc.py\", "
+                   "line 239, in _call\n"
+                   "bitcoin.rpc.JSONRPCError: {'code': -1, 'message': 'JSON integer out of range'}")
 
 
 def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
@@ -602,6 +618,15 @@ def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
     assert state == State.BASE_VERIFIED
     assert any("not checked" in r and "RemoteDisconnected" in r for r in report)
     assert not any("FAILED" in r for r in report)
+
+
+def test_a_traceback_that_is_not_a_calendars_fails(ledger, trust):
+    # Only a calendar failing mid-request is excused: ots asks calendars only while a
+    # proof is incomplete. A node that raises was asked about a proof that claims to
+    # be complete.
+    base = _base_verified(ledger, trust)
+    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, _NODE_TRACEBACK))
+    assert state == State.INVALID and any("FAILED" in r for r in report)
 
 
 def test_a_verdict_before_a_traceback_still_fails(ledger, trust):
