@@ -368,15 +368,19 @@ def main(argv=None):
     if a.cmd == "proof-status":
         # block.yml's commit message reads this: main's history is never rewritten,
         # so it says what is on disk, checked as a proof of the block.
+        # It runs after the Base anchor, which cannot be taken back, so it never fails.
         blk = L.read(a.index)
-        if not L.proof_path(blk.index, "hash.ots").exists():
-            print("none; not stamped, nightly stamps it")
-        elif BitcoinWitness.available() and BitcoinWitness(L).holds_proof(blk):
-            print("pending; upgraded on a later run")
-        elif BitcoinWitness.available():
-            print("none; the file there is not a proof of this block")
-        else:
-            print("unknown; ots is not installed to read the file there")
+        try:
+            if not L.proof_path(blk.index, "hash.ots").exists():
+                print("none; not stamped, nightly stamps it")
+            elif not BitcoinWitness.available():
+                print("unknown; ots is not installed to read the file there")
+            elif BitcoinWitness(L).holds_proof(blk):
+                print("stamped; a proof of this block, upgraded on a later run")
+            else:
+                print("none; the file there is not a proof of this block")
+        except Exception as e:  # noqa: BLE001
+            print(f"unknown; the file there could not be read ({e})")
         return 0
 
     if a.cmd == "stamp":

@@ -186,5 +186,7 @@ A block's first proof is the exception. Nightly also stamps any block with no `.
 on `main` (block 0 was anchored at deploy and never stamped; a stamp that
 fails when a block is written is left to nightly too). That proof is only pending,
 and until the PR carrying it is merged, each night stamps the block again from
-`main`: the PR's proof is replaced, and the time it will prove moves later. Merge
-it when it appears; a later night upgrades it like any other.
+`main`: the PR's proof is replaced, and the time it will prove moves later. A night
+whose stamp fails with nothing else to propose closes the PR (the action deletes
+its branch when there is no change); the next night that stamps opens it again.
+Merge it when it appears; a later night upgrades it like any other.

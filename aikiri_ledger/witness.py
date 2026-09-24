@@ -241,9 +241,16 @@ class BitcoinWitness:
         return shutil.which("ots") is not None
 
     def _digest_file(self, block: Block) -> Path:
+        """Written beside and then moved over, so a write that fails never leaves the
+        .hash cut short."""
         self.ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
         p = self.ledger.proof_path(block.index, "hash")
-        p.write_bytes(bytes.fromhex(block.hash))
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            tmp.write_bytes(bytes.fromhex(block.hash))
+            os.replace(tmp, p)
+        finally:
+            tmp.unlink(missing_ok=True)
         return p
 
     def stamp(self, block: Block) -> Path:
@@ -277,8 +284,8 @@ class BitcoinWitness:
         write an upgrade while a .bak is there. If the proof reads as one, it is that
         upgrade's output, holding every attestation the backup had, and the backup
         goes. If it is missing, does not read as a proof (the write failed part-way),
-        or is not a proof of this block, the backup is the good copy and is put back
-        over it. Every
+        or is not a proof of this block, and the backup is one, the backup is the good
+        copy and is put back over it. If neither is, both are left. Every
         command that writes a proof settles first, so a .bak is never left beside a
         proof it did not come from."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
@@ -287,16 +294,21 @@ class BitcoinWitness:
             return
         if self.holds_proof(block):
             bak.unlink()
-        else:
+        elif self._proof_of(bak, block):
             os.replace(bak, ots)
+        # Neither is a proof of this block: both stay as they are, to be looked at.
 
     def holds_proof(self, block: Block) -> bool:
-        """The .ots is there, reads as a proof, and is a proof of this block: `ots
-        info` exits 1 on anything that is not a proof, and names the digest one is of."""
-        ots = self.ledger.proof_path(block.index, "hash.ots")
-        if not ots.exists():
+        """The .ots is there, reads as a proof, and is a proof of this block."""
+        return self._proof_of(self.ledger.proof_path(block.index, "hash.ots"), block)
+
+    @staticmethod
+    def _proof_of(path: Path, block: Block) -> bool:
+        """`ots info` exits 1 on anything that is not a proof, and names the digest a
+        proof is of; that must be this block's."""
+        if not path.exists():
             return False
-        r = subprocess.run(["ots", "info", str(ots)], capture_output=True, text=True)
+        r = subprocess.run(["ots", "info", str(path)], capture_output=True, text=True)
         digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
         first = (r.stdout.splitlines() or [""])[0].strip().lower()
         return r.returncode == 0 and first == f"file sha256 hash: {digest}"

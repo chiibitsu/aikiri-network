@@ -5,7 +5,6 @@ exist on Base are never rewritten: they verify as v1 against pinned hashes.
 """
 import hashlib
 import json
-import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1079,12 +1078,12 @@ class _FakeOts:
     - upgrade, as when it finds something new: renames the proof to .bak (and
       refuses if one is there), creates the new file, writes the proof into it
     - stamp refuses a .ots that is already there
-    - info: exit 1 if the file is not a proof, else the digest it is of (here
-      taken from the .hash beside it, which the tests set)
+    - info: exit 1 if the file is not a proof, else the digest it is of
+    A fake proof is b"proof:<digest>:<label>" and carries its own digest, as a
+    real one does; see _proof.
     `fail` names steps to make fail part-way, leaving what ots leaves then. It
     does not model an upgrade with nothing new, or a stamp that fails before it
     creates a file."""
-    GOOD = (b"pending proof", b"complete proof", b"older proof")
 
     def __init__(self, fail=()):
         self.calls, self.fail = [], set(fail)
@@ -1095,16 +1094,17 @@ class _FakeOts:
         self.calls.append(list(argv))
         cmd, path = argv[1], Path(argv[-1])
         if cmd == "info":
-            if not (path.exists() and path.read_bytes() in self.GOOD):
+            parts = (path.read_bytes() if path.exists() else b"").split(b":")
+            if len(parts) != 3 or parts[0] != b"proof":
                 return ran(1)
-            digest = hashlib.sha256(path.with_suffix("").read_bytes()).hexdigest()
-            return SimpleNamespace(returncode=0, stdout=f"File sha256 hash: {digest}\nTimestamp:\n",
-                                   stderr="")
+            return SimpleNamespace(returncode=0, stdout=f"File sha256 hash: {parts[1].decode()}\n"
+                                   "Timestamp:\n", stderr="")
         if cmd == "stamp":
             out = Path(str(path) + ".ots")
             if out.exists():  # opens the .ots with 'xb'
                 raise subprocess.CalledProcessError(1, argv)
-            out.write_bytes(b"trunc" if "stamp" in self.fail else b"pending proof")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            out.write_bytes(b"trunc" if "stamp" in self.fail else f"proof:{digest}:pending".encode())
             if "stamp" in self.fail:
                 raise subprocess.CalledProcessError(1, argv)
             return ran(0)
@@ -1112,8 +1112,9 @@ class _FakeOts:
             bak = Path(str(path) + ".bak")
             if bak.exists():
                 return ran(1)  # "Could not backup timestamp: ... already exists"
+            old = path.read_bytes()
             path.rename(bak)
-            path.write_bytes(b"trunc" if "upgrade" in self.fail else b"complete proof")
+            path.write_bytes(b"trunc" if "upgrade" in self.fail else old.rsplit(b":", 1)[0] + b":complete")
             return ran(1 if "upgrade" in self.fail else 0)
         return ran(0)
 
@@ -1121,9 +1122,14 @@ class _FakeOts:
 import subprocess  # noqa: E402  (the fake raises what subprocess.run(check=True) raises)
 
 
+def _proof(ledger, i, label, digest=None):
+    """A fake proof of block i (or of `digest`), as _FakeOts writes and reads it."""
+    digest = digest or hashlib.sha256(bytes.fromhex(ledger.read(i).hash)).hexdigest()
+    return f"proof:{digest}:{label}".encode()
+
+
 def _ots_paths(ledger, i):
-    """The proof, its backup, and the .hash beside them, as stamp leaves it (the
-    fake's `info` names the digest of that file, as ots stamp's proof does)."""
+    """The proof, its backup, and the .hash beside them, as stamp leaves it."""
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     ledger.proof_path(i, "hash").write_bytes(bytes.fromhex(ledger.read(i).hash))
     ots = ledger.proof_path(i, "hash.ots")
@@ -1135,10 +1141,10 @@ def test_upgrade_leaves_no_ots_backup_and_is_not_stopped_by_one(ledger, monkeypa
     monkeypatch.setattr(W.subprocess, "run", _FakeOts())
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     ots, bak = _ots_paths(ledger, 0)
-    ots.write_bytes(b"pending proof")
-    bak.write_bytes(b"older proof")
+    ots.write_bytes(_proof(ledger, 0, "pending"))
+    bak.write_bytes(_proof(ledger, 0, "older"))
     assert W.BitcoinWitness(ledger).upgrade(ledger.read(0))
-    assert ots.read_bytes() == b"complete proof" and not bak.exists()
+    assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
 
 
 def test_upgrade_that_fails_while_writing_keeps_the_good_proof(ledger, monkeypatch):
@@ -1148,9 +1154,9 @@ def test_upgrade_that_fails_while_writing_keeps_the_good_proof(ledger, monkeypat
     monkeypatch.setattr(W.subprocess, "run", _FakeOts(fail={"upgrade"}))
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     ots, bak = _ots_paths(ledger, 0)
-    ots.write_bytes(b"pending proof")
+    ots.write_bytes(_proof(ledger, 0, "pending"))
     assert not W.BitcoinWitness(ledger).upgrade(ledger.read(0))
-    assert ots.read_bytes() == b"pending proof" and not bak.exists()
+    assert ots.read_bytes() == _proof(ledger, 0, "pending") and not bak.exists()
 
 
 @pytest.mark.parametrize("left", [None, b"", b"trunc"])
@@ -1165,12 +1171,12 @@ def test_a_backup_left_by_an_earlier_run_is_put_back_first(ledger, monkeypatch, 
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     ots, bak = _ots_paths(ledger, 0)
-    bak.write_bytes(b"complete proof")
+    bak.write_bytes(_proof(ledger, 0, "complete"))
     if left is not None:
         ots.write_bytes(left)
     assert cli.main(["--ledger", str(ledger.root), cmd]) == 0
     assert not any(c[1] == "stamp" for c in fake.calls)
-    assert ots.read_bytes() == b"complete proof" and not bak.exists()
+    assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
 
 
 @pytest.mark.parametrize("left", [b"", b"trunc", "other block"])
@@ -1184,8 +1190,7 @@ def test_a_file_that_is_not_a_proof_of_the_block_is_named_not_stamped_over(ledge
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ots, _ = _ots_paths(ledger, 0)
     if left == "other block":
-        ots.write_bytes(b"pending proof")
-        ledger.proof_path(0, "hash").write_bytes(b"\x00" * 32)
+        ots.write_bytes(_proof(ledger, 0, "pending", digest="00" * 32))
     else:
         ots.write_bytes(left)
     before = ots.read_bytes()
@@ -1195,6 +1200,30 @@ def test_a_file_that_is_not_a_proof_of_the_block_is_named_not_stamped_over(ledge
     assert out.count("not a proof of this block") == 2
     assert not any(c[1] in ("stamp", "upgrade") for c in fake.calls)
     assert ots.read_bytes() == before
+
+
+def test_a_proof_of_other_data_does_not_displace_the_backup(ledger, monkeypatch):
+    # The .ots parses, but it is a proof of another digest: the .bak is the proof
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    ots, bak = _ots_paths(ledger, 0)
+    ots.write_bytes(_proof(ledger, 0, "pending", digest="00" * 32))
+    bak.write_bytes(_proof(ledger, 0, "complete"))
+    W.BitcoinWitness(ledger).settle_backup(ledger.read(0))
+    assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
+
+
+@pytest.mark.parametrize("left", [None, b"junk"])
+def test_a_backup_that_is_not_a_proof_is_not_put_back(ledger, monkeypatch, left):
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    ots, bak = _ots_paths(ledger, 0)
+    bak.write_bytes(_proof(ledger, 0, "pending", digest="00" * 32))
+    if left is not None:
+        ots.write_bytes(left)
+    W.BitcoinWitness(ledger).settle_backup(ledger.read(0))
+    assert (ots.read_bytes() if ots.exists() else None) == left
+    assert bak.exists()
 
 
 def test_ots_backups_are_never_committed():
@@ -1214,12 +1243,12 @@ def test_stamp_stamps_every_block_without_a_proof_and_only_those(ledger, sk, mac
     fake = _FakeOts()
     monkeypatch.setattr(W.subprocess, "run", fake)
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
-    _ots_paths(ledger, 1)[0].write_bytes(b"pending proof")
+    _ots_paths(ledger, 1)[0].write_bytes(_proof(ledger, 1, "pending"))
     assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
     stamped = sorted(c[-1] for c in fake.calls if c[1] == "stamp")
     assert stamped == [str(ledger.proof_path(0, "hash")), str(ledger.proof_path(2, "hash"))]
     assert ledger.proof_path(0, "hash").read_bytes() == bytes.fromhex(ledger.read(0).hash)
-    assert ledger.proof_path(1, "hash.ots").read_bytes() == b"pending proof"
+    assert ledger.proof_path(1, "hash.ots").read_bytes() == _proof(ledger, 1, "pending")
     n = len(fake.calls)
     assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
     assert not any(c[1] == "stamp" for c in fake.calls[n:]), "a block with a proof is not stamped again"
@@ -1270,7 +1299,7 @@ def test_witness_settles_first_and_keeps_what_it_finds(ledger, monkeypatch, caps
     monkeypatch.setattr(W.subprocess, "run", fake)
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ots, bak = _ots_paths(ledger, 0)
-    content = b"junk" if before == "not a proof" else b"complete proof"
+    content = b"junk" if before == "not a proof" else _proof(ledger, 0, "complete")
     (bak if before == "backup only" else ots).write_bytes(content)
     assert cli.main(["--ledger", str(ledger.root), "witness", "0"]) == 0
     assert not any(c[1] == "stamp" for c in fake.calls)
@@ -1284,26 +1313,36 @@ def test_a_failed_stamp_never_removes_a_proof_that_was_there(ledger, monkeypatch
     from aikiri_ledger import witness as W
     monkeypatch.setattr(W.subprocess, "run", _FakeOts())
     ots, _ = _ots_paths(ledger, 0)
-    ots.write_bytes(b"complete proof")
+    ots.write_bytes(_proof(ledger, 0, "complete"))
     with pytest.raises(subprocess.CalledProcessError):
         W.BitcoinWitness(ledger).stamp(ledger.read(0))
-    assert ots.read_bytes() == b"complete proof"
+    assert ots.read_bytes() == _proof(ledger, 0, "complete")
     assert ledger.proof_path(0, "hash").exists()
 
 
-def test_a_stamp_that_cannot_write_the_digest_leaves_nothing(ledger, monkeypatch):
-    # A full disk while writing <index>.hash: the empty file it leaves goes too
+@pytest.mark.parametrize("was_there", [False, True])
+def test_a_stamp_that_cannot_write_the_digest_changes_nothing(ledger, monkeypatch, was_there):
+    # A full disk while writing <index>.hash: a new one leaves nothing, and one that
+    # was there is not cut short (nightly's PR adds ledger/proofs as it finds it)
     from aikiri_ledger import witness as W
+    digest = ledger.proof_path(0, "hash")
+    if was_there:
+        ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+        digest.write_bytes(bytes.fromhex(ledger.read(0).hash))
     real = Path.write_bytes
     def full(self, data):
-        if self.name.endswith(".hash"):
+        if ".hash" in self.name and ".ots" not in self.name:
             real(self, b"")
             raise OSError(28, "No space left on device")
         return real(self, data)
     monkeypatch.setattr(Path, "write_bytes", full)
     with pytest.raises(OSError):
         W.BitcoinWitness(ledger).stamp(ledger.read(0))
-    assert not ledger.proof_path(0, "hash").exists()
+    if was_there:
+        assert digest.read_bytes() == bytes.fromhex(ledger.read(0).hash)
+    else:
+        assert not digest.exists()
+    assert [p.name for p in ledger.proofs_dir.iterdir()] == (["000000.hash"] if was_there else [])
 
 
 @pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit])
@@ -1335,7 +1374,7 @@ def test_block_commit_says_whether_there_is_a_bitcoin_proof():
 
 
 @pytest.mark.parametrize("on_disk, says", [
-    ("proof", "pending; upgraded on a later run"),
+    ("proof", "stamped; a proof of this block, upgraded on a later run"),
     ("junk", "none; the file there is not a proof of this block"),
     (None, "none; not stamped, nightly stamps it"),
 ])
@@ -1345,6 +1384,19 @@ def test_proof_status_says_what_is_there(ledger, monkeypatch, capsys, on_disk, s
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ots, _ = _ots_paths(ledger, 0)
     if on_disk:
-        ots.write_bytes(b"pending proof" if on_disk == "proof" else b"junk")
+        ots.write_bytes(_proof(ledger, 0, "pending") if on_disk == "proof" else b"junk")
     assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
     assert capsys.readouterr().out.strip() == says
+
+
+
+def test_proof_status_never_fails_the_commit_step(ledger, monkeypatch, capsys):
+    # It runs after the Base anchor, which cannot be taken back
+    from aikiri_ledger import cli, witness as W
+    def broken(*a, **k):
+        raise OSError("ots could not run")
+    monkeypatch.setattr(W.subprocess, "run", broken)
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    _ots_paths(ledger, 0)[0].write_bytes(b"anything")
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
+    assert capsys.readouterr().out.startswith("unknown; ")
