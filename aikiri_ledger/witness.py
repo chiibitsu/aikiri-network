@@ -260,8 +260,9 @@ class BitcoinWitness:
     def stamp(self, block: Block) -> Path:
         """Creates <index>.hash.ots (pending until upgraded). `ots stamp` creates the
         .ots before it writes the proof into it, so when it fails, whatever it left
-        is removed: a truncated .ots would be taken for a proof and never stamped
-        again, and a lone .hash would ride into a commit on its own."""
+        is removed: a cut-short .ots is not a proof, is left for a person to look at,
+        and the block would never be stamped again; a lone .hash would ride into a
+        commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
         had = ots.exists(), digest.exists()
@@ -277,30 +278,43 @@ class BitcoinWitness:
 
     def upgrade(self, block: Block) -> bool:
         ots = self.ledger.proof_path(block.index, "hash.ots")
-        self.settle_backup(block)
+        bak = ots.with_name(ots.name + ".bak")
+        if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
+            return False
         r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
-        self.settle_backup(block)
+        try:
+            self.settle_backup(block)
+        except OtsError:
+            # Settled above, so any .bak now is the proof ots just renamed, and what
+            # it wrote in its place cannot be checked: the proof goes back.
+            if bak.exists():
+                os.replace(bak, ots)
+            raise
         return r.returncode == 0
 
-    def settle_backup(self, block: Block) -> None:
+    def settle_backup(self, block: Block) -> bool:
         """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
         creates the new file and writes the upgraded proof into it; it will not
         write an upgrade while a .bak is there. If the proof reads as one, it is that
         upgrade's output, holding every attestation the backup had, and the backup
         goes. If it is missing, does not read as a proof (the write failed part-way),
         or is not a proof of this block, and the backup is one, the backup is the good
-        copy and is put back over it. If neither is, both are left. Every
-        command that writes a proof settles first, so a .bak is never left beside a
-        proof it did not come from."""
+        copy and is put back over it. If neither is, both are left and it returns
+        False: nothing may be stamped then, or the new proof would read as that
+        backup's upgrade and the next settle would delete the backup. Every command
+        that writes a proof settles first, so a .bak is never left beside a proof it
+        did not come from."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not bak.exists():
-            return
+            return True
         if self.holds_proof(block):
             bak.unlink()
         elif self._proof_of(bak, block):
             os.replace(bak, ots)
-        # Neither is a proof of this block: both stay as they are, to be looked at.
+        else:
+            return False  # neither is a proof of this block: both stay, to be looked at
+        return True
 
     def holds_proof(self, block: Block) -> bool:
         """The .ots is there, reads as a proof, and is a proof of this block."""
@@ -311,10 +325,14 @@ class BitcoinWitness:
         """`ots info` names the digest a proof is of, which must be this block's, and
         says so when the file is not a proof at all (otsclient/cmds.py info_command).
         Any other failure is ots not running, which says nothing about the file: it
-        raises OtsError, and nothing is stamped over, put back or deleted on it."""
+        raises OtsError, and nothing is stamped over, put back or deleted on it,
+        save in upgrade: there the .bak is the proof ots itself just renamed."""
         if not path.exists():
             return False
-        r = subprocess.run(["ots", "info", str(path)], capture_output=True, text=True)
+        try:
+            r = subprocess.run(["ots", "info", str(path)], capture_output=True, text=True)
+        except OSError as e:  # on PATH but cannot be executed
+            raise OtsError(f"ots info did not run: {e}") from e
         if r.returncode == 0:
             digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
             first = (r.stdout.splitlines() or [""])[0].strip().lower()

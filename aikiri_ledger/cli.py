@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -60,6 +61,8 @@ def _in_worktree(path: Path) -> bool:
 # An .ots that is empty, cut short or of another block's hash: reported, never
 # stamped over or upgraded, since it may be the only trace of what happened.
 _NOT_A_PROOF = "the .ots there is not a proof of this block; left as it is"
+_BAD_BACKUP = ("the .ots.bak there is not a proof of this block, nor is any .ots beside it; "
+               "both left as they are, nothing stamped")
 
 
 def _cfg(ledger: Ledger) -> dict:
@@ -325,8 +328,9 @@ def main(argv=None):
         if BitcoinWitness.available():
             try:
                 bw = BitcoinWitness(L)
-                bw.settle_backup(blk)  # as `stamp` does: never stamp beside a backup
-                if bw.holds_proof(blk):
+                if not bw.settle_backup(blk):  # as `stamp` does: never stamp beside a backup
+                    print(f"Bitcoin: block {blk.index}: {_BAD_BACKUP}")
+                elif bw.holds_proof(blk):
                     print(f"Bitcoin: block {blk.index} already has a proof")
                 elif L.proof_path(blk.index, "hash.ots").exists():
                     print(f"Bitcoin: block {blk.index}: {_NOT_A_PROOF}")
@@ -378,16 +382,21 @@ def main(argv=None):
         # It runs after the Base anchor, which cannot be taken back, so it never fails.
         try:
             blk = L.read(a.index)
-            if not L.proof_path(blk.index, "hash.ots").exists():
+            ots = L.proof_path(blk.index, "hash.ots")
+            if not ots.exists() and ots.with_name(ots.name + ".bak").exists():
+                print("unknown; only a .ots.bak is there, settled by the next upgrade or stamp")
+            elif not ots.exists():
                 print("none; not stamped, nightly stamps it")
             elif not BitcoinWitness.available():
                 print("unknown; ots is not installed to read the file there")
             elif BitcoinWitness(L).holds_proof(blk):
-                print("stamped; a proof of this block, upgraded on a later run")
+                print("stamped; a proof of this block")
             else:
                 print("none; the file there is not a proof of this block")
         except Exception as e:  # noqa: BLE001
-            print(f"unknown; the file there could not be read ({e})")
+            # ots's own words go into main's history: printable ASCII only
+            said = re.sub(r"[^ -~]", "?", str(e))
+            print(f"unknown; the file there could not be read ({said})")
         return 0
 
     if a.cmd == "stamp":
@@ -399,7 +408,10 @@ def main(argv=None):
         failed = 0
         for blk in L.blocks():
             try:
-                bw.settle_backup(blk)  # a .bak with no good proof is the proof: never stamp over it
+                if not bw.settle_backup(blk):  # never stamp beside a backup
+                    print(f"block {blk.index}: {_BAD_BACKUP}")
+                    failed += 1
+                    continue
                 if L.proof_path(blk.index, "hash.ots").exists():
                     if not bw.holds_proof(blk):
                         print(f"block {blk.index}: {_NOT_A_PROOF}")
