@@ -2089,6 +2089,31 @@ def test_the_hash_is_never_written_through_a_link(ledger, monkeypatch, tmp_path)
     assert not os.path.lexists(ledger.proof_path(0, "hash.tmp"))
 
 
+def test_a_link_planted_between_the_unlink_and_the_open_is_not_written_through(ledger, monkeypatch, tmp_path):
+    # The race O_EXCL|O_NOFOLLOW is there for: a link appears at .hash.tmp after
+    # _digest_file removed what was there and before it opens the file. Either flag
+    # alone refuses the link; both are asked for.
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"not the ledger's")
+    tmp = ledger.proof_path(0, "hash.tmp")
+    real_open, asked = os.open, []
+
+    def racing_open(path, flags, *a, **k):
+        if os.fspath(path) == os.fspath(tmp):
+            asked.append(flags)
+            if not os.path.lexists(tmp):
+                tmp.symlink_to(victim)
+        return real_open(path, flags, *a, **k)
+    monkeypatch.setattr(W.os, "open", racing_open)
+    cli.main(["--ledger", str(ledger.root), "stamp"])
+    assert victim.read_bytes() == b"not the ledger's"
+    assert asked and all(f & os.O_EXCL and f & os.O_NOFOLLOW for f in asked)
+
+
 def test_a_link_is_never_a_proof(ledger, monkeypatch, capsys):
     # An .ots that links to its own .bak: the proof in the .bak goes back as a file
     from aikiri_ledger import cli, witness as W
