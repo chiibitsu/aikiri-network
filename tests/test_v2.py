@@ -3,6 +3,7 @@
 Every test here fails before the v2 work and passes after. The two blocks that
 exist on Base are never rewritten: they verify as v1 against pinned hashes.
 """
+import functools
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -405,9 +406,14 @@ def test_failed_bitcoin_proof_is_a_failure_not_a_shrug(ledger, sk, mac, trust):
     assert state == State.INVALID and any("bitcoin" in r.lower() for r in report)
 
 
+@functools.lru_cache(maxsize=None)
+def _compiled():
+    return compile_contract()
+
+
 def _base_verified(ledger, trust):
     w3 = Web3(EthereumTesterProvider())
-    c = compile_contract()
+    c = _compiled()
     bw = BaseWitness(w3, None, c["abi"], account=w3.eth.accounts[0])
     addr = bw.deploy(ledger.read(0).hash, c["bytecode"])
     trust.contract, trust.owner, trust.genesis_hash = addr, w3.eth.accounts[0], ledger.read(0).hash
@@ -487,30 +493,37 @@ class _Ran:
         self.returncode, self.stdout, self.stderr = returncode, out, ""
 
 
-def test_bitcoin_proof_must_be_of_this_blocks_hash(ledger, trust, monkeypatch):
-    # ots checks a proof only against the .hash file beside it. A genuine proof of
-    # any other data, with that data in the .hash file, must not count for the block.
+def _digest_of(block_hash):
+    import hashlib
+    return hashlib.sha256(bytes.fromhex(block_hash)).hexdigest()
+
+
+def test_bitcoin_proof_is_checked_against_this_blocks_hash(ledger, trust, monkeypatch):
+    # ots checks a proof against a digest. Taken from the .hash file beside it, a
+    # genuine proof of any other data, with that data in the file, would pass; and
+    # a file read twice (once here, once by ots) can answer differently each time.
+    # So ots is given the digest of the block's own hash and reads no file for it.
     from aikiri_ledger import witness as W
     base = _base_verified(ledger, trust)
     ran = []
-    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: ran.append(a) or _Ran(0, "Success!"))
-    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
-    ledger.proof_path(0, "hash.ots").write_bytes(b"proof of something else")
-    ledger.proof_path(0, "hash").write_bytes(b"something else")
-    state, report = verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
-    assert state == State.INVALID and not ran
-    assert any("FAILED" in r and "000000.hash" in r for r in report)
-
-
-def test_bitcoin_proof_of_this_blocks_hash_goes_to_ots(ledger, trust, monkeypatch):
-    from aikiri_ledger import witness as W
-    base = _base_verified(ledger, trust)
-    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: _Ran(0, "Success!"))
+    monkeypatch.setattr(W.subprocess, "run", lambda argv, **k: ran.append(argv) or _Ran(0, "Success!"))
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     ledger.proof_path(0, "hash.ots").write_bytes(b"proof")
-    ledger.proof_path(0, "hash").write_bytes(bytes.fromhex(ledger.read(0).hash))
+    ledger.proof_path(0, "hash").write_bytes(b"something else entirely")
     state, _ = verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
     assert state == State.FULLY_VERIFIED
+    (argv,) = ran
+    assert argv[argv.index("-d") + 1] == _digest_of(ledger.read(0).hash)
+    assert not any(a.endswith(".hash") for a in argv)
+
+
+def test_a_proof_of_other_data_fails(ledger, trust):
+    # what `ots verify -d` prints when the proof is not of that digest (cmds.py:451)
+    base = _base_verified(ledger, trust)
+    msg = ("Digest provided does not match digest in timestamp, "
+           "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824 (sha256)")
+    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+    assert state == State.INVALID and any("FAILED" in r for r in report)
 
 
 @pytest.mark.parametrize("verdict", [
@@ -537,6 +550,9 @@ def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, roo
     _PREAMBLE.format(root="/srv/ledger") +
     "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
     "Calendar https://bob.btc.calendar.opentimestamps.org: [Errno -3] Temporary failure in name resolution",
+    # An ignored calendar beside one that answered
+    "Ignoring attestation from calendar https://calendar.example.org: Calendar not in whitelist\n"
+    "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",
     # The cache moved it along but not to Bitcoin: no verdict and no node line,
     # so pending, not "not checked"
     _PREAMBLE.format(root="/srv/ledger") + "Got 1 attestation(s) from cache",
@@ -549,9 +565,45 @@ def test_a_proof_not_yet_complete_is_pending(ledger, trust, msg):
     assert not any("FAILED" in r for r in report)
 
 
-def test_an_ots_failure_that_says_nothing_is_a_failure(ledger, trust):
+@pytest.mark.parametrize("msg", [
+    "",
+    # A proof whose only attestations have no way to Bitcoin (unknown or Litecoin
+    # ones: verify_timestamp passes over them in silence) prints nothing but this
+    _PREAMBLE.format(root="/srv/ledger").strip(),
+    # One whose only calendar is off the whitelist: ots will never ask it
+    _PREAMBLE.format(root="/srv/ledger") +
+    "Ignoring attestation from calendar https://calendar.example.org: Calendar not in whitelist",
+])
+def test_an_ots_failure_that_says_nothing_is_a_failure(ledger, trust, msg):
     base = _base_verified(ledger, trust)
-    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, ""))
+    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+    assert state == State.INVALID
+
+
+_TRACEBACK = ("Traceback (most recent call last):\n"
+              "  File \"/usr/local/bin/ots\", line 8, in <module>\n"
+              "    sys.exit(main())\n"
+              "http.client.RemoteDisconnected: Remote end closed connection without response")
+
+
+def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
+    # A calendar that drops the connection, or answers with a page that is not a
+    # proof, stops ots with a traceback (only URLError becomes a "Calendar" line).
+    # Calendars are asked only while a proof is incomplete, and every verdict ots
+    # reached is printed before the traceback.
+    base = _base_verified(ledger, trust)
+    msg = ("Calendar https://btc.calendar.catallaxy.com: Pending confirmation in Bitcoin blockchain\n"
+           + _TRACEBACK)
+    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "RemoteDisconnected" in r for r in report)
+    assert not any("FAILED" in r for r in report)
+
+
+def test_a_verdict_before_a_traceback_still_fails(ledger, trust):
+    base = _base_verified(ledger, trust)
+    msg = "Bitcoin verification failed: Bad merkleroot\n" + _TRACEBACK
+    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
     assert state == State.INVALID
 
 
