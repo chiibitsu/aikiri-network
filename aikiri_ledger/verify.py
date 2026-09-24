@@ -3,7 +3,8 @@
   INVALID                            something is wrong; the report says what
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
-                                     or could not be checked here (no Bitcoin node)
+                                     or could not be checked here (no Bitcoin node, or
+                                     ots crashing inside its calendar client)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but
@@ -35,31 +36,70 @@ class State(IntEnum):
                 State.FULLY_VERIFIED: "FULLY VERIFIED"}[State(state)]
 
 
-# The lines `ots verify` prints when it could not reach a Bitcoin node
-# (opentimestamps-client 0.7.2, otsclient/args.py:148 and otsclient/cmds.py:418),
-# and the lines that carry no verdict: the target it assumed, printed when it is
-# given only the .ots, as BitcoinWitness runs it (cmds.py:473), and what its
-# calendars and local cache said while it tried to complete a pending proof on
-# the way to the node (cmds.py:263, 298, 301, 306; a calendar URL here is one on
-# its whitelist). Matched from the start of each line, never on words anywhere
-# in the output, which also carries the ledger's own path.
+# How `ots verify` (opentimestamps-client 0.7.2) is read. Every line is matched from
+# its start, never on words anywhere in the output: the output also carries paths.
+#
+# It could not reach a Bitcoin node (otsclient/args.py:148, cmds.py:418).
 _NO_BITCOIN_NODE = ("could not connect to bitcoin node:",
                     "could not connect to local bitcoin node:")
-_OTS_NO_VERDICT = re.compile(r"assuming target filename is "
-                             r"|got \d+ attestation\(s\) from \S+$"
-                             r"|calendar \S+: ")
+# It moved a pending proof along, or asked a calendar that could not answer: what
+# its cache and calendars said on the way (cmds.py:263, 298, 301, 306). A calendar
+# URL here is on its whitelist, and a calendar's own words are cut to one line. A
+# calendar's "Not found" reads the same: the server can say it for a while about a
+# commitment it has only just taken (otsserver/rpc.py, its issue #10), and block.yml
+# verifies seconds after stamping.
+_OTS_PROGRESS = re.compile(r"got \d+ attestation\(s\) from \S+$|calendar \S+:( |$)")
+# Lines that say nothing either way: the target it assumed when given no digest
+# (cmds.py:473), and a calendar off the whitelist, which it will never ask
+# (cmds.py:287).
+_OTS_NEUTRAL = re.compile(r"assuming target filename is "
+                          r"|ignoring attestation from calendar \S+: calendar not in whitelist$")
+# It stopped on an exception. Every verdict it reached was printed before this, and
+# nothing of its own follows. Excused only when a frame is in the calendar client: a
+# calendar dropping the connection before it answers, or answering with something
+# that is not a proof (a URLError becomes a "Calendar" line; these do not), and ots
+# asks calendars only while a proof is incomplete. Anything else, a Bitcoin node's
+# RPC error about an attestation for one, is about a proof that claims to be
+# complete, and fails.
+# Frame paths are Python's own, not text a proof or a calendar can supply.
+_TRACEBACK = "traceback (most recent call last):"
+_CALENDAR_FRAME = re.compile(r'file "[^"]*/opentimestamps/calendar\.py", line \d+')
+_NO_PROOF = "no .ots proof"  # BitcoinWitness.verify, when there is no proof file at all
 
 
-def _no_bitcoin_node(msg: str) -> bool:
-    """True only when every line ots printed is a no-node line or carries no verdict."""
-    seen = False
-    for line in (msg or "").lower().splitlines():
-        line = line.strip()
-        if line.startswith(_NO_BITCOIN_NODE):
-            seen = True
-        elif line and not _OTS_NO_VERDICT.match(line):
-            return False
-    return seen
+def _bitcoin_result(ok: bool, msg: str) -> tuple[str, str]:
+    """(complete | unchecked | pending | failed, why), from ots's exit and output.
+
+    Any line not described above is a verdict, and fails. A proof is pending only
+    when ots said something about moving it towards Bitcoin (its cache or a
+    calendar, even one that could not answer); one it finished with and said
+    nothing about has no way there, and fails.
+    """
+    if ok:
+        return "complete", ""
+    if msg == _NO_PROOF:
+        return "pending", ""
+    progress = no_node = False
+    lines = (msg or "").splitlines()
+    for n, line in enumerate(lines):
+        low = line.strip().lower()
+        if not low:
+            continue
+        if low.startswith(_TRACEBACK):
+            if any(_CALENDAR_FRAME.match(t.strip().lower()) for t in lines[n + 1:]):
+                return "unchecked", "ots crashed inside its calendar client"
+            return "failed", ""
+        if low.startswith(_NO_BITCOIN_NODE):
+            no_node = True
+        elif _OTS_NEUTRAL.match(low):
+            continue
+        elif _OTS_PROGRESS.match(low):
+            progress = True
+        else:
+            return "failed", ""
+    if no_node:
+        return "unchecked", "no Bitcoin node reachable"
+    return ("pending", "") if progress else ("failed", "")
 
 
 def _same_address(a, b) -> bool:
@@ -259,20 +299,19 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
         pending = 0
         for b in blocks:
             ok, msg = bitcoin.verify(b)
-            low = (msg or "").lower()
-            if ok:
+            result, why = _bitcoin_result(ok, msg)
+            if result == "complete":
                 report.append(f"block {b.index}: Bitcoin proof complete")
-            elif _no_bitcoin_node(msg):
-                # A complete proof is checked against a Bitcoin node. Without one
-                # it is unchecked, which is not the same as wrong. Any other line
-                # in the output (ots goes on to the next attestation after a
-                # failed connection, so a real verdict can sit beside it) and
-                # this does not apply.
-                report.append(f"block {b.index}: Bitcoin proof not checked, "
-                              f"no Bitcoin node reachable: {msg}")
+            elif result == "unchecked":
+                # A complete proof is checked against a Bitcoin node. Without one,
+                # or with ots crashing inside its calendar client, it is unchecked,
+                # which is not the same as wrong. ots goes on to the next attestation
+                # after a failed connection, so a real verdict can sit beside it; then
+                # the result is "failed".
+                report.append(f"block {b.index}: Bitcoin proof not checked, {why}: {msg}")
                 pending += 1
-            elif "no .ots" in low or "missing" in low or "pending" in low or "incomplete" in low:
-                report.append(f"block {b.index}: Bitcoin proof pending")
+            elif result == "pending":
+                report.append(f"block {b.index}: Bitcoin proof pending: {msg}")
                 pending += 1
             else:
                 report.append(f"block {b.index}: Bitcoin proof FAILED: {msg}")

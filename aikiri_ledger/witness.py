@@ -8,6 +8,7 @@ A receipt never depends on a single chain to be believed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -260,7 +261,12 @@ class BitcoinWitness:
         ots = self.ledger.proof_path(block.index, "hash.ots")
         if not ots.exists():
             return False, "no .ots proof"
-        r = subprocess.run(["ots", "verify", str(ots)], capture_output=True, text=True)
+        # ots is handed the digest to check the proof against, made from the block's own
+        # hash, and opens no file for it. Taken from the .hash file beside the proof, a
+        # genuine proof of any other data, with that data in the file, would pass; and a
+        # file read twice (once to check it, once by ots) can answer differently.
+        digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
+        r = subprocess.run(["ots", "verify", "-d", digest, str(ots)], capture_output=True, text=True)
         return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 

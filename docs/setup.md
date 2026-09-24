@@ -180,7 +180,9 @@ calendar as pending proof, correctly, since it was stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
 longer than it needed to. The nightly runner reads the repository's own
 `trust.json`, so it never reports more than `VALID LOCALLY`. It has no Bitcoin
-node either, so it cannot check a complete proof; when `ots` says it could not
-connect to one, verify reports the proof as not checked rather than failed.
+node either, so it cannot check a complete proof; when `ots` gives no verdict but
+says it could not connect to one (or crashes inside its calendar client), verify
+reports the proof as not checked rather than failed. A calendar that cannot be
+reached, refuses, or has nothing yet only leaves a proof pending.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin node.
