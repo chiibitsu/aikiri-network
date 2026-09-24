@@ -475,8 +475,6 @@ def test_no_bitcoin_node_is_unchecked_not_failed(ledger, trust, line, root):
     "Could not open target: [Errno 2] No such file or directory: "
     "'/srv/calendar a: b/proofs/000000.hash'\n"
     "Could not connect to Bitcoin node: Cookie file unusable",
-    # Lines with no verdict and no no-node line are not a no-node result.
-    _PREAMBLE.format(root="/srv/ledger") + "Got 1 attestation(s) from cache",
 ])
 def test_no_bitcoin_node_does_not_hide_a_real_verdict(ledger, trust, msg):
     base = _base_verified(ledger, trust)
@@ -539,6 +537,9 @@ def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, roo
     _PREAMBLE.format(root="/srv/ledger") +
     "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
     "Calendar https://bob.btc.calendar.opentimestamps.org: [Errno -3] Temporary failure in name resolution",
+    # The cache moved it along but not to Bitcoin: no verdict and no node line,
+    # so pending, not "not checked"
+    _PREAMBLE.format(root="/srv/ledger") + "Got 1 attestation(s) from cache",
 ])
 def test_a_proof_not_yet_complete_is_pending(ledger, trust, msg):
     base = _base_verified(ledger, trust)
