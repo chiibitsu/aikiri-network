@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -315,8 +316,15 @@ def main(argv=None):
         else:
             print("Base: no rpc/contract configured; skipped")
         if BitcoinWitness.available():
-            p = BitcoinWitness(L).stamp(blk)
-            print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
+            # Not fatal: block.yml commits the block only after this, and the Base
+            # anchor above cannot be taken back. Nightly stamps any block that has
+            # no proof.
+            try:
+                p = BitcoinWitness(L).stamp(blk)
+                print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
+            except (subprocess.CalledProcessError, OSError) as e:
+                print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
+                      f"nightly stamps any block that has no proof")
         else:
             print("Bitcoin: `ots` not installed; `pip install opentimestamps-client`")
         return 0
@@ -334,6 +342,7 @@ def main(argv=None):
     if a.cmd == "upgrade":
         bw = BitcoinWitness(L)
         for blk in L.blocks():
+            bw.settle_backup(blk)
             if L.proof_path(blk.index, "hash.ots").exists():
                 print(f"block {blk.index}: "
                       f"{'upgraded' if bw.upgrade(blk) else 'still pending'}")
@@ -345,11 +354,18 @@ def main(argv=None):
         if not BitcoinWitness.available():
             raise SystemExit("`ots` not installed; `pip install opentimestamps-client`")
         bw = BitcoinWitness(L)
+        failed = 0
         for blk in L.blocks():
-            if not L.proof_path(blk.index, "hash.ots").exists():
+            bw.settle_backup(blk)  # a .bak with no good proof is the proof: never stamp over it
+            if L.proof_path(blk.index, "hash.ots").exists():
+                continue
+            try:
                 p = bw.stamp(blk)
                 print(f"block {blk.index}: stamped -> {p.name} (pending until upgraded)")
-        return 0
+            except (subprocess.CalledProcessError, OSError) as e:
+                print(f"block {blk.index}: stamping failed ({e})")
+                failed += 1
+        return 1 if failed else 0
 
     if a.cmd == "verify":
         try:

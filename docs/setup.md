@@ -181,3 +181,10 @@ Bitcoin already confirmed it, and it has been sitting in the OpenTimestamps
 calendar as pending proof, correctly, since it was stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
 longer than it needed to.
+
+A block's first proof is the exception. Nightly also stamps any block that has no
+proof on `main` (block 0 was anchored at deploy and never stamped; a stamp that
+fails when a block is written is left to nightly too). That proof is only pending,
+and until the PR carrying it is merged, each night stamps the block again from
+`main`: the PR's proof is replaced, and the time it will prove moves later. Merge
+it when it appears; a later night upgrades it like any other.

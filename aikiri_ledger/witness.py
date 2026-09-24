@@ -246,32 +246,50 @@ class BitcoinWitness:
         return p
 
     def stamp(self, block: Block) -> Path:
-        """Creates <index>.hash.ots (pending until upgraded)."""
+        """Creates <index>.hash.ots (pending until upgraded). `ots stamp` creates the
+        .ots before it writes the proof into it, so when it fails, whatever it left
+        is removed: a truncated .ots would be taken for a proof and never stamped
+        again, and a lone .hash would ride into a commit on its own."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
+        digest = self.ledger.proof_path(block.index, "hash")
+        had = ots.exists(), digest.exists()
         p = self._digest_file(block)
-        subprocess.run(["ots", "stamp", str(p)], check=True)
-        return self.ledger.proof_path(block.index, "hash.ots")
+        try:
+            subprocess.run(["ots", "stamp", str(p)], check=True)
+        except (subprocess.CalledProcessError, OSError):
+            for path, existed in zip((ots, digest), had):
+                if not existed:
+                    path.unlink(missing_ok=True)
+            raise
+        return ots
 
     def upgrade(self, block: Block) -> bool:
         ots = self.ledger.proof_path(block.index, "hash.ots")
-        self._settle_backup(ots)
+        self.settle_backup(block)
         r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
-        self._settle_backup(ots)
+        self.settle_backup(block)
         return r.returncode == 0
 
-    @staticmethod
-    def _settle_backup(ots: Path) -> None:
-        """`ots upgrade` renames the proof to <name>.bak before writing the upgraded
-        one, and refuses to upgrade at all while a .bak exists. The upgraded proof
-        keeps every attestation the old one had, so the backup goes. If the proof
-        itself is missing, an upgrade stopped half-way and the backup is the only
-        copy: it is put back."""
+    def settle_backup(self, block: Block) -> None:
+        """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
+        creates the new file and writes the upgraded proof into it; it will not
+        upgrade while a .bak is there. If the proof now reads as one, it holds every
+        attestation the backup had, and the backup goes. If it is missing, or does
+        not read as a proof (the write failed part-way), the backup is the only good
+        copy and is put back over it."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not bak.exists():
             return
-        if ots.exists():
+        if ots.exists() and self._reads_as_proof(ots):
             bak.unlink()
         else:
-            bak.rename(ots)
+            os.replace(bak, ots)
+
+    @staticmethod
+    def _reads_as_proof(ots: Path) -> bool:
+        r = subprocess.run(["ots", "info", str(ots)], capture_output=True, text=True)
+        return r.returncode == 0
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")
