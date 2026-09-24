@@ -11,6 +11,7 @@
   witness <index>           anchor on Base, stamp on Bitcoin
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
+  stamp                     stamp on Bitcoin every block that has no proof yet
   verify                    report one of four states
   deploy                    deploy the contract (once)
 
@@ -155,6 +156,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("witness").add_argument("index", type=int)
     sub.add_parser("reconcile")
     sub.add_parser("upgrade")
+    sub.add_parser("stamp")
 
     v = sub.add_parser("verify")
     v.add_argument("--rpc", action="append", default=[])
@@ -335,6 +337,18 @@ def main(argv=None):
             if L.proof_path(blk.index, "hash.ots").exists():
                 print(f"block {blk.index}: "
                       f"{'upgraded' if bw.upgrade(blk) else 'still pending'}")
+        return 0
+
+    if a.cmd == "stamp":
+        # Bitcoin only. `witness` would anchor on Base again, and block 0 was
+        # anchored when the contract was deployed but never stamped.
+        if not BitcoinWitness.available():
+            raise SystemExit("`ots` not installed; `pip install opentimestamps-client`")
+        bw = BitcoinWitness(L)
+        for blk in L.blocks():
+            if not L.proof_path(blk.index, "hash.ots").exists():
+                p = bw.stamp(blk)
+                print(f"block {blk.index}: stamped -> {p.name} (pending until upgraded)")
         return 0
 
     if a.cmd == "verify":

@@ -253,8 +253,25 @@ class BitcoinWitness:
 
     def upgrade(self, block: Block) -> bool:
         ots = self.ledger.proof_path(block.index, "hash.ots")
+        self._settle_backup(ots)
         r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
+        self._settle_backup(ots)
         return r.returncode == 0
+
+    @staticmethod
+    def _settle_backup(ots: Path) -> None:
+        """`ots upgrade` renames the proof to <name>.bak before writing the upgraded
+        one, and refuses to upgrade at all while a .bak exists. The upgraded proof
+        keeps every attestation the old one had, so the backup goes. If the proof
+        itself is missing, an upgrade stopped half-way and the backup is the only
+        copy: it is put back."""
+        bak = ots.with_name(ots.name + ".bak")
+        if not bak.exists():
+            return
+        if ots.exists():
+            bak.unlink()
+        else:
+            bak.rename(ots)
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")

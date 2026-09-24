@@ -6,6 +6,8 @@ __pycache__/
 build/
 dist/
 ledger/blocks/*.tmp
+# `ots upgrade` leaves the old proof as <name>.bak; `git add ledger/proofs` must not take it
+ledger/proofs/*.bak
 
 # the compiled approval signer, and anything else built locally
 /aikiri-approve

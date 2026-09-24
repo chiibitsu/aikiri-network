@@ -22,7 +22,9 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs, proposes them as a pull request, and reports.
+only upgrades Bitcoin proofs, stamps any block that has none (block 0 was
+anchored at deploy but never stamped), proposes them as a pull request, and
+reports.
 See §8.
 
 ## 2. Move the secrets

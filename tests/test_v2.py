@@ -1135,3 +1135,16 @@ def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     text = (Path(".github/workflows") / "nightly.yml").read_text()
     assert "aikiri-ledger stamp" in text
     assert text.index("aikiri-ledger stamp") < text.index("uses: peter-evans/create-pull-request@")
+
+
+def test_upgrade_stopped_half_way_keeps_the_only_copy(ledger, monkeypatch):
+    # upgrade_command renames the proof to .bak, then writes the new one; if that
+    # write fails, the .bak is the only copy of the proof and must not be deleted.
+    from aikiri_ledger import witness as W
+    from types import SimpleNamespace
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ots = ledger.proof_path(0, "hash.ots")
+    Path(str(ots) + ".bak").write_bytes(b"the only proof")
+    assert not W.BitcoinWitness(ledger).upgrade(ledger.read(0))
+    assert ots.read_bytes() == b"the only proof"
