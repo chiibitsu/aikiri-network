@@ -265,7 +265,7 @@ class BitcoinWitness:
         commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
-        had = ots.exists(), digest.exists()
+        had = os.path.lexists(ots), os.path.lexists(digest)  # a dangling link is there too
         try:
             p = self._digest_file(block)
             subprocess.run(["ots", "stamp", str(p)], check=True)
@@ -294,6 +294,11 @@ class BitcoinWitness:
             if bak.exists():
                 os.replace(bak, ots)
             raise
+        if r.returncode and "Traceback (most recent call last)" in (r.stderr or ""):
+            # ots crashed rather than finding the proof incomplete: it renamed
+            # nothing, or the settle above has already put the proof back
+            said = [l.strip() for l in r.stderr.splitlines() if l.strip()]
+            raise OtsError(f"ots upgrade did not run: {said[-1][:200]}")
         return r.returncode == 0
 
     def settle_backup(self, block: Block) -> bool:

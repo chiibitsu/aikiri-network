@@ -11,8 +11,8 @@
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
-  stamp                     stamp on Bitcoin every block with no .ots yet (and no
-                            .ots.bak that is not a proof)
+  stamp                     stamp on Bitcoin every block with no proof yet; a good
+                            .ots.bak is put back instead, a bad one blocks it
   proof-status <index>      what the block's Bitcoin proof file is, in one line
   verify                    report one of four states
   deploy                    deploy the contract (once)
@@ -62,8 +62,8 @@ def _in_worktree(path: Path) -> bool:
 # An .ots that is empty, cut short or of another block's hash: reported, never
 # stamped over or upgraded, since it may be the only trace of what happened.
 _NOT_A_PROOF = "the .ots there is not a proof of this block; left as it is"
-_BAD_BACKUP = ("the .ots.bak there is not a proof of this block, nor is the .ots beside it, if any; "
-               "both left as they are, nothing stamped")
+_BAD_BACKUP = ("the .ots.bak there is not a proof of this block, and no .ots beside it is one either; "
+               "left as they are")
 
 
 def _cfg(ledger: Ledger) -> dict:
@@ -330,7 +330,7 @@ def main(argv=None):
             try:
                 bw = BitcoinWitness(L)
                 if not bw.settle_backup(blk):  # as `stamp` does: never stamp beside a backup
-                    print(f"Bitcoin: block {blk.index}: {_BAD_BACKUP}")
+                    print(f"Bitcoin: block {blk.index}: {_BAD_BACKUP}, nothing stamped")
                 elif bw.holds_proof(blk):
                     print(f"Bitcoin: block {blk.index} already has a proof")
                 elif L.proof_path(blk.index, "hash.ots").exists():
@@ -345,7 +345,7 @@ def main(argv=None):
                     except (subprocess.CalledProcessError, OSError) as e:
                         print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
                               f"nightly stamps any block that has no .ots")
-            except OtsError as e:
+            except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"Bitcoin: could not check block {blk.index}'s proof file ({e}); "
                       f"nothing was stamped")
         else:
@@ -367,7 +367,7 @@ def main(argv=None):
         for blk in L.blocks():
             try:
                 if not bw.settle_backup(blk):
-                    print(f"block {blk.index}: {_BAD_BACKUP}")
+                    print(f"block {blk.index}: {_BAD_BACKUP}, nothing upgraded")
                     continue
                 if not L.proof_path(blk.index, "hash.ots").exists():
                     continue
@@ -375,7 +375,7 @@ def main(argv=None):
                     print(f"block {blk.index}: {_NOT_A_PROOF}")
                     continue
                 print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
-            except OtsError as e:
+            except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"block {blk.index}: could not check the proof file ({e})")
         return 0
 
@@ -395,8 +395,10 @@ def main(argv=None):
             elif BitcoinWitness(L).holds_proof(blk):
                 print("stamped; a proof of this block")
             elif BitcoinWitness.proof_of(bak, blk):
-                print("stamped; a proof of this block, in the .ots.bak until the next "
-                      "upgrade or stamp puts it back")
+                # Not "stamped": a .bak is never committed, so the commit this line
+                # goes into would not carry the proof
+                print("unknown; a proof of this block is only in the .ots.bak, which is never "
+                      "committed; the next upgrade, stamp or witness here puts it back")
             else:
                 print("none; the file there is not a proof of this block")
         except Exception as e:  # noqa: BLE001
@@ -415,7 +417,7 @@ def main(argv=None):
         for blk in L.blocks():
             try:
                 if not bw.settle_backup(blk):  # never stamp beside a backup
-                    print(f"block {blk.index}: {_BAD_BACKUP}")
+                    print(f"block {blk.index}: {_BAD_BACKUP}, nothing stamped")
                     failed += 1
                     continue
                 if L.proof_path(blk.index, "hash.ots").exists():
@@ -423,7 +425,7 @@ def main(argv=None):
                         print(f"block {blk.index}: {_NOT_A_PROOF}")
                         failed += 1
                     continue
-            except OtsError as e:
+            except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"block {blk.index}: could not check the proof file ({e})")
                 failed += 1
                 continue

@@ -1110,7 +1110,7 @@ class _FakeOts:
                                    "Timestamp:\n", stderr="")
         if cmd == "stamp":
             out = Path(str(path) + ".ots")
-            if out.exists():  # opens the .ots with 'xb'
+            if os.path.lexists(out):  # opens the .ots with 'xb', which a dangling link refuses too
                 raise subprocess.CalledProcessError(1, argv)
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             out.write_bytes(_CUT if "stamp" in self.fail else f"proof:{digest}:pending".encode())
@@ -1128,6 +1128,7 @@ class _FakeOts:
         return ran(0)
 
 
+import os  # noqa: E402
 import subprocess  # noqa: E402  (the fake raises what subprocess.run(check=True) raises)
 
 _CUT = b"proof:cut"  # a proof whose write stopped part-way: it starts like one
@@ -1237,21 +1238,29 @@ def test_a_backup_that_is_not_a_proof_is_not_put_back(ledger, monkeypatch, left)
     assert bak.exists()
 
 
+@pytest.mark.parametrize("junk_ots", [False, True])
 @pytest.mark.parametrize("cmd, rc", [("stamp", 1), ("witness", 0), ("upgrade", 0)])
-def test_nothing_is_stamped_beside_a_backup_that_is_not_a_proof(ledger, monkeypatch, capsys, cmd, rc):
-    # No .ots, and a .bak that is not a proof of the block. A new proof beside it
-    # would read as that backup's upgrade, and the next settle would delete it.
+def test_nothing_is_stamped_beside_a_backup_that_is_not_a_proof(ledger, monkeypatch, capsys, cmd, rc, junk_ots):
+    # A .bak that is not a proof of the block, alone or beside an .ots that is not
+    # one either. A new proof beside it would read as that backup's upgrade, and
+    # the next settle would delete it. It is said once, in the command's own terms.
     from aikiri_ledger import cli, witness as W
     fake = _FakeOts()
     monkeypatch.setattr(W.subprocess, "run", fake)
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
     ots, bak = _ots_paths(ledger, 0)
     bak.write_bytes(b"junk")
+    if junk_ots:
+        ots.write_bytes(b"other junk")
     argv = [cmd] + (["0"] if cmd == "witness" else [])
     assert cli.main(["--ledger", str(ledger.root), *argv]) == rc
-    assert not any(c[1] == "stamp" for c in fake.calls)
-    assert not ots.exists() and bak.read_bytes() == b"junk"
-    assert ".ots.bak there is not a proof of this block" in capsys.readouterr().out
+    assert not any(c[1] in ("stamp", "upgrade") for c in fake.calls)
+    assert (ots.read_bytes() if ots.exists() else None) == (b"other junk" if junk_ots else None)
+    assert bak.read_bytes() == b"junk"
+    out = capsys.readouterr().out
+    assert out.count("not a proof of this block") == 1
+    assert ".ots.bak there is not a proof of this block" in out
+    assert ("nothing upgraded" if cmd == "upgrade" else "nothing stamped") in out
 
 
 def test_ots_backups_are_never_committed():
@@ -1401,13 +1410,15 @@ def test_block_commit_says_whether_there_is_a_bitcoin_proof():
     assert "test -f" not in step and "OTS       $OTS" in step
 
 
-_IN_BAK = "stamped; a proof of this block, in the .ots.bak until the next upgrade or stamp puts it back"
+_IN_BAK = ("unknown; a proof of this block is only in the .ots.bak, which is never committed; "
+           "the next upgrade, stamp or witness here puts it back")
 _NEITHER = "none; the file there is not a proof of this block"
 
 
 @pytest.mark.parametrize("on_disk, backup, says", [
     ("proof", None, "stamped; a proof of this block"),
     ("proof", "junk", "stamped; a proof of this block"),
+    ("proof", "proof", "stamped; a proof of this block"),
     ("junk", None, _NEITHER),
     (None, None, "none; not stamped, nightly stamps it"),
     (None, "proof", _IN_BAK),
@@ -1644,3 +1655,58 @@ def test_an_ots_upgrade_that_prints_bytes_not_utf8_is_still_pending(ledger, monk
     assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
     assert "block 0: still pending" in capsys.readouterr().out
     assert ots.read_bytes() == _proof(ledger, 0, "pending") and not bak.exists()
+
+
+def test_proof_status_with_nothing_there_is_none_even_without_ots(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: False))
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
+    assert capsys.readouterr().out == "none; not stamped, nightly stamps it\n"
+
+
+@pytest.mark.parametrize("cmd, rc", [("witness", 0), ("upgrade", 0), ("stamp", 1)])
+def test_a_proofs_folder_that_cannot_be_written_stops_nothing(ledger, monkeypatch, capsys, cmd, rc):
+    # Putting a .bak back can fail (a read-only folder). The command says so and
+    # goes on: witness still exits 0 after the Base anchor.
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    def refused(*a, **k):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(W.os, "replace", refused)
+    _, bak = _ots_paths(ledger, 0)
+    bak.write_bytes(_proof(ledger, 0, "pending"))
+    argv = [cmd] + (["0"] if cmd == "witness" else [])
+    assert cli.main(["--ledger", str(ledger.root), *argv]) == rc
+    assert "Permission denied" in capsys.readouterr().out
+    assert bak.read_bytes() == _proof(ledger, 0, "pending")
+
+
+def test_an_ots_upgrade_that_crashed_is_not_still_pending(ledger, monkeypatch, capsys):
+    # A traceback is ots not running, not a proof that is not complete yet
+    from aikiri_ledger import cli, witness as W
+    fake = _FakeOts()
+    def run(argv, **kw):
+        if argv[1] == "upgrade":
+            fake.calls.append(list(argv))
+            return _ots_crashes(argv, **kw)
+        return fake(argv, **kw)
+    monkeypatch.setattr(W.subprocess, "run", run)
+    monkeypatch.setattr(_ots_crashes, "calls", [], raising=False)
+    ots, bak = _ots_paths(ledger, 0)
+    ots.write_bytes(_proof(ledger, 0, "pending"))
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    out = capsys.readouterr().out
+    assert "still pending" not in out and "ots upgrade did not run" in out
+    assert ots.read_bytes() == _proof(ledger, 0, "pending") and not bak.exists()
+
+
+def test_a_failed_stamp_leaves_a_dangling_link_where_it_was(ledger, monkeypatch, tmp_path):
+    # A link to nothing is not "no .ots": the cleanup removes only what ots made
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, _ = _ots_paths(ledger, 0)
+    ots.symlink_to(tmp_path / "nowhere")
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1
+    assert ots.is_symlink() and not (tmp_path / "nowhere").exists()
