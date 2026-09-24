@@ -246,6 +246,13 @@ def test_validator_key_from_env(monkeypatch):
         assert parse_key(form).verify_key == sk.verify_key
     import base64
     assert parse_key(base64.b64encode(sk.encode()).decode()).verify_key == sk.verify_key
+    # A base64 seed can itself begin "0x" (1 in ~2048 random keys; seen on CI).
+    # Stripping that as a hex prefix before trying base64 rejected a valid key.
+    from nacl.signing import SigningKey
+    zero_x = SigningKey(b"\xd3\x10" + bytes(30))
+    b64 = base64.b64encode(zero_x.encode()).decode()
+    assert b64.startswith("0x")
+    assert parse_key(b64).verify_key == zero_x.verify_key
     with pytest.raises(ValueError):
         parse_key("not a key")
     monkeypatch.setenv("AIKIRI_VALIDATOR_KEY", seed)
