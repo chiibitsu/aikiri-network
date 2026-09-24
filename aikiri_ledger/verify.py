@@ -56,10 +56,11 @@ _OTS_NEUTRAL = re.compile(r"assuming target filename is "
                           r"|ignoring attestation from calendar \S+: calendar not in whitelist$")
 # It stopped on an exception. Every verdict it reached was printed before this, and
 # nothing of its own follows. Excused only when a frame is in the calendar client: a
-# calendar dropping the connection, or answering with something that is not a proof
-# (a URLError becomes a "Calendar" line; these do not), and ots asks calendars only
-# while a proof is incomplete. Anything else, a Bitcoin node's RPC error about an
-# attestation for one, is about a proof that claims to be complete, and fails.
+# calendar dropping the connection before it answers, or answering with something
+# that is not a proof (a URLError becomes a "Calendar" line; these do not), and ots
+# asks calendars only while a proof is incomplete. Anything else, a Bitcoin node's
+# RPC error about an attestation for one, is about a proof that claims to be
+# complete, and fails.
 # Frame paths are Python's own, not text a proof or a calendar can supply.
 _TRACEBACK = "traceback (most recent call last):"
 _CALENDAR_FRAME = re.compile(r'file "[^"]*/opentimestamps/calendar\.py", line \d+')
@@ -86,7 +87,7 @@ def _bitcoin_result(ok: bool, msg: str) -> tuple[str, str]:
             continue
         if low.startswith(_TRACEBACK):
             if any(_CALENDAR_FRAME.match(t.strip().lower()) for t in lines[n + 1:]):
-                return "unchecked", "a calendar failed while ots asked it"
+                return "unchecked", "ots crashed inside its calendar client"
             return "failed", ""
         if low.startswith(_NO_BITCOIN_NODE):
             no_node = True
@@ -303,10 +304,10 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                 report.append(f"block {b.index}: Bitcoin proof complete")
             elif result == "unchecked":
                 # A complete proof is checked against a Bitcoin node. Without one,
-                # or with ots stopped part-way, it is unchecked, which is not the
-                # same as wrong. ots goes on to the next attestation after a failed
-                # connection, so a real verdict can sit beside it; then the result
-                # is "failed".
+                # or with ots crashing inside its calendar client, it is unchecked,
+                # which is not the same as wrong. ots goes on to the next attestation
+                # after a failed connection, so a real verdict can sit beside it; then
+                # the result is "failed".
                 report.append(f"block {b.index}: Bitcoin proof not checked, {why}: {msg}")
                 pending += 1
             elif result == "pending":

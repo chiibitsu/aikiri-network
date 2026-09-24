@@ -594,7 +594,7 @@ _TRACEBACK = ("Traceback (most recent call last):\n"
               "  File \"/usr/local/bin/ots\", line 8, in <module>\n"
               "    sys.exit(main())\n"
               "  File \"/usr/local/lib/python3.11/dist-packages/opentimestamps/calendar.py\", "
-              "line 94, in get_timestamp\n"
+              "line 87, in get_timestamp\n"
               "    with urllib.request.urlopen(req, timeout=timeout) as resp:\n"
               "http.client.RemoteDisconnected: Remote end closed connection without response")
 # What ots prints when a Bitcoin node answers an RPC it does not catch: a forged
@@ -620,6 +620,8 @@ def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
     state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
     assert state == State.BASE_VERIFIED
     assert any("not checked" in r and "RemoteDisconnected" in r for r in report)
+    # Named for what happened, which a calendar that merely failed to answer is not
+    assert any("ots crashed inside its calendar client" in r for r in report)
     assert not any("FAILED" in r for r in report)
 
 
