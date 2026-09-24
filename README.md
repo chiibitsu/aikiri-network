@@ -92,7 +92,7 @@ solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-stati
 ## Workflows
 
 - `ci.yml` ~ tests on Linux and macOS, Python 3.11, 3.12, 3.13.
-- `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify.
+- `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify. A failed stamp does not stop the commit; nightly stamps it.
 - `nightly.yml` ~ upgrade Bitcoin proofs, stamp any block that has none, and report
   the state. Writes no blocks, and proposes any new proof as a pull request rather
   than pushing it.

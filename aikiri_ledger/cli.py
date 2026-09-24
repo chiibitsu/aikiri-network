@@ -8,7 +8,7 @@
   request <path>            vault side: the payload a device is asked to approve
   check-request <path>      verify a sealed request before it is pushed
   block                     write the block a sealed request approves
-  witness <index>           anchor on Base, stamp on Bitcoin
+  witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
   stamp                     stamp on Bitcoin every block that has no proof yet
@@ -54,6 +54,11 @@ def _in_worktree(path: Path) -> bool:
     here = Path.cwd().resolve()
     root = next((d for d in [here, *here.parents] if (d / ".git").exists()), None)
     return root is not None and (root in path.parents or path.parent == root)
+
+
+# An .ots that is empty, cut short or of another block's hash: reported, never
+# stamped over or upgraded, since it may be the only trace of what happened.
+_NOT_A_PROOF = "the .ots there is not a proof of this block; left as it is"
 
 
 def _cfg(ledger: Ledger) -> dict:
@@ -343,9 +348,12 @@ def main(argv=None):
         bw = BitcoinWitness(L)
         for blk in L.blocks():
             bw.settle_backup(blk)
-            if L.proof_path(blk.index, "hash.ots").exists():
-                print(f"block {blk.index}: "
-                      f"{'upgraded' if bw.upgrade(blk) else 'still pending'}")
+            if not L.proof_path(blk.index, "hash.ots").exists():
+                continue
+            if not bw.holds_proof(blk):
+                print(f"block {blk.index}: {_NOT_A_PROOF}")
+                continue
+            print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
         return 0
 
     if a.cmd == "stamp":
@@ -358,6 +366,9 @@ def main(argv=None):
         for blk in L.blocks():
             bw.settle_backup(blk)  # a .bak with no good proof is the proof: never stamp over it
             if L.proof_path(blk.index, "hash.ots").exists():
+                if not bw.holds_proof(blk):
+                    print(f"block {blk.index}: {_NOT_A_PROOF}")
+                    failed += 1
                 continue
             try:
                 p = bw.stamp(blk)

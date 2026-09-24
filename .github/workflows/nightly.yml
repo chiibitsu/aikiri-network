@@ -1,11 +1,11 @@
 name: nightly
-# No longer writes anything. Blocks are written only when Chii approves a request
+# Writes no blocks. Blocks are written only when Chii approves a request
 # on one of her devices, so there is nothing for a schedule to sign. What is left
 # is worth doing nightly: fetch completed Bitcoin proofs, stamp any block that
 # has none yet, re-verify the whole chain against Base, and say plainly which of
 # the four states it is in.
 #
-# A completed proof is not pushed to main directly. It is proposed as a pull
+# A new or completed proof is not pushed to main directly. It is proposed as a pull
 # request instead: this job's token can open a PR and push the branch behind
 # it, but merging ~ the only thing that changes main ~ is Chii's click. The
 # token still carries contents: write, because pushing that branch requires
@@ -40,7 +40,7 @@ jobs:
         run: aikiri-ledger upgrade || true
       - name: stamp any block that has no Bitcoin proof yet
         run: aikiri-ledger stamp || true
-      - name: propose any proof that completed
+      - name: propose any proof stamped or completed
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
         with:
           add-paths: ledger/proofs

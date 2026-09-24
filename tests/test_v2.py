@@ -3,6 +3,7 @@
 Every test here fails before the v2 work and passes after. The two blocks that
 exist on Base are never rewritten: they verify as v1 against pinned hashes.
 """
+import hashlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1071,13 +1072,15 @@ def test_nightly_proposes_proofs_instead_of_pushing_to_main():
 
 # --------------------------------------------------- Bitcoin proof upkeep ----
 class _FakeOts:
-    """Stands in for `ots` in ledger/proofs, doing to the files what it does
-    (opentimestamps-client 0.7.2, otsclient/cmds.py):
+    """Stands in for `ots` in ledger/proofs, for the file effects these tests rely
+    on (opentimestamps-client 0.7.2, otsclient/cmds.py):
     - stamp: creates <file>.ots, then writes the proof into it
-    - upgrade, when it finds something new: renames the proof to .bak (and
+    - upgrade, as when it finds something new: renames the proof to .bak (and
       refuses if one is there), creates the new file, writes the proof into it
     - info: reads the proof, exit 1 if it is not one
-    `fail` names steps to make fail part-way, leaving what ots leaves."""
+    `fail` names steps to make fail part-way, leaving what ots leaves then. It
+    does not model an upgrade with nothing new, or a stamp that fails before it
+    creates a file."""
     GOOD = (b"pending proof", b"complete proof", b"older proof")
 
     def __init__(self, fail=()):
@@ -1089,7 +1092,11 @@ class _FakeOts:
         self.calls.append(list(argv))
         cmd, path = argv[1], Path(argv[-1])
         if cmd == "info":
-            return ran(0 if path.exists() and path.read_bytes() in self.GOOD else 1)
+            if not (path.exists() and path.read_bytes() in self.GOOD):
+                return ran(1)
+            digest = hashlib.sha256(path.with_suffix("").read_bytes()).hexdigest()
+            return SimpleNamespace(returncode=0, stdout=f"File sha256 hash: {digest}\nTimestamp:\n",
+                                   stderr="")
         if cmd == "stamp":
             out = Path(str(path) + ".ots")
             out.write_bytes(b"trunc" if "stamp" in self.fail else b"pending proof")
@@ -1110,6 +1117,10 @@ import subprocess  # noqa: E402  (the fake raises what subprocess.run(check=True
 
 
 def _ots_paths(ledger, i):
+    """The proof, its backup, and the .hash beside them, as stamp leaves it (the
+    fake's `info` names the digest of that file, as ots stamp's proof does)."""
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(i, "hash").write_bytes(bytes.fromhex(ledger.read(i).hash))
     ots = ledger.proof_path(i, "hash.ots")
     return ots, Path(str(ots) + ".bak")
 
@@ -1138,9 +1149,11 @@ def test_upgrade_that_fails_while_writing_keeps_the_good_proof(ledger, monkeypat
 
 
 @pytest.mark.parametrize("left", [None, b"", b"trunc"])
-def test_a_backup_left_by_an_earlier_run_is_put_back_first(ledger, monkeypatch, left):
+@pytest.mark.parametrize("cmd", ["stamp", "upgrade"])
+def test_a_backup_left_by_an_earlier_run_is_put_back_first(ledger, monkeypatch, left, cmd):
     # No proof, an empty one, or a truncated one beside a .bak: the .bak is the good
-    # copy. `upgrade` puts it back; `stamp` must not stamp over it either.
+    # copy. `upgrade` puts it back rather than skip the block; `stamp` puts it back
+    # rather than stamp over it.
     from aikiri_ledger import cli, witness as W
     fake = _FakeOts()
     monkeypatch.setattr(W.subprocess, "run", fake)
@@ -1150,9 +1163,33 @@ def test_a_backup_left_by_an_earlier_run_is_put_back_first(ledger, monkeypatch, 
     bak.write_bytes(b"complete proof")
     if left is not None:
         ots.write_bytes(left)
-    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
+    assert cli.main(["--ledger", str(ledger.root), cmd]) == 0
     assert not any(c[1] == "stamp" for c in fake.calls)
     assert ots.read_bytes() == b"complete proof" and not bak.exists()
+
+
+@pytest.mark.parametrize("left", [b"", b"trunc", "other block"])
+def test_a_file_that_is_not_a_proof_of_the_block_is_named_not_stamped_over(ledger, monkeypatch, capsys, left):
+    # An empty, truncated or foreign .ots with no .bak beside it is not a proof of the
+    # block. It is reported, and left as it is: it may be the only trace of what
+    # happened to the proof.
+    from aikiri_ledger import cli, witness as W
+    fake = _FakeOts()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, _ = _ots_paths(ledger, 0)
+    if left == "other block":
+        ots.write_bytes(b"pending proof")
+        ledger.proof_path(0, "hash").write_bytes(b"\x00" * 32)
+    else:
+        ots.write_bytes(left)
+    before = ots.read_bytes()
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("not a proof of this block") == 2
+    assert not any(c[1] in ("stamp", "upgrade") for c in fake.calls)
+    assert ots.read_bytes() == before
 
 
 def test_ots_backups_are_never_committed():
@@ -1172,8 +1209,7 @@ def test_stamp_stamps_every_block_without_a_proof_and_only_those(ledger, sk, mac
     fake = _FakeOts()
     monkeypatch.setattr(W.subprocess, "run", fake)
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
-    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
-    ledger.proof_path(1, "hash.ots").write_bytes(b"pending proof")
+    _ots_paths(ledger, 1)[0].write_bytes(b"pending proof")
     assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
     stamped = sorted(c[-1] for c in fake.calls if c[1] == "stamp")
     assert stamped == [str(ledger.proof_path(0, "hash")), str(ledger.proof_path(2, "hash"))]
@@ -1222,3 +1258,12 @@ def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     text = (Path(".github/workflows") / "nightly.yml").read_text()
     assert "aikiri-ledger stamp" in text
     assert text.index("aikiri-ledger stamp") < text.index("uses: peter-evans/create-pull-request@")
+
+
+def test_block_commit_says_whether_there_is_a_bitcoin_proof():
+    # witness goes on when the stamp fails, and main's history is never rewritten:
+    # the commit message must not claim a proof that was not made.
+    text = (Path(".github/workflows") / "block.yml").read_text()
+    step = text[text.index("- name: commit the block and its proofs"):text.index("- name: verify")]
+    assert 'ledger/proofs/$B.hash.ots' in step, "the OTS line must be read from the proof on disk"
+    assert "OTS       pending; upgraded on a later run" not in step

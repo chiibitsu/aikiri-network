@@ -68,10 +68,11 @@ ledger prove nothing, because whoever can rewrite one can rewrite the other.
 3. Push the sealed request to `ledger/requests/` on `main`. That push, and only
    that push, starts the block workflow.
 4. The runner writes the block, anchors it on Base, stamps it on Bitcoin, commits
-   the block and its proofs, and deletes the request.
+   the block and its proofs, and deletes the request. If the stamp fails, the block
+   is still committed, and nightly stamps it.
 
-The nightly ritual no longer writes blocks. It fetches completed Bitcoin proofs
-and re-verifies. Blocks wait for her. That is the intended cost.
+The nightly ritual no longer writes blocks. It fetches completed Bitcoin proofs,
+stamps any block that has none, and re-verifies. Blocks wait for her. That is the intended cost.
 
 ## Losing a device
 

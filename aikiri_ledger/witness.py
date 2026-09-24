@@ -8,6 +8,7 @@ A receipt never depends on a single chain to be believed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -273,23 +274,32 @@ class BitcoinWitness:
     def settle_backup(self, block: Block) -> None:
         """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
         creates the new file and writes the upgraded proof into it; it will not
-        upgrade while a .bak is there. If the proof now reads as one, it holds every
-        attestation the backup had, and the backup goes. If it is missing, or does
-        not read as a proof (the write failed part-way), the backup is the only good
-        copy and is put back over it."""
+        write an upgrade while a .bak is there. If the proof reads as one, it is that
+        upgrade's output, holding every attestation the backup had, and the backup
+        goes. If it is missing, does not read as a proof (the write failed part-way),
+        or is not a proof of this block, the backup is the good copy and is put back
+        over it. Every
+        command that writes a proof settles first, so a .bak is never left beside a
+        proof it did not come from."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not bak.exists():
             return
-        if ots.exists() and self._reads_as_proof(ots):
+        if self.holds_proof(block):
             bak.unlink()
         else:
             os.replace(bak, ots)
 
-    @staticmethod
-    def _reads_as_proof(ots: Path) -> bool:
+    def holds_proof(self, block: Block) -> bool:
+        """The .ots is there, reads as a proof, and is a proof of this block: `ots
+        info` exits 1 on anything that is not a proof, and names the digest one is of."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
+        if not ots.exists():
+            return False
         r = subprocess.run(["ots", "info", str(ots)], capture_output=True, text=True)
-        return r.returncode == 0
+        digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
+        first = (r.stdout.splitlines() or [""])[0].strip().lower()
+        return r.returncode == 0 and first == f"file sha256 hash: {digest}"
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")
