@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -229,6 +230,11 @@ def receipt_cost(rcpt) -> dict:
 
 
 # ------------------------------------------------------------- Bitcoin ----
+def _plain(text: str) -> str:
+    """What ots said, as one line of printable ASCII, for a log or a commit."""
+    return re.sub(r"[^ -~]", "?", text)[:200]
+
+
 class OtsError(RuntimeError):
     """ots failed to run, as opposed to reading a file and finding no proof in it."""
 
@@ -251,7 +257,14 @@ class BitcoinWitness:
         p = self.ledger.proof_path(block.index, "hash")
         tmp = p.with_name(p.name + ".tmp")
         try:
-            tmp.write_bytes(bytes.fromhex(block.hash))
+            tmp.unlink(missing_ok=True)  # a link left there is removed, never written through
+            data = bytes.fromhex(block.hash)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+            try:
+                if os.write(fd, data) != len(data):
+                    raise OSError(f"short write to {tmp.name}")
+            finally:
+                os.close(fd)
             os.replace(tmp, p)
         finally:
             tmp.unlink(missing_ok=True)
@@ -265,7 +278,9 @@ class BitcoinWitness:
         commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
-        had = os.path.lexists(ots), os.path.lexists(digest)  # a dangling link is there too
+        # A link at the .ots is left: ots will not write through it, and it is not
+        # this run's to remove. A .hash, link or not, is replaced by this run's own.
+        had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
         try:
             p = self._digest_file(block)
             subprocess.run(["ots", "stamp", str(p)], check=True)
@@ -276,16 +291,21 @@ class BitcoinWitness:
             raise
         return ots
 
-    def upgrade(self, block: Block) -> bool:
+    def upgrade(self, block: Block) -> str:
+        """"upgraded", "complete" or "pending", or "blocked" by a .bak that is not a
+        proof. What is on disk decides first: a new proof of this block is an
+        upgrade however ots exited. Otherwise only ots's own words for a proof that
+        is not complete yet read as pending; any other failure is OtsError."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
-            return False
+            return "blocked"
+        before = ots.read_bytes()
         try:
             r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True,
                                text=True, errors="replace")  # what ots says is never a reason to crash
         except OSError as e:  # on PATH but cannot be executed: it renamed nothing
-            raise OtsError(f"ots upgrade did not run: {e}") from e
+            raise OtsError(f"ots upgrade did not run: {_plain(str(e))}") from e
         try:
             self.settle_backup(block)
         except OtsError:
@@ -294,12 +314,14 @@ class BitcoinWitness:
             if bak.exists():
                 os.replace(bak, ots)
             raise
-        if r.returncode and "Traceback (most recent call last)" in (r.stderr or ""):
-            # ots crashed rather than finding the proof incomplete: it renamed
-            # nothing, or the settle above has already put the proof back
-            said = [l.strip() for l in r.stderr.splitlines() if l.strip()]
-            raise OtsError(f"ots upgrade did not run: {said[-1][:200]}")
-        return r.returncode == 0
+        if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
+            return "upgraded"
+        said = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        if r.returncode == 0:
+            return "complete"
+        if r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said):
+            return "pending"  # otsclient/cmds.py upgrade_command, nothing new
+        raise OtsError(f"ots upgrade failed: {_plain(said[-1]) if said else f'exit {r.returncode}'}")
 
     def settle_backup(self, block: Block) -> bool:
         """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
@@ -336,13 +358,13 @@ class BitcoinWitness:
         Any other failure is ots not running, which says nothing about the file: it
         raises OtsError, and nothing is stamped over, put back or deleted on it,
         save in upgrade: there the .bak is the proof ots itself just renamed."""
-        if not path.exists():
-            return False
+        if path.is_symlink() or not path.exists():
+            return False  # a link is never a proof: what it points to is not what is committed
         try:
             r = subprocess.run(["ots", "info", str(path)], capture_output=True,
                                text=True, errors="replace")  # what ots says is never a reason to crash
         except OSError as e:  # on PATH but cannot be executed
-            raise OtsError(f"ots info did not run: {e}") from e
+            raise OtsError(f"ots info did not run: {_plain(str(e))}") from e
         if r.returncode == 0:
             digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
             first = (r.stdout.splitlines() or [""])[0].strip().lower()
@@ -353,7 +375,7 @@ class BitcoinWitness:
                     or line.startswith("invalid timestamp file "):
                 return False
         said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
-        raise OtsError(f"ots info did not run: {said[-1][:200] if said else f'exit {r.returncode}'}")
+        raise OtsError(f"ots info did not run: {_plain(said[-1]) if said else f'exit {r.returncode}'}")
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")

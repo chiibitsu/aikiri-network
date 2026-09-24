@@ -11,7 +11,7 @@
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
-  stamp                     stamp on Bitcoin every block with no proof yet; a good
+  stamp                     stamp on Bitcoin every block with no .ots yet; a good
                             .ots.bak is put back instead, a bad one blocks it
   proof-status <index>      what the block's Bitcoin proof file is, in one line
   verify                    report one of four states
@@ -63,7 +63,7 @@ def _in_worktree(path: Path) -> bool:
 # stamped over or upgraded, since it may be the only trace of what happened.
 _NOT_A_PROOF = "the .ots there is not a proof of this block; left as it is"
 _BAD_BACKUP = ("the .ots.bak there is not a proof of this block, and no .ots beside it is one either; "
-               "left as they are")
+               "nothing moved or deleted")
 
 
 def _cfg(ledger: Ledger) -> dict:
@@ -333,7 +333,7 @@ def main(argv=None):
                     print(f"Bitcoin: block {blk.index}: {_BAD_BACKUP}, nothing stamped")
                 elif bw.holds_proof(blk):
                     print(f"Bitcoin: block {blk.index} already has a proof")
-                elif L.proof_path(blk.index, "hash.ots").exists():
+                elif os.path.lexists(L.proof_path(blk.index, "hash.ots")):
                     print(f"Bitcoin: block {blk.index}: {_NOT_A_PROOF}")
                 else:
                     # Not fatal: block.yml commits the block only after this, and the
@@ -369,14 +369,16 @@ def main(argv=None):
                 if not bw.settle_backup(blk):
                     print(f"block {blk.index}: {_BAD_BACKUP}, nothing upgraded")
                     continue
-                if not L.proof_path(blk.index, "hash.ots").exists():
+                if not os.path.lexists(L.proof_path(blk.index, "hash.ots")):
                     continue
                 if not bw.holds_proof(blk):
                     print(f"block {blk.index}: {_NOT_A_PROOF}")
                     continue
-                print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
+                done = bw.upgrade(blk)
+                print(f"block {blk.index}: " + {"upgraded": "upgraded", "complete": "already complete",
+                                                "pending": "still pending"}.get(done, done))
             except (OtsError, OSError) as e:  # ots not running, or the folder not writable
-                print(f"block {blk.index}: could not check the proof file ({e})")
+                print(f"block {blk.index}: could not check or upgrade the proof file ({e})")
         return 0
 
     if a.cmd == "proof-status":
@@ -385,22 +387,27 @@ def main(argv=None):
         # It runs after the Base anchor, which cannot be taken back, so it never fails.
         try:
             blk = L.read(a.index)
-            # It reads what settle_backup would settle to, and settles nothing.
+            # It judges the .ots, as verify does and as a commit carries it, and says
+            # what the .bak holds only beside that. A .bak is never committed.
+            # It settles nothing.
             ots = L.proof_path(blk.index, "hash.ots")
             bak = ots.with_name(ots.name + ".bak")
-            if not ots.exists() and not bak.exists():
+            if not os.path.lexists(ots) and not os.path.lexists(bak):
                 print("none; not stamped, nightly stamps it")
             elif not BitcoinWitness.available():
                 print("unknown; ots is not installed to read the file there")
             elif BitcoinWitness(L).holds_proof(blk):
                 print("stamped; a proof of this block")
-            elif BitcoinWitness.proof_of(bak, blk):
-                # Not "stamped": a .bak is never committed, so the commit this line
-                # goes into would not carry the proof
-                print("unknown; a proof of this block is only in the .ots.bak, which is never "
-                      "committed; the next upgrade, stamp or witness here puts it back")
             else:
-                print("none; the file there is not a proof of this block")
+                there = ("the file there is not a proof of this block" if os.path.lexists(ots)
+                         else "not stamped")
+                if BitcoinWitness.proof_of(bak, blk):
+                    print(f"none; {there}; a proof of it is only in the .ots.bak, which is never "
+                          f"committed, and the next upgrade or stamp here puts it back")
+                elif os.path.lexists(bak):
+                    print(f"none; {there}, and the .ots.bak there is not a proof of it either")
+                else:
+                    print(f"none; {there}")
         except Exception as e:  # noqa: BLE001
             # ots's own words go into main's history: printable ASCII only
             said = re.sub(r"[^ -~]", "?", str(e))
@@ -420,7 +427,7 @@ def main(argv=None):
                     print(f"block {blk.index}: {_BAD_BACKUP}, nothing stamped")
                     failed += 1
                     continue
-                if L.proof_path(blk.index, "hash.ots").exists():
+                if os.path.lexists(L.proof_path(blk.index, "hash.ots")):
                     if not bw.holds_proof(blk):
                         print(f"block {blk.index}: {_NOT_A_PROOF}")
                         failed += 1
