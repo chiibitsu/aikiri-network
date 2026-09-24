@@ -230,8 +230,8 @@ def receipt_cost(rcpt) -> dict:
 
 # ------------------------------------------------------------- Bitcoin ----
 class BitcoinWitness:
-    """Wraps the `ots` CLI (opentimestamps-client). Needs network for stamp/upgrade;
-    a completed .ots proof verifies against Bitcoin alone, forever."""
+    """Stamps and upgrades with the `ots` CLI (opentimestamps-client), which needs the
+    calendars; verifies by reading the .ots, and a complete one needs only Bitcoin."""
 
     def __init__(self, ledger: Ledger):
         self.ledger = ledger
@@ -257,17 +257,108 @@ class BitcoinWitness:
         r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
         return r.returncode == 0
 
-    def verify(self, block: Block) -> tuple[bool, str]:
-        ots = self.ledger.proof_path(block.index, "hash.ots")
-        if not ots.exists():
-            return False, "no .ots proof"
-        # ots is handed the digest to check the proof against, made from the block's own
-        # hash, and opens no file for it. Taken from the .hash file beside the proof, a
-        # genuine proof of any other data, with that data in the file, would pass; and a
-        # file read twice (once to check it, once by ots) can answer differently.
-        digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
-        r = subprocess.run(["ots", "verify", "-d", digest, str(ots)], capture_output=True, text=True)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    @staticmethod
+    def _node():
+        """The Bitcoin node `ots` would use: the one $HOME/.bitcoin/bitcoin.conf names."""
+        import bitcoin
+        import bitcoin.rpc
+        bitcoin.SelectParams("mainnet")
+        return bitcoin.rpc.Proxy(timeout=_NODE_TIMEOUT)
+
+    def verify(self, block: Block) -> tuple[str, str]:
+        """(complete | pending | unchecked | failed, why), from the .ots itself.
+
+        The proof is read, not run: its digest must be the SHA-256 of the block's own
+        hash, and only an attestation that names a Bitcoin block is taken to a node.
+        No `ots`, no calendar: moving a pending proof along is nightly's job.
+        """
+        from opentimestamps.core.notary import (BitcoinBlockHeaderAttestation,
+                                                PendingAttestation, VerificationError)
+        from opentimestamps.core.serialize import BytesDeserializationContext
+        from opentimestamps.core.timestamp import DetachedTimestampFile
+
+        p = self.ledger.proof_path(block.index, "hash.ots")
+        if not os.path.lexists(p):
+            return "pending", "no .ots proof yet"
+        if p.is_symlink():
+            return "failed", "the .ots is a link, never a proof"
+        try:
+            data = _read_regular(p, _OTS_MAX + 1)
+        except OSError as e:
+            return "failed", f"the .ots cannot be read: {_one_line(e)}"
+        if data is None:
+            return "failed", "the .ots is not a regular file"
+        if len(data) > _OTS_MAX:
+            return "failed", "the .ots is far larger than any proof"
+        try:
+            proof = DetachedTimestampFile.deserialize(BytesDeserializationContext(data))
+        except Exception as e:  # any way of not being a whole proof
+            return "failed", f"the .ots is not a proof: {_one_line(e) or type(e).__name__}"
+        # A proof attests its digest; how that digest was made from a file does not
+        # matter, only that it is the SHA-256 of this block's hash.
+        if proof.file_digest != hashlib.sha256(bytes.fromhex(block.hash)).digest():
+            return "failed", "a proof of other data, not of this block"
+
+        attested = sorted(((a.height, msg) for msg, a in proof.timestamp.all_attestations()
+                           if isinstance(a, BitcoinBlockHeaderAttestation)))
+        if not attested:
+            if any(isinstance(a, PendingAttestation) for _, a in proof.timestamp.all_attestations()):
+                return "pending", "not yet in a Bitcoin block"
+            return "failed", "no attestation that leads to Bitcoin"
+
+        # One attestation Bitcoin confirms is enough. One it contradicts fails the
+        # proof, whatever else the node could not answer; only when neither happens is
+        # the proof unchecked. Either way nothing short of a confirmed block is complete.
+        try:
+            node = self._node()
+        except Exception as e:
+            return "unchecked", f"no Bitcoin node answered: {_one_line(e)}"
+        contradicted, unanswered = [], ""
+        for height, msg in attested:
+            try:  # a node behind that block raises IndexError; one warming up, JSONRPCError
+                header = node.getblockheader(node.getblockhash(height))
+            except Exception as e:
+                unanswered = unanswered or f"the Bitcoin node could not answer for block {height}: {_one_line(e)}"
+                continue
+            try:
+                BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
+            except VerificationError:
+                contradicted.append(height)
+                continue
+            return "complete", f"in Bitcoin block {height}"
+        if contradicted:
+            return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
+        return "unchecked", unanswered
+
+
+_OTS_MAX = 1 << 20      # bytes; a proof is a few KB, and calendars answer 10,000 at most
+_NODE_TIMEOUT = 30      # seconds per request to the Bitcoin node
+
+
+def _read_regular(p: Path, limit: int) -> bytes | None:
+    """At most `limit` bytes of a regular file, never through a link; None if `p` is
+    not a regular file. O_NONBLOCK so that a FIFO does not hang the open."""
+    import stat
+    fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, left = [], limit
+        while left > 0:
+            chunk = os.read(fd, min(left, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _one_line(text) -> str:
+    """Outside text (a node's error, an exception) as one line of printable ASCII."""
+    flat = " ".join(str(text).split())
+    return "".join(c for c in flat if " " <= c <= "~")[:300]
 
 
 # ------------------------------------------------------------ Verifier ----
@@ -285,8 +376,8 @@ def verify_all(ledger: Ledger, base: BaseWitness | None = None, bitcoin: Bitcoin
                 return False, report
     if bitcoin is not None:
         for b in ledger.blocks():
-            good, msg = bitcoin.verify(b)
-            report.append(f"block {b.index}: Bitcoin witness {'ok' if good else 'pending/missing'}")
+            result, why = bitcoin.verify(b)
+            report.append(f"block {b.index}: Bitcoin witness {'ok' if result == 'complete' else result}: {why}")
     return True, report
 
 

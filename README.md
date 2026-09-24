@@ -33,7 +33,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `aikiri_ledger/request.py` ~ the sealed request: one root, one nonce, consumed once
 - `aikiri_ledger/trust.py` ~ where the verifier's expectations come from
 - `aikiri_ledger/verify.py` ~ the four states
-- `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin via `ots`
+- `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin proofs (`ots` stamps and upgrades them; verify reads them)
 - `contracts/AikiriLedger.sol` ~ owner-only anchor, sequential, no re-anchoring
 - `ledger/` ~ `blocks/`, `proofs/`, `requests/`, `HEAD`, `config.json`, `deploy.json`
 - `aikiri_ledger/softkey.py` ~ the approval key: P-256, passphrase-encrypted, never in CI
@@ -62,7 +62,7 @@ BASE VERIFIED — BITCOIN PENDING
 FULLY VERIFIED
 ```
 
-There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. A complete Bitcoin proof is checked against a Bitcoin node; where there is none, the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`, and when `ots` gives no verdict but says it could not connect to one, or crashes inside its calendar client, the report says the proof was not checked. A calendar that cannot be reached, refuses, or has nothing yet only leaves a proof pending.
+There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. Verify reads each Bitcoin proof (`.ots`) itself: it must be a proof of that block's hash, and one that names a Bitcoin block is checked against a Bitcoin node. Where no node answers for that block, the report says the proof was not checked and the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`. Verify asks no calendar; a proof not yet in a Bitcoin block is pending.
 
 ```
 aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
