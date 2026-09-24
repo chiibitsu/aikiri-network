@@ -40,7 +40,7 @@ from .request import Request, new_nonce, parse_roots
 from . import softkey
 from .trust import Trust
 from .verify import State, verify_all
-from .witness import (BASE_KEY_ENV, BaseWitness, BitcoinWitness, QuorumBase, base_key_from_env,
+from .witness import (BASE_KEY_ENV, BaseWitness, BitcoinWitness, OtsError, QuorumBase, base_key_from_env,
                       compile_contract, find_deployment, receipt_cost, wait_for_code)
 
 DEFAULT_KEYFILE = os.path.expanduser("~/.aikiri/chii.key")
@@ -323,22 +323,26 @@ def main(argv=None):
         else:
             print("Base: no rpc/contract configured; skipped")
         if BitcoinWitness.available():
-            bw = BitcoinWitness(L)
-            bw.settle_backup(blk)  # as `stamp` does: never stamp beside a backup
-            if bw.holds_proof(blk):
-                print(f"Bitcoin: block {blk.index} already has a proof")
-            elif L.proof_path(blk.index, "hash.ots").exists():
-                print(f"Bitcoin: block {blk.index}: {_NOT_A_PROOF}")
-            else:
-                # Not fatal: block.yml commits the block only after this, and the
-                # Base anchor above cannot be taken back. Nightly stamps any block
-                # that has no .ots.
-                try:
-                    p = bw.stamp(blk)
-                    print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
-                except (subprocess.CalledProcessError, OSError) as e:
-                    print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
-                          f"nightly stamps any block that has no .ots")
+            try:
+                bw = BitcoinWitness(L)
+                bw.settle_backup(blk)  # as `stamp` does: never stamp beside a backup
+                if bw.holds_proof(blk):
+                    print(f"Bitcoin: block {blk.index} already has a proof")
+                elif L.proof_path(blk.index, "hash.ots").exists():
+                    print(f"Bitcoin: block {blk.index}: {_NOT_A_PROOF}")
+                else:
+                    # Not fatal: block.yml commits the block only after this, and the
+                    # Base anchor above cannot be taken back. Nightly stamps any block
+                    # that has no .ots.
+                    try:
+                        p = bw.stamp(blk)
+                        print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
+                    except (subprocess.CalledProcessError, OSError) as e:
+                        print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
+                              f"nightly stamps any block that has no .ots")
+            except OtsError as e:
+                print(f"Bitcoin: could not check block {blk.index}'s proof file ({e}); "
+                      f"nothing was stamped")
         else:
             print("Bitcoin: `ots` not installed; `pip install opentimestamps-client`")
         return 0
@@ -356,21 +360,24 @@ def main(argv=None):
     if a.cmd == "upgrade":
         bw = BitcoinWitness(L)
         for blk in L.blocks():
-            bw.settle_backup(blk)
-            if not L.proof_path(blk.index, "hash.ots").exists():
-                continue
-            if not bw.holds_proof(blk):
-                print(f"block {blk.index}: {_NOT_A_PROOF}")
-                continue
-            print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
+            try:
+                bw.settle_backup(blk)
+                if not L.proof_path(blk.index, "hash.ots").exists():
+                    continue
+                if not bw.holds_proof(blk):
+                    print(f"block {blk.index}: {_NOT_A_PROOF}")
+                    continue
+                print(f"block {blk.index}: {'upgraded' if bw.upgrade(blk) else 'still pending'}")
+            except OtsError as e:
+                print(f"block {blk.index}: could not check the proof file ({e})")
         return 0
 
     if a.cmd == "proof-status":
         # block.yml's commit message reads this: main's history is never rewritten,
         # so it says what is on disk, checked as a proof of the block.
         # It runs after the Base anchor, which cannot be taken back, so it never fails.
-        blk = L.read(a.index)
         try:
+            blk = L.read(a.index)
             if not L.proof_path(blk.index, "hash.ots").exists():
                 print("none; not stamped, nightly stamps it")
             elif not BitcoinWitness.available():
@@ -391,11 +398,16 @@ def main(argv=None):
         bw = BitcoinWitness(L)
         failed = 0
         for blk in L.blocks():
-            bw.settle_backup(blk)  # a .bak with no good proof is the proof: never stamp over it
-            if L.proof_path(blk.index, "hash.ots").exists():
-                if not bw.holds_proof(blk):
-                    print(f"block {blk.index}: {_NOT_A_PROOF}")
-                    failed += 1
+            try:
+                bw.settle_backup(blk)  # a .bak with no good proof is the proof: never stamp over it
+                if L.proof_path(blk.index, "hash.ots").exists():
+                    if not bw.holds_proof(blk):
+                        print(f"block {blk.index}: {_NOT_A_PROOF}")
+                        failed += 1
+                    continue
+            except OtsError as e:
+                print(f"block {blk.index}: could not check the proof file ({e})")
+                failed += 1
                 continue
             try:
                 p = bw.stamp(blk)

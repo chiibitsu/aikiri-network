@@ -229,6 +229,10 @@ def receipt_cost(rcpt) -> dict:
 
 
 # ------------------------------------------------------------- Bitcoin ----
+class OtsError(RuntimeError):
+    """ots failed to run, as opposed to reading a file and finding no proof in it."""
+
+
 class BitcoinWitness:
     """Wraps the `ots` CLI (opentimestamps-client). Needs network for stamp/upgrade;
     a completed .ots proof verifies against Bitcoin alone, forever."""
@@ -304,14 +308,24 @@ class BitcoinWitness:
 
     @staticmethod
     def _proof_of(path: Path, block: Block) -> bool:
-        """`ots info` exits 1 on anything that is not a proof, and names the digest a
-        proof is of; that must be this block's."""
+        """`ots info` names the digest a proof is of, which must be this block's, and
+        says so when the file is not a proof at all (otsclient/cmds.py info_command).
+        Any other failure is ots not running, which says nothing about the file: it
+        raises OtsError, and nothing is stamped over, put back or deleted on it."""
         if not path.exists():
             return False
         r = subprocess.run(["ots", "info", str(path)], capture_output=True, text=True)
-        digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
-        first = (r.stdout.splitlines() or [""])[0].strip().lower()
-        return r.returncode == 0 and first == f"file sha256 hash: {digest}"
+        if r.returncode == 0:
+            digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
+            first = (r.stdout.splitlines() or [""])[0].strip().lower()
+            return first == f"file sha256 hash: {digest}"
+        for line in (r.stderr or "").splitlines():
+            line = line.strip().lower()
+            if (line.startswith("error! ") and line.endswith("is not a timestamp file.")) \
+                    or line.startswith("invalid timestamp file "):
+                return False
+        said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
+        raise OtsError(f"ots info did not run: {said[-1][:200] if said else f'exit {r.returncode}'}")
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")

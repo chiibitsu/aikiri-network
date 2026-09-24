@@ -1096,7 +1096,8 @@ class _FakeOts:
         if cmd == "info":
             parts = (path.read_bytes() if path.exists() else b"").split(b":")
             if len(parts) != 3 or parts[0] != b"proof":
-                return ran(1)
+                return SimpleNamespace(returncode=1, stdout="",
+                                       stderr=f"Error! {str(path)!r} is not a timestamp file.\n")
             return SimpleNamespace(returncode=0, stdout=f"File sha256 hash: {parts[1].decode()}\n"
                                    "Timestamp:\n", stderr="")
         if cmd == "stamp":
@@ -1347,7 +1348,7 @@ def test_a_stamp_that_cannot_write_the_digest_changes_nothing(ledger, monkeypatc
 
 @pytest.mark.parametrize("stop", [KeyboardInterrupt, SystemExit])
 def test_a_stamp_interrupted_leaves_nothing(ledger, monkeypatch, stop):
-    # Ctrl-C or a signal while ots stamp runs: the cleanup runs all the same
+    # Ctrl-C, or an exit, while ots stamp runs: the cleanup runs all the same
     from aikiri_ledger import witness as W
     def interrupted(argv, **kw):
         raise stop()
@@ -1400,3 +1401,75 @@ def test_proof_status_never_fails_the_commit_step(ledger, monkeypatch, capsys):
     _ots_paths(ledger, 0)[0].write_bytes(b"anything")
     assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
     assert capsys.readouterr().out.startswith("unknown; ")
+
+
+def _ots_crashes(argv, **kw):
+    """ots failing before it reads the file (a broken install or cache)."""
+    from types import SimpleNamespace
+    return SimpleNamespace(returncode=1, stdout="", stderr=(
+        "Traceback (most recent call last):\n"
+        "FileNotFoundError: [Errno 2] No such file or directory: '/proc/nope'\n"))
+
+
+def test_ots_failing_to_run_is_not_read_as_not_a_proof(ledger, monkeypatch, capsys):
+    # "not a proof" is what ots says of a file it read; ots not running says nothing
+    # about the file. Nothing is stamped over, put back or deleted on it.
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, bak = _ots_paths(ledger, 0)
+    ots.write_bytes(_proof(ledger, 0, "pending"))
+    bak.write_bytes(_proof(ledger, 0, "older"))
+    monkeypatch.setattr(W.subprocess, "run", _ots_crashes)
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
+    status = capsys.readouterr().out
+    assert status.startswith("unknown; ") and status.count("\n") == 1, "one line, for the commit"
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert cli.main(["--ledger", str(ledger.root), "witness", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "not a proof" not in out and "could not" in out
+    assert ots.read_bytes() == _proof(ledger, 0, "pending")
+    assert bak.read_bytes() == _proof(ledger, 0, "older")
+
+
+def test_proof_status_of_a_block_that_cannot_be_read_is_unknown(ledger, capsys):
+    from aikiri_ledger import cli
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "7"]) == 0
+    assert capsys.readouterr().out.startswith("unknown; ")
+
+
+@pytest.mark.parametrize("says", ["none; not stamped, nightly stamps it",
+                                  "stamped; a proof of this block, upgraded on a later run"])
+def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
+    # The commit step itself, under bash -e, with git and aikiri-ledger stood in
+    import os
+    import stat
+    import textwrap
+    lines = (Path(".github/workflows") / "block.yml").read_text().splitlines()
+    at = next(i for i, l in enumerate(lines) if l.strip() == "- name: commit the block and its proofs")
+    run = next(i for i in range(at, len(lines)) if lines[i].strip() == "run: |")
+    indent = len(lines[run]) - len(lines[run].lstrip())
+    body = []
+    for l in lines[run + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) <= indent:
+            break
+        body.append(l)
+    script = textwrap.dedent("\n".join(body))
+    (tmp_path / "ledger/blocks").mkdir(parents=True)
+    (tmp_path / "ledger/proofs").mkdir()
+    (tmp_path / "ledger/blocks/000003.json").write_text(json.dumps({
+        "hash": "ab" * 32, "roots": [{"kind": "journal", "sha256": "cd" * 32}],
+        "approval": {"device": "mac"}}))
+    (tmp_path / "ledger/proofs/000003.base.json").write_text(json.dumps({"tx": "0xfeed"}))
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for name, body in (("git", 'if [ "$1" = commit ]; then cat > "$MSGFILE"; fi\n'),
+                       ("aikiri-ledger", f'echo "{says}"\n')):
+        exe = bin_ / name
+        exe.write_text("#!/bin/sh\n" + body)
+        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "INDEX": "3",
+           "MSGFILE": str(tmp_path / "msg")}
+    subprocess.run(["bash", "-e", "-c", script], cwd=tmp_path, env=env, check=True)
+    msg = (tmp_path / "msg").read_text()
+    assert f"OTS       {says}" in msg and "Base      tx 0xfeed" in msg
