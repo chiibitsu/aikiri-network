@@ -1067,3 +1067,71 @@ def test_nightly_proposes_proofs_instead_of_pushing_to_main():
         "the PR must be scoped to ledger/proofs, not free to touch anything else"
     assert "branch: nightly/bitcoin-proofs" in text, \
         "reuse one branch across nights rather than opening a new PR each time"
+
+
+# --------------------------------------------------- Bitcoin proof upkeep ----
+class _FakeOts:
+    """Does to the proofs directory what `ots stamp` and `ots upgrade` do
+    (opentimestamps-client 0.7.2, otsclient/cmds.py), without a network."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        from types import SimpleNamespace
+        self.calls.append(list(argv))
+        cmd, path = argv[1], Path(argv[-1])
+        if cmd == "stamp":
+            Path(str(path) + ".ots").write_bytes(b"pending proof")
+        elif cmd == "upgrade":
+            bak = Path(str(path) + ".bak")
+            if bak.exists():  # upgrade_command: "Could not backup timestamp"
+                return SimpleNamespace(returncode=1, stdout="", stderr="already exists")
+            path.rename(bak)
+            path.write_bytes(b"complete proof")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def test_upgrade_leaves_no_ots_backup_and_is_not_stopped_by_one(ledger, monkeypatch):
+    # ots upgrade renames the old proof to .bak, and refuses to upgrade at all
+    # while a .bak is already there.
+    from aikiri_ledger import witness as W
+    fake = _FakeOts()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    b = ledger.read(0)
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ots = ledger.proof_path(0, "hash.ots")
+    ots.write_bytes(b"pending proof")
+    Path(str(ots) + ".bak").write_bytes(b"older proof")
+    assert W.BitcoinWitness(ledger).upgrade(b)
+    assert ots.read_bytes() == b"complete proof"
+    assert not Path(str(ots) + ".bak").exists()
+
+
+def test_ots_backups_are_never_committed():
+    import subprocess
+    r = subprocess.run(["git", "check-ignore", "-q", "ledger/proofs/000001.hash.ots.bak"])
+    assert r.returncode == 0, "block.yml and nightly add ledger/proofs; a .bak must not ride along"
+
+
+def test_stamp_stamps_every_block_without_a_proof_and_only_those(ledger, sk, mac, monkeypatch):
+    from aikiri_ledger import cli, witness as W
+    b1 = ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                                    now=datetime(2026, 9, 3, tzinfo=MANILA))
+    fake = _FakeOts()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(1, "hash.ots").write_bytes(b"already stamped")
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
+    assert [c[:2] for c in fake.calls] == [["ots", "stamp"]]
+    assert ledger.proof_path(0, "hash").read_bytes() == bytes.fromhex(ledger.read(0).hash)
+    assert ledger.proof_path(0, "hash.ots").exists()
+    assert ledger.proof_path(1, "hash.ots").read_bytes() == b"already stamped"
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 0
+    assert len(fake.calls) == 1, "a block that has a proof is never stamped again"
+
+
+def test_nightly_stamps_blocks_without_a_proof_before_proposing():
+    text = (Path(".github/workflows") / "nightly.yml").read_text()
+    assert "aikiri-ledger stamp" in text
+    assert text.index("aikiri-ledger stamp") < text.index("uses: peter-evans/create-pull-request@")
