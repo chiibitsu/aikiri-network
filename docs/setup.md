@@ -178,4 +178,9 @@ This is a small chore next to the ledger: a proof that lands has no urgency ~
 Bitcoin already confirmed it, and it has been sitting in the OpenTimestamps
 calendar as pending proof, correctly, since it was stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
-longer than it needed to.
+longer than it needed to. The nightly runner reads the repository's own
+`trust.json`, so it never reports more than `VALID LOCALLY`. It has no Bitcoin
+node either, so it cannot check a complete proof; when `ots` says it could not
+connect to one, verify reports the proof as not checked rather than failed.
+`FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
+Bitcoin node.
