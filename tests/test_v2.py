@@ -425,7 +425,7 @@ def _base_verified(ledger, trust):
 # Bitcoin node only about an attestation that claims a Bitcoin block. It runs no
 # `ots` and asks no calendar, so nothing it decides rests on ots's wording.
 
-def _proof(block_hash=None, *atts, digest=None, hash_op=None):
+def _ots_file(block_hash=None, *atts, digest=None, hash_op=None):
     """A real .ots of sha256(block hash), each attestation at the end of its own path."""
     import hashlib, io
     from opentimestamps.core.op import OpAppend, OpSHA256
@@ -515,13 +515,13 @@ def test_no_proof_yet_is_pending(ledger, trust, monkeypatch):
 
 def test_a_pending_proof_is_pending_and_asks_no_one(ledger, trust, monkeypatch):
     # no node, no subprocess, no calendar: _read fails the test if either is used
-    state, report = _read(ledger, trust, monkeypatch, _proof(ledger.read(0).hash, _pending()))
+    state, report = _read(ledger, trust, monkeypatch, _ots_file(ledger.read(0).hash, _pending()))
     assert state == State.BASE_VERIFIED
     assert any("block 0: Bitcoin proof pending" in r for r in report)
 
 
 def test_a_complete_proof_a_node_confirms_is_fully_verified(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _pending(), _btc(800_000))
+    data = _ots_file(ledger.read(0).hash, _pending(), _btc(800_000))
     node = _Node(_roots(data))
     state, report = _read(ledger, trust, monkeypatch, data, node)
     assert state == State.FULLY_VERIFIED
@@ -530,7 +530,7 @@ def test_a_complete_proof_a_node_confirms_is_fully_verified(ledger, trust, monke
 
 
 def test_a_block_that_does_not_carry_the_proof_fails(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
     state, report = _read(ledger, trust, monkeypatch, data, _Node({800_000: b"\x11" * 32}))
     assert state == State.INVALID
     assert any("block 0: Bitcoin proof FAILED" in r for r in report)
@@ -539,7 +539,7 @@ def test_a_block_that_does_not_carry_the_proof_fails(ledger, trust, monkeypatch)
 def test_a_genuine_proof_of_other_data_fails(ledger, trust, monkeypatch):
     # every attestation in it is real; it is simply not a proof of this block
     import hashlib
-    data = _proof(None, _btc(800_000), digest=hashlib.sha256(b"other data").digest())
+    data = _ots_file(None, _btc(800_000), digest=hashlib.sha256(b"other data").digest())
     state, report = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)))
     assert state == State.INVALID
     assert any("FAILED" in r and "other data" in r for r in report)
@@ -549,13 +549,13 @@ def test_a_proof_hashed_another_way_fails(ledger, trust, monkeypatch):
     import hashlib
     from opentimestamps.core.op import OpSHA1
     digest = hashlib.sha1(bytes.fromhex(ledger.read(0).hash)).digest()
-    data = _proof(None, _btc(800_000), digest=digest, hash_op=OpSHA1())
+    data = _ots_file(None, _btc(800_000), digest=digest, hash_op=OpSHA1())
     state, _ = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)))
     assert state == State.INVALID
 
 
-def test_a_link_is_never_a_proof(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000))
+def test_verify_never_takes_a_link_for_a_proof(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
     state, report = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)), link=True)
     assert state == State.INVALID
     assert any("FAILED" in r and "a link, never a proof" in r for r in report)
@@ -567,7 +567,7 @@ def test_a_link_is_never_a_proof(ledger, trust, monkeypatch):
     lambda d: d + b"\x00",        # something after the end
 ])
 def test_a_file_that_is_not_a_whole_proof_fails(ledger, trust, monkeypatch, damage):
-    data = damage(_proof(ledger.read(0).hash, _btc(800_000)))
+    data = damage(_ots_file(ledger.read(0).hash, _btc(800_000)))
     state, report = _read(ledger, trust, monkeypatch, data, _Node())
     assert state == State.INVALID
     assert any("block 0: Bitcoin proof FAILED: the .ots is not a proof" in r for r in report)
@@ -583,7 +583,7 @@ def test_a_fifo_is_not_a_proof_and_does_not_hang(ledger, trust, monkeypatch):
 
 
 def test_a_file_far_larger_than_any_proof_is_not_read(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000)) + b"\x00" * (1 << 20)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000)) + b"\x00" * (1 << 20)
     state, report = _read(ledger, trust, monkeypatch, data, _Node())
     assert state == State.INVALID
     assert any("larger than any proof" in r for r in report)
@@ -591,7 +591,7 @@ def test_a_file_far_larger_than_any_proof_is_not_read(ledger, trust, monkeypatch
 
 def test_a_proof_with_no_way_to_bitcoin_fails(ledger, trust, monkeypatch):
     from opentimestamps.core.notary import UnknownAttestation
-    data = _proof(ledger.read(0).hash, UnknownAttestation(b"\x01" * 8, b"payload"))
+    data = _ots_file(ledger.read(0).hash, UnknownAttestation(b"\x01" * 8, b"payload"))
     state, _ = _read(ledger, trust, monkeypatch, data)
     assert state == State.INVALID
 
@@ -604,14 +604,14 @@ def test_a_proof_with_no_way_to_bitcoin_fails(ledger, trust, monkeypatch):
     _Node(tip=799_999),                                        # behind the attested block
 ])
 def test_a_node_that_cannot_answer_leaves_the_proof_unchecked(ledger, trust, monkeypatch, node):
-    data = _proof(ledger.read(0).hash, _btc(800_000))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
     state, report = _read(ledger, trust, monkeypatch, data, node)
     assert state == State.BASE_VERIFIED
     assert any("block 0: Bitcoin proof not checked" in r for r in report)
 
 
 def test_one_attestation_bitcoin_confirms_is_enough(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000), _btc(800_001))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(800_001))
     roots = _roots(data)
     roots[800_000] = b"\x11" * 32  # the first one does not hold
     state, _ = _read(ledger, trust, monkeypatch, data, _Node(roots))
@@ -619,13 +619,13 @@ def test_one_attestation_bitcoin_confirms_is_enough(ledger, trust, monkeypatch):
 
 
 def test_an_attestation_bitcoin_contradicts_fails_even_beside_an_unanswered_one(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000), _btc(950_000))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(950_000))
     state, _ = _read(ledger, trust, monkeypatch, data, _Node({800_000: b"\x11" * 32}))
     assert state == State.INVALID
 
 
 def test_what_a_node_says_reaches_the_report_as_one_line(ledger, trust, monkeypatch):
-    data = _proof(ledger.read(0).hash, _btc(800_000))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
     node = _Node(error=Exception("line one\nline two\x1b[31m\x85"))
     _, report = _read(ledger, trust, monkeypatch, data, node)
     (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
