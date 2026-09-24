@@ -10,10 +10,11 @@
   block                     write the block a sealed request approves
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
-  upgrade                   fetch completed Bitcoin proofs
+  upgrade                   fetch what the calendars have for pending Bitcoin proofs
   stamp                     stamp on Bitcoin every block with no .ots yet; a good
                             .ots.bak is put back instead, a bad one blocks it
   proof-status <index>      what the block's Bitcoin proof file is, in one line
+                            (its digest only: `verify` is what checks a proof)
   verify                    report one of four states
   deploy                    deploy the contract (once)
 
@@ -393,7 +394,8 @@ def main(argv=None):
             bak = ots.with_name(ots.name + ".bak")
             if not os.path.lexists(ots):
                 print("none; not stamped, nightly stamps it"
-                      + (" (the .ots.bak here is never committed)" if os.path.lexists(bak) else ""))
+                      + (" (the .ots.bak here is never committed; nightly works from main)"
+                         if os.path.lexists(bak) else ""))
             elif not BitcoinWitness.available():
                 print("unknown; ots is not installed to read the file there")
             elif BitcoinWitness(L).holds_proof(blk):

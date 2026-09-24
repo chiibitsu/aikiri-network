@@ -1417,12 +1417,12 @@ def test_block_commit_says_whether_there_is_a_bitcoin_proof():
     # on disk, checked as a proof of the block, not from whether a file exists.
     text = (Path(".github/workflows") / "block.yml").read_text()
     step = text[text.index("- name: commit the block and its proofs"):text.index("- name: verify")]
-    assert 'OTS=$(aikiri-ledger proof-status "$INDEX")' in step
+    assert 'OTS=$(aikiri-ledger proof-status "$INDEX" || echo "unknown; proof-status failed")' in step
     assert "test -f" not in step and "OTS       $OTS" in step
 
 
 _NONE = "none; not stamped, nightly stamps it"
-_NEVER = " (the .ots.bak here is never committed)"
+_NEVER = " (the .ots.bak here is never committed; nightly works from main)"
 _NEITHER = "none; the file there is not a proof of this block"
 
 
@@ -1439,7 +1439,8 @@ _NEITHER = "none; the file there is not a proof of this block"
     (None, "dangling", _NONE + _NEVER),
 ])
 def test_proof_status_says_what_is_there(ledger, monkeypatch, capsys, on_disk, backup, says):
-    # The .ots alone, as a commit carries it; a .bak is never committed. It reads only
+    # The .ots alone, as a commit carries it; a .bak is never committed. It changes
+    # no file.
     from aikiri_ledger import cli, witness as W
     monkeypatch.setattr(W.subprocess, "run", _FakeOts())
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
@@ -1527,9 +1528,11 @@ def test_proof_status_of_a_block_that_cannot_be_read_is_unknown(ledger, capsys):
 
 
 @pytest.mark.parametrize("says", ["none; not stamped, nightly stamps it",
-                                  "stamped; a proof of this block"])
+                                  "stamped; a proof of this block",
+                                  None])
 def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
-    # The commit step itself, under bash -e, with git and aikiri-ledger stood in
+    # The commit step itself, under bash -e, with git and aikiri-ledger stood in.
+    # proof-status never fails; if it dies anyway (None), the commit still happens.
     import os
     import stat
     import textwrap
@@ -1552,7 +1555,7 @@ def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     for name, body in (("git", 'if [ "$1" = commit ]; then cat > "$MSGFILE"; fi\n'),
-                       ("aikiri-ledger", f'echo "{says}"\n')):
+                       ("aikiri-ledger", f'echo "{says}"\n' if says else "exit 139\n")):
         exe = bin_ / name
         exe.write_text("#!/bin/sh\n" + body)
         exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
@@ -1560,7 +1563,7 @@ def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
            "MSGFILE": str(tmp_path / "msg")}
     subprocess.run(["bash", "-e", "-c", script], cwd=tmp_path, env=env, check=True)
     msg = (tmp_path / "msg").read_text()
-    assert f"OTS       {says}" in msg and "Base      tx 0xfeed" in msg
+    assert f"OTS       {says or 'unknown; proof-status failed'}" in msg and "Base      tx 0xfeed" in msg
 
 
 def test_an_upgrade_whose_output_cannot_be_checked_keeps_the_proof(ledger, monkeypatch, capsys):
@@ -1808,7 +1811,9 @@ def test_an_upgrade_on_disk_is_upgraded_however_ots_exited(ledger, monkeypatch, 
     ots, bak = _ots_paths(ledger, 0)
     ots.write_bytes(_proof(ledger, 0, "pending"))
     assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
-    assert "block 0: upgraded" in capsys.readouterr().out
+    # Kept, and not called complete: only an exit 0 says that
+    assert f"block 0: upgraded, ots exited {rc} before saying whether it is complete" \
+        in capsys.readouterr().out
     assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
 
 
@@ -1912,8 +1917,9 @@ def test_upgrade_of_what_is_not_a_proof_does_nothing(ledger, monkeypatch, tmp_pa
     assert real.read_bytes() == _proof(ledger, 0, "pending")
 
 
-def test_a_failed_stamp_never_removes_a_link(ledger, monkeypatch, tmp_path):
-    # This run makes no links: one at .hash was there before, and is left
+def test_a_failed_stamps_cleanup_never_removes_a_link(ledger, monkeypatch, tmp_path):
+    # The cleanup removes only files this run made, and it makes no links: one at
+    # .hash that the stamp never got to replace is left
     from aikiri_ledger import cli, witness as W
     monkeypatch.setattr(W.subprocess, "run", _FakeOts())
     monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
@@ -1955,3 +1961,41 @@ def test_only_ots_own_line_is_pending(ledger, monkeypatch, capsys):
     _ots_paths(ledger, 0)[0].write_bytes(_proof(ledger, 0, "pending"))
     assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
     assert "still pending" not in capsys.readouterr().out
+
+
+def test_a_dangling_backup_link_blocks_a_stamp_like_any_bad_backup(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    fake = _FakeOts()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, bak = _ots_paths(ledger, 0)
+    bak.symlink_to("nowhere")
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1
+    assert ".ots.bak there is not a proof of this block" in capsys.readouterr().out
+    assert not any(c[1] == "stamp" for c in fake.calls)
+    assert bak.is_symlink() and not os.path.lexists(ots)
+
+
+def test_an_ots_info_that_did_not_run_gives_its_exit_code(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    monkeypatch.setattr(W.subprocess, "run", _ots_crashes)
+    monkeypatch.setattr(_ots_crashes, "calls", [], raising=False)
+    _ots_paths(ledger, 0)[0].write_bytes(_proof(ledger, 0, "pending"))
+    assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
+    assert "ots info did not run, exit 1: " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cmd", ["upgrade", "info"])
+def test_an_ots_killed_after_speaking_still_gives_its_exit_code(ledger, monkeypatch, capsys, cmd):
+    from aikiri_ledger import cli, witness as W
+    from types import SimpleNamespace
+    fake = _FakeOts()
+    def run(argv, **kw):
+        if argv[1] == cmd:
+            return SimpleNamespace(returncode=-9, stdout="", stderr="Checking calendar\n")
+        return fake(argv, **kw)
+    monkeypatch.setattr(W.subprocess, "run", run)
+    _ots_paths(ledger, 0)[0].write_bytes(_proof(ledger, 0, "pending"))
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert f"ots {cmd} " in (out := capsys.readouterr().out) and "exit -9: Checking calendar" in out

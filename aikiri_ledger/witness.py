@@ -278,8 +278,10 @@ class BitcoinWitness:
         commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
-        # What was there is left, and a link is never removed: this run makes none.
-        # A .hash link that _digest_file replaced is this run's file, and goes.
+        # The cleanup removes only what this run made. _digest_file replaces
+        # whatever is at .hash (a link included) with this run's own file, which
+        # goes unless a real .hash was there before; the cleanup itself never
+        # removes a link, since this run makes none.
         had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
         try:
             p = self._digest_file(block)
@@ -292,15 +294,17 @@ class BitcoinWitness:
         return ots
 
     def upgrade(self, block: Block) -> str:
-        """"upgraded", "upgraded, still pending", "complete" or "pending"; "blocked"
-        by a .bak that is not a proof, or "no proof" when the .ots is not one. What is on disk decides first: a new proof of this block is an
-        upgrade however ots exited. Otherwise only ots's own words for a proof that
-        is not complete yet read as pending; any other failure is OtsError."""
+        """What is on disk decides first: a new proof of this block is an upgrade
+        however ots exited, and only an exit 0 calls it complete. Otherwise exit 0
+        is "complete", and only ots's own words for a proof that is not complete
+        yet read as "pending"; any other failure is OtsError. "blocked" when
+        settle_backup leaves a .bak (neither file a proof), "no proof" when the
+        .ots is not a proof of this block."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
             return "blocked"
-        if not self.holds_proof(block):  # nothing there, or a link: nothing to upgrade
+        if not self.holds_proof(block):  # missing, a link, junk or another block's
             return "no proof"
         before = ots.read_bytes()
         try:
@@ -321,7 +325,11 @@ class BitcoinWitness:
         # (otsclient/cmds.py upgrade_command); it prints them only with exit 1
         incomplete = r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said)
         if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
-            return "upgraded, still pending" if incomplete else "upgraded"
+            if r.returncode == 0:
+                return "upgraded"
+            if incomplete:
+                return "upgraded, still pending"
+            return f"upgraded, ots exited {r.returncode} before saying whether it is complete"
         if r.returncode == 0:
             return "complete"
         if incomplete:
@@ -342,7 +350,7 @@ class BitcoinWitness:
         did not come from."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
-        if not bak.exists():
+        if not os.path.lexists(bak):  # a link there, even dangling, is a .bak that is no proof
             return True
         if self.holds_proof(block):
             bak.unlink()
@@ -380,7 +388,7 @@ class BitcoinWitness:
                     or line.startswith("invalid timestamp file "):
                 return False
         said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
-        raise OtsError(f"ots info did not run: {_plain(said[-1]) if said else f'exit {r.returncode}'}")
+        raise OtsError(f"ots info did not run, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
 
     def verify(self, block: Block) -> tuple[bool, str]:
         ots = self.ledger.proof_path(block.index, "hash.ots")
