@@ -61,7 +61,7 @@ jobs:
           DEV=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['approval']['device'])" "ledger/blocks/$B.json")
           TX=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['tx'])" "ledger/proofs/$B.base.json")
           if test -f "ledger/proofs/$B.hash.ots"; then OTS="pending; upgraded on a later run"
-          else OTS="none; the stamp failed, nightly stamps it"; fi
+          else OTS="none; not stamped, nightly stamps it"; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -q --ignore-unmatch ledger/requests/*.json

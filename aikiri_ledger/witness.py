@@ -254,8 +254,8 @@ class BitcoinWitness:
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
         had = ots.exists(), digest.exists()
-        p = self._digest_file(block)
         try:
+            p = self._digest_file(block)
             subprocess.run(["ots", "stamp", str(p)], check=True)
         except (subprocess.CalledProcessError, OSError):
             for path, existed in zip((ots, digest), had):

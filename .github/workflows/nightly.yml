@@ -1,8 +1,8 @@
 name: nightly
 # Writes no blocks. Blocks are written only when Chii approves a request
 # on one of her devices, so there is nothing for a schedule to sign. What is left
-# is worth doing nightly: fetch completed Bitcoin proofs, stamp any block that
-# has none yet, re-verify the whole chain against Base, and say plainly which of
+# is worth doing nightly: fetch completed Bitcoin proofs, stamp any block with no
+# proof file yet, re-verify the whole chain against Base, and say plainly which of
 # the four states it is in.
 #
 # A new or completed proof is not pushed to main directly. It is proposed as a pull
@@ -38,7 +38,7 @@ jobs:
           pip install --no-deps -e .
       - name: upgrade pending Bitcoin proofs
         run: aikiri-ledger upgrade || true
-      - name: stamp any block that has no Bitcoin proof yet
+      - name: stamp any block with no Bitcoin proof file yet
         run: aikiri-ledger stamp || true
       - name: propose any proof stamped or completed
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11

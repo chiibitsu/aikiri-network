@@ -11,7 +11,7 @@
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
-  stamp                     stamp on Bitcoin every block that has no proof yet
+  stamp                     stamp on Bitcoin every block with no .ots yet
   verify                    report one of four states
   deploy                    deploy the contract (once)
 
@@ -321,15 +321,22 @@ def main(argv=None):
         else:
             print("Base: no rpc/contract configured; skipped")
         if BitcoinWitness.available():
-            # Not fatal: block.yml commits the block only after this, and the Base
-            # anchor above cannot be taken back. Nightly stamps any block that has
-            # no proof.
-            try:
-                p = BitcoinWitness(L).stamp(blk)
-                print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
-            except (subprocess.CalledProcessError, OSError) as e:
-                print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
-                      f"nightly stamps any block that has no proof")
+            bw = BitcoinWitness(L)
+            bw.settle_backup(blk)  # as `stamp` does: never stamp beside a backup
+            if bw.holds_proof(blk):
+                print(f"Bitcoin: block {blk.index} already has a proof")
+            elif L.proof_path(blk.index, "hash.ots").exists():
+                print(f"Bitcoin: block {blk.index}: {_NOT_A_PROOF}")
+            else:
+                # Not fatal: block.yml commits the block only after this, and the
+                # Base anchor above cannot be taken back. Nightly stamps any block
+                # that has no .ots.
+                try:
+                    p = bw.stamp(blk)
+                    print(f"Bitcoin: stamped block {blk.index} -> {p.name} (pending until upgraded)")
+                except (subprocess.CalledProcessError, OSError) as e:
+                    print(f"Bitcoin: stamping block {blk.index} failed ({e}); "
+                          f"nightly stamps any block that has no .ots")
         else:
             print("Bitcoin: `ots` not installed; `pip install opentimestamps-client`")
         return 0

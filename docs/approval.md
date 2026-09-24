@@ -72,7 +72,7 @@ ledger prove nothing, because whoever can rewrite one can rewrite the other.
    is still committed, and nightly stamps it.
 
 The nightly ritual no longer writes blocks. It fetches completed Bitcoin proofs,
-stamps any block that has none, and re-verifies. Blocks wait for her. That is the intended cost.
+stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That is the intended cost.
 
 ## Losing a device
 

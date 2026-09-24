@@ -5,6 +5,7 @@ exist on Base are never rewritten: they verify as v1 against pinned hashes.
 """
 import hashlib
 import json
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1077,7 +1078,9 @@ class _FakeOts:
     - stamp: creates <file>.ots, then writes the proof into it
     - upgrade, as when it finds something new: renames the proof to .bak (and
       refuses if one is there), creates the new file, writes the proof into it
-    - info: reads the proof, exit 1 if it is not one
+    - stamp refuses a .ots that is already there
+    - info: exit 1 if the file is not a proof, else the digest it is of (here
+      taken from the .hash beside it, which the tests set)
     `fail` names steps to make fail part-way, leaving what ots leaves then. It
     does not model an upgrade with nothing new, or a stamp that fails before it
     creates a file."""
@@ -1099,6 +1102,8 @@ class _FakeOts:
                                    stderr="")
         if cmd == "stamp":
             out = Path(str(path) + ".ots")
+            if out.exists():  # opens the .ots with 'xb'
+                raise subprocess.CalledProcessError(1, argv)
             out.write_bytes(b"trunc" if "stamp" in self.fail else b"pending proof")
             if "stamp" in self.fail:
                 raise subprocess.CalledProcessError(1, argv)
@@ -1254,6 +1259,47 @@ def test_witness_goes_on_when_the_bitcoin_stamp_fails(ledger, monkeypatch, capsy
     assert not ledger.proof_path(0, "hash.ots").exists()
 
 
+@pytest.mark.parametrize("before", ["proof", "backup only"])
+def test_witness_settles_first_and_keeps_a_proof_it_finds(ledger, monkeypatch, capsys, before):
+    from aikiri_ledger import cli, witness as W
+    fake = _FakeOts()
+    monkeypatch.setattr(W.subprocess, "run", fake)
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    ots, bak = _ots_paths(ledger, 0)
+    (ots if before == "proof" else bak).write_bytes(b"complete proof")
+    assert cli.main(["--ledger", str(ledger.root), "witness", "0"]) == 0
+    assert not any(c[1] == "stamp" for c in fake.calls)
+    assert ots.read_bytes() == b"complete proof" and not bak.exists()
+    assert "block 0 already has a proof" in capsys.readouterr().out
+
+
+def test_a_failed_stamp_never_removes_a_proof_that_was_there(ledger, monkeypatch):
+    # BitcoinWitness.stamp cleans up only what a failed ots stamp made
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W.subprocess, "run", _FakeOts())
+    ots, _ = _ots_paths(ledger, 0)
+    ots.write_bytes(b"complete proof")
+    with pytest.raises(subprocess.CalledProcessError):
+        W.BitcoinWitness(ledger).stamp(ledger.read(0))
+    assert ots.read_bytes() == b"complete proof"
+    assert ledger.proof_path(0, "hash").exists()
+
+
+def test_a_stamp_that_cannot_write_the_digest_leaves_nothing(ledger, monkeypatch):
+    # A full disk while writing <index>.hash: the empty file it leaves goes too
+    from aikiri_ledger import witness as W
+    real = Path.write_bytes
+    def full(self, data):
+        if self.name.endswith(".hash"):
+            real(self, b"")
+            raise OSError(28, "No space left on device")
+        return real(self, data)
+    monkeypatch.setattr(Path, "write_bytes", full)
+    with pytest.raises(OSError):
+        W.BitcoinWitness(ledger).stamp(ledger.read(0))
+    assert not ledger.proof_path(0, "hash").exists()
+
+
 def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     text = (Path(".github/workflows") / "nightly.yml").read_text()
     assert "aikiri-ledger stamp" in text
@@ -1265,5 +1311,14 @@ def test_block_commit_says_whether_there_is_a_bitcoin_proof():
     # the commit message must not claim a proof that was not made.
     text = (Path(".github/workflows") / "block.yml").read_text()
     step = text[text.index("- name: commit the block and its proofs"):text.index("- name: verify")]
-    assert 'ledger/proofs/$B.hash.ots' in step, "the OTS line must be read from the proof on disk"
     assert "OTS       pending; upgraded on a later run" not in step
+    lines = [l.strip() for l in step.splitlines()]
+    snippet = "\n".join(lines[lines.index(next(l for l in lines if l.startswith("if test -f"))):][:2])
+    for has_proof, word in ((True, "pending"), (False, "none")):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "ledger/proofs").mkdir(parents=True)
+            if has_proof:
+                (Path(d) / "ledger/proofs/000003.hash.ots").write_bytes(b"proof")
+            out = subprocess.run(["bash", "-ec", 'B=000003\n' + snippet + '\necho "$OTS"'],
+                                 cwd=d, capture_output=True, text=True, check=True).stdout
+            assert out.startswith(word), (has_proof, out)

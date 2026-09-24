@@ -22,7 +22,7 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs, stamps any block that has none (block 0 was
+only upgrades Bitcoin proofs, stamps any block with no `.ots` yet (block 0 was
 anchored at deploy but never stamped), proposes them as a pull request, and
 reports.
 See §8.
@@ -182,8 +182,8 @@ calendar as pending proof, correctly, since it was stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
 longer than it needed to.
 
-A block's first proof is the exception. Nightly also stamps any block that has no
-proof on `main` (block 0 was anchored at deploy and never stamped; a stamp that
+A block's first proof is the exception. Nightly also stamps any block with no `.ots`
+on `main` (block 0 was anchored at deploy and never stamped; a stamp that
 fails when a block is written is left to nightly too). That proof is only pending,
 and until the PR carrying it is merged, each night stamps the block again from
 `main`: the PR's proof is replaced, and the time it will prove moves later. Merge
