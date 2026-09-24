@@ -278,28 +278,30 @@ class BitcoinWitness:
         commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         digest = self.ledger.proof_path(block.index, "hash")
-        # A link at the .ots is left: ots will not write through it, and it is not
-        # this run's to remove. A .hash, link or not, is replaced by this run's own.
+        # What was there is left, and a link is never removed: this run makes none.
+        # A .hash link that _digest_file replaced is this run's file, and goes.
         had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
         try:
             p = self._digest_file(block)
             subprocess.run(["ots", "stamp", str(p)], check=True)
         except BaseException:  # a failure, or an interrupt: what it left goes either way
             for path, existed in zip((ots, digest), had):
-                if not existed:
+                if not existed and not path.is_symlink():  # this run makes no links
                     path.unlink(missing_ok=True)
             raise
         return ots
 
     def upgrade(self, block: Block) -> str:
-        """"upgraded", "complete" or "pending", or "blocked" by a .bak that is not a
-        proof. What is on disk decides first: a new proof of this block is an
+        """"upgraded", "upgraded, still pending", "complete" or "pending"; "blocked"
+        by a .bak that is not a proof, or "no proof" when the .ots is not one. What is on disk decides first: a new proof of this block is an
         upgrade however ots exited. Otherwise only ots's own words for a proof that
         is not complete yet read as pending; any other failure is OtsError."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
         if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
             return "blocked"
+        if not self.holds_proof(block):  # nothing there, or a link: nothing to upgrade
+            return "no proof"
         before = ots.read_bytes()
         try:
             r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True,
@@ -314,14 +316,17 @@ class BitcoinWitness:
             if bak.exists():
                 os.replace(bak, ots)
             raise
-        if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
-            return "upgraded"
         said = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        # ots's own words for a proof with no Bitcoin attestation yet
+        # (otsclient/cmds.py upgrade_command); it prints them only with exit 1
+        incomplete = r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said)
+        if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
+            return "upgraded, still pending" if incomplete else "upgraded"
         if r.returncode == 0:
             return "complete"
-        if r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said):
-            return "pending"  # otsclient/cmds.py upgrade_command, nothing new
-        raise OtsError(f"ots upgrade failed: {_plain(said[-1]) if said else f'exit {r.returncode}'}")
+        if incomplete:
+            return "pending"
+        raise OtsError(f"ots upgrade failed, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
 
     def settle_backup(self, block: Block) -> bool:
         """`ots upgrade`, when it has something new, renames the proof to <name>.bak,

@@ -375,7 +375,7 @@ def main(argv=None):
                     print(f"block {blk.index}: {_NOT_A_PROOF}")
                     continue
                 done = bw.upgrade(blk)
-                print(f"block {blk.index}: " + {"upgraded": "upgraded", "complete": "already complete",
+                print(f"block {blk.index}: " + {"complete": "already complete",
                                                 "pending": "still pending"}.get(done, done))
             except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"block {blk.index}: could not check or upgrade the proof file ({e})")
@@ -387,27 +387,19 @@ def main(argv=None):
         # It runs after the Base anchor, which cannot be taken back, so it never fails.
         try:
             blk = L.read(a.index)
-            # It judges the .ots, as verify does and as a commit carries it, and says
-            # what the .bak holds only beside that. A .bak is never committed.
-            # It settles nothing.
+            # It judges the .ots alone, which is what a commit carries: a .bak is
+            # gitignored, and whatever it holds never reaches main. It settles nothing.
             ots = L.proof_path(blk.index, "hash.ots")
             bak = ots.with_name(ots.name + ".bak")
-            if not os.path.lexists(ots) and not os.path.lexists(bak):
-                print("none; not stamped, nightly stamps it")
+            if not os.path.lexists(ots):
+                print("none; not stamped, nightly stamps it"
+                      + (" (the .ots.bak here is never committed)" if os.path.lexists(bak) else ""))
             elif not BitcoinWitness.available():
                 print("unknown; ots is not installed to read the file there")
             elif BitcoinWitness(L).holds_proof(blk):
                 print("stamped; a proof of this block")
             else:
-                there = ("the file there is not a proof of this block" if os.path.lexists(ots)
-                         else "not stamped")
-                if BitcoinWitness.proof_of(bak, blk):
-                    print(f"none; {there}; a proof of it is only in the .ots.bak, which is never "
-                          f"committed, and the next upgrade or stamp here puts it back")
-                elif os.path.lexists(bak):
-                    print(f"none; {there}, and the .ots.bak there is not a proof of it either")
-                else:
-                    print(f"none; {there}")
+                print("none; the file there is not a proof of this block")
         except Exception as e:  # noqa: BLE001
             # ots's own words go into main's history: printable ASCII only
             said = re.sub(r"[^ -~]", "?", str(e))
