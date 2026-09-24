@@ -53,8 +53,8 @@ jobs:
           title: "Bitcoin proofs stamped or upgraded"
           body: >
             OpenTimestamps proofs upgraded since the last run (complete, or
-            with new attestations and still pending), and a first, pending proof
-            for any block that had none.
+            with new attestations and possibly still pending; the run's log
+            says which), and a first, pending proof for any block that had none.
             Only ledger/proofs changes here; nothing else in this repository
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.

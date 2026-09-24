@@ -294,15 +294,16 @@ class BitcoinWitness:
         return ots
 
     def upgrade(self, block: Block) -> str:
-        """What is on disk decides first: a new proof of this block is an upgrade
-        however ots exited, and only an exit 0 calls it complete. Otherwise exit 0
-        is "complete", and only ots's own words for a proof that is not complete
-        yet read as "pending"; any other failure is OtsError. "blocked" when
-        settle_backup leaves a .bak (neither file a proof), "no proof" when the
-        .ots is not a proof of this block."""
+        """What is on disk decides first. A changed .ots that is a proof of this
+        block is an upgrade however ots exited: "upgraded, complete" on exit 0,
+        "upgraded, still pending" when ots says so, and otherwise "upgraded, not
+        called complete". An unchanged one is "complete" on exit 0 and "pending"
+        only on ots's own words for it; any other failure is OtsError.
+        "blocked" when settle_backup leaves a .bak (neither file a proof), and
+        "no proof" when the .ots is not a proof of this block."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
         bak = ots.with_name(ots.name + ".bak")
-        if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
+        if not self.settle_backup(block):  # a .bak left, and neither file is a proof
             return "blocked"
         if not self.holds_proof(block):  # missing, a link, junk or another block's
             return "no proof"
@@ -326,10 +327,10 @@ class BitcoinWitness:
         incomplete = r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said)
         if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
             if r.returncode == 0:
-                return "upgraded"
+                return "upgraded, complete"
             if incomplete:
                 return "upgraded, still pending"
-            return f"upgraded, ots exited {r.returncode} before saying whether it is complete"
+            return f"upgraded, not called complete: ots exited {r.returncode}"
         if r.returncode == 0:
             return "complete"
         if incomplete:
@@ -339,7 +340,8 @@ class BitcoinWitness:
     def settle_backup(self, block: Block) -> bool:
         """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
         creates the new file and writes the upgraded proof into it; it will not
-        write an upgrade while a .bak is there. If the proof reads as one, it is that
+        write an upgrade while a real .bak is there (it checks with exists(), so a
+        dangling link does not stop it). If the proof reads as one, it is that
         upgrade's output, holding every attestation the backup had, and the backup
         goes. If it is missing, does not read as a proof (the write failed part-way),
         or is not a proof of this block, and the backup is one, the backup is the good

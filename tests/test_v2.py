@@ -1169,7 +1169,7 @@ def test_upgrade_leaves_no_ots_backup_and_is_not_stopped_by_one(ledger, monkeypa
     ots, bak = _ots_paths(ledger, 0)
     ots.write_bytes(_proof(ledger, 0, "pending"))
     bak.write_bytes(_proof(ledger, 0, "older"))
-    assert W.BitcoinWitness(ledger).upgrade(ledger.read(0)) == "upgraded"
+    assert W.BitcoinWitness(ledger).upgrade(ledger.read(0)) == "upgraded, complete"
     assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
 
 
@@ -1417,7 +1417,7 @@ def test_block_commit_says_whether_there_is_a_bitcoin_proof():
     # on disk, checked as a proof of the block, not from whether a file exists.
     text = (Path(".github/workflows") / "block.yml").read_text()
     step = text[text.index("- name: commit the block and its proofs"):text.index("- name: verify")]
-    assert 'OTS=$(aikiri-ledger proof-status "$INDEX" || echo "unknown; proof-status failed")' in step
+    assert 'OTS=$(aikiri-ledger proof-status "$INDEX") || OTS="unknown; proof-status failed"' in step
     assert "test -f" not in step and "OTS       $OTS" in step
 
 
@@ -1451,10 +1451,12 @@ def test_proof_status_says_what_is_there(ledger, monkeypatch, capsys, on_disk, b
         elif what is not None:
             path.write_bytes(_proof(ledger, 0, "pending") if what == "proof"
                              else b"junk" if what == "junk" else what)
-    before = [p.read_bytes() if p.exists() else None for p in (ots, bak)]
+    state = lambda: [(os.path.lexists(p), p.is_symlink(), p.read_bytes() if p.exists() else None)
+                     for p in (ots, bak)]
+    before = state()
     assert cli.main(["--ledger", str(ledger.root), "proof-status", "0"]) == 0
     assert capsys.readouterr().out.strip() == says
-    assert [p.read_bytes() if p.exists() else None for p in (ots, bak)] == before
+    assert state() == before
 
 
 
@@ -1555,7 +1557,8 @@ def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     for name, body in (("git", 'if [ "$1" = commit ]; then cat > "$MSGFILE"; fi\n'),
-                       ("aikiri-ledger", f'echo "{says}"\n' if says else "exit 139\n")):
+                       ("aikiri-ledger", f'echo "{says}"\n' if says
+                                         else 'echo "stamped; a proof of this block"\nexit 139\n')):
         exe = bin_ / name
         exe.write_text("#!/bin/sh\n" + body)
         exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
@@ -1563,7 +1566,9 @@ def test_block_commit_step_runs_and_writes_the_ots_line(tmp_path, says):
            "MSGFILE": str(tmp_path / "msg")}
     subprocess.run(["bash", "-e", "-c", script], cwd=tmp_path, env=env, check=True)
     msg = (tmp_path / "msg").read_text()
-    assert f"OTS       {says or 'unknown; proof-status failed'}" in msg and "Base      tx 0xfeed" in msg
+    assert f"OTS       {says or 'unknown; proof-status failed'}\n" in msg and "Base      tx 0xfeed" in msg
+    if not says:  # what it printed before it died is not kept beside the fallback
+        assert "stamped" not in msg
 
 
 def test_an_upgrade_whose_output_cannot_be_checked_keeps_the_proof(ledger, monkeypatch, capsys):
@@ -1733,7 +1738,7 @@ def test_a_failed_stamp_leaves_a_dangling_link_where_it_was(ledger, monkeypatch,
 @pytest.mark.parametrize("on_disk, fake, says", [
     ("pending", dict(pending=True), "block 0: still pending"),
     ("complete", {}, "block 0: already complete"),
-    ("pending", {}, "block 0: upgraded\n"),
+    ("pending", {}, "block 0: upgraded, complete\n"),
     ("pending", dict(partial=True), "block 0: upgraded, still pending"),
 ])
 def test_upgrade_says_what_ots_said(ledger, monkeypatch, capsys, on_disk, fake, says):
@@ -1812,7 +1817,7 @@ def test_an_upgrade_on_disk_is_upgraded_however_ots_exited(ledger, monkeypatch, 
     ots.write_bytes(_proof(ledger, 0, "pending"))
     assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
     # Kept, and not called complete: only an exit 0 says that
-    assert f"block 0: upgraded, ots exited {rc} before saying whether it is complete" \
+    assert f"block 0: upgraded, not called complete: ots exited {rc}" \
         in capsys.readouterr().out
     assert ots.read_bytes() == _proof(ledger, 0, "complete") and not bak.exists()
 

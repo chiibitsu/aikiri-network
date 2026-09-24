@@ -177,8 +177,9 @@ it ~ but the workflow contains no path that writes to `main` on its own.
 Merging is a manual click. Nothing merges it for her.
 
 This is a small chore next to the ledger: a proof that lands has no urgency ~
-Bitcoin already confirmed it, and it has been sitting in the OpenTimestamps
-calendar as pending proof, correctly, since it was stamped. Merging late costs
+it only records what the calendars and Bitcoin already hold, and it has been
+sitting in the OpenTimestamps calendar as pending proof, correctly, since it was
+stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
 longer than it needed to.
 

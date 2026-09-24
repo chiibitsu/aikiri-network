@@ -60,7 +60,7 @@ jobs:
           KIND=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['roots'][0]['kind'])" "ledger/blocks/$B.json")
           DEV=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['approval']['device'])" "ledger/blocks/$B.json")
           TX=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['tx'])" "ledger/proofs/$B.base.json")
-          OTS=$(aikiri-ledger proof-status "$INDEX" || echo "unknown; proof-status failed")
+          OTS=$(aikiri-ledger proof-status "$INDEX") || OTS="unknown; proof-status failed"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -q --ignore-unmatch ledger/requests/*.json
