@@ -11,7 +11,8 @@
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
   upgrade                   fetch completed Bitcoin proofs
-  stamp                     stamp on Bitcoin every block with no .ots yet
+  stamp                     stamp on Bitcoin every block with no .ots yet (and no
+                            .ots.bak that is not a proof)
   proof-status <index>      what the block's Bitcoin proof file is, in one line
   verify                    report one of four states
   deploy                    deploy the contract (once)
@@ -61,7 +62,7 @@ def _in_worktree(path: Path) -> bool:
 # An .ots that is empty, cut short or of another block's hash: reported, never
 # stamped over or upgraded, since it may be the only trace of what happened.
 _NOT_A_PROOF = "the .ots there is not a proof of this block; left as it is"
-_BAD_BACKUP = ("the .ots.bak there is not a proof of this block, nor is any .ots beside it; "
+_BAD_BACKUP = ("the .ots.bak there is not a proof of this block, nor is the .ots beside it, if any; "
                "both left as they are, nothing stamped")
 
 
@@ -365,7 +366,9 @@ def main(argv=None):
         bw = BitcoinWitness(L)
         for blk in L.blocks():
             try:
-                bw.settle_backup(blk)
+                if not bw.settle_backup(blk):
+                    print(f"block {blk.index}: {_BAD_BACKUP}")
+                    continue
                 if not L.proof_path(blk.index, "hash.ots").exists():
                     continue
                 if not bw.holds_proof(blk):
@@ -382,15 +385,18 @@ def main(argv=None):
         # It runs after the Base anchor, which cannot be taken back, so it never fails.
         try:
             blk = L.read(a.index)
+            # It reads what settle_backup would settle to, and settles nothing.
             ots = L.proof_path(blk.index, "hash.ots")
-            if not ots.exists() and ots.with_name(ots.name + ".bak").exists():
-                print("unknown; only a .ots.bak is there, settled by the next upgrade or stamp")
-            elif not ots.exists():
+            bak = ots.with_name(ots.name + ".bak")
+            if not ots.exists() and not bak.exists():
                 print("none; not stamped, nightly stamps it")
             elif not BitcoinWitness.available():
                 print("unknown; ots is not installed to read the file there")
             elif BitcoinWitness(L).holds_proof(blk):
                 print("stamped; a proof of this block")
+            elif BitcoinWitness.proof_of(bak, blk):
+                print("stamped; a proof of this block, in the .ots.bak until the next "
+                      "upgrade or stamp puts it back")
             else:
                 print("none; the file there is not a proof of this block")
         except Exception as e:  # noqa: BLE001

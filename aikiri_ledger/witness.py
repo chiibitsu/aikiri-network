@@ -281,7 +281,11 @@ class BitcoinWitness:
         bak = ots.with_name(ots.name + ".bak")
         if not self.settle_backup(block):  # a .bak left: ots would not upgrade anyway
             return False
-        r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
+        try:
+            r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
+        except OSError as e:  # on PATH but cannot be executed: it renamed nothing
+            raise OtsError(f"ots upgrade did not run: {e}") from e
         try:
             self.settle_backup(block)
         except OtsError:
@@ -310,7 +314,7 @@ class BitcoinWitness:
             return True
         if self.holds_proof(block):
             bak.unlink()
-        elif self._proof_of(bak, block):
+        elif self.proof_of(bak, block):
             os.replace(bak, ots)
         else:
             return False  # neither is a proof of this block: both stay, to be looked at
@@ -318,10 +322,10 @@ class BitcoinWitness:
 
     def holds_proof(self, block: Block) -> bool:
         """The .ots is there, reads as a proof, and is a proof of this block."""
-        return self._proof_of(self.ledger.proof_path(block.index, "hash.ots"), block)
+        return self.proof_of(self.ledger.proof_path(block.index, "hash.ots"), block)
 
     @staticmethod
-    def _proof_of(path: Path, block: Block) -> bool:
+    def proof_of(path: Path, block: Block) -> bool:
         """`ots info` names the digest a proof is of, which must be this block's, and
         says so when the file is not a proof at all (otsclient/cmds.py info_command).
         Any other failure is ots not running, which says nothing about the file: it
@@ -330,7 +334,8 @@ class BitcoinWitness:
         if not path.exists():
             return False
         try:
-            r = subprocess.run(["ots", "info", str(path)], capture_output=True, text=True)
+            r = subprocess.run(["ots", "info", str(path)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
         except OSError as e:  # on PATH but cannot be executed
             raise OtsError(f"ots info did not run: {e}") from e
         if r.returncode == 0:
