@@ -405,6 +405,85 @@ def test_failed_bitcoin_proof_is_a_failure_not_a_shrug(ledger, sk, mac, trust):
     assert state == State.INVALID and any("bitcoin" in r.lower() for r in report)
 
 
+def _base_verified(ledger, trust):
+    w3 = Web3(EthereumTesterProvider())
+    c = compile_contract()
+    bw = BaseWitness(w3, None, c["abi"], account=w3.eth.accounts[0])
+    addr = bw.deploy(ledger.read(0).hash, c["bytecode"])
+    trust.contract, trust.owner, trust.genesis_hash = addr, w3.eth.accounts[0], ledger.read(0).hash
+    return bw
+
+
+class _Ots:
+    """Stands in for BitcoinWitness with a given `ots verify` exit and output."""
+    def __init__(self, ok, msg):
+        self.ok, self.msg = ok, msg
+
+    def verify(self, b):
+        return self.ok, self.msg
+
+
+_PREAMBLE = "Assuming target filename is '{root}/proofs/000000.hash'\n"
+
+
+@pytest.mark.parametrize("line", [
+    # opentimestamps-client 0.7.2, otsclient/args.py:148 and otsclient/cmds.py:418
+    "Could not connect to Bitcoin node: Cookie file unusable ([Errno 2] No such file "
+    "or directory: '/root/.bitcoin/.cookie') and rpcpassword not specified in the "
+    "configuration file: '/root/.bitcoin/bitcoin.conf'",
+    "Could not connect to local Bitcoin node: [Errno 111] Connection refused",
+    # otsclient/cmds.py:263 and 306: a pending proof that its cache or calendar
+    # completes on the way, before ots reaches for the node
+    "Got 1 attestation(s) from cache\n"
+    "Could not connect to Bitcoin node: Cookie file unusable",
+    "Got 1 attestation(s) from https://alice.btc.calendar.opentimestamps.org\n"
+    "Could not connect to Bitcoin node: Cookie file unusable",
+    # otsclient/cmds.py:298 and 301: another calendar erred in the same pass
+    "Got 1 attestation(s) from https://alice.btc.calendar.opentimestamps.org\n"
+    "Calendar https://bob.btc.calendar.opentimestamps.org: Service Unavailable\n"
+    "Could not connect to Bitcoin node: Cookie file unusable",
+])
+@pytest.mark.parametrize("root", ["/srv/ledger", "/srv/invalid-ledger",
+                                  "/srv/archive-not supported", "/srv/pending-missing"])
+def test_no_bitcoin_node_is_unchecked_not_failed(ledger, trust, line, root):
+    # A complete proof needs a Bitcoin node to check. A machine without one has
+    # not checked it: the state stops at BASE VERIFIED and the report says so,
+    # whatever the ledger's own path holds: verdict words (which matching words
+    # anywhere in the output would trip on) or the pending check's words.
+    base = _base_verified(ledger, trust)
+    assert verify_all(ledger, trust, base=base, bitcoin=_Ots(True, ""))[0] == State.FULLY_VERIFIED
+    state, report = verify_all(ledger, trust, base=base,
+                               bitcoin=_Ots(False, _PREAMBLE.format(root=root) + line))
+    assert state == State.BASE_VERIFIED
+    assert not any("FAILED" in r for r in report)
+    assert any("no bitcoin node reachable" in r.lower() for r in report)
+    assert not any("proof pending" in r.lower() for r in report)
+
+
+@pytest.mark.parametrize("msg", [
+    # ots moves on to the next attestation after a failed connection
+    # (otsclient/cmds.py:418), so one run can carry a verdict and a no-node line.
+    _PREAMBLE.format(root="/srv/ledger") + "Bitcoin verification failed: Bad merkleroot\n"
+    "Could not connect to local Bitcoin node: [Errno 111] Connection refused",
+    # A path that holds the no-node words does not make another failure one.
+    _PREAMBLE.format(root="/srv/could not connect to bitcoin node:") +
+    "Could not open target: [Errno 2] No such file or directory: "
+    "'/srv/could not connect to bitcoin node:/proofs/000000.hash'",
+    # Lines that carry no verdict are matched from their start, so a path that
+    # holds one does not excuse the line it sits in.
+    _PREAMBLE.format(root="/srv/ledger") +
+    "Could not open target: [Errno 2] No such file or directory: "
+    "'/srv/calendar a: b/proofs/000000.hash'\n"
+    "Could not connect to Bitcoin node: Cookie file unusable",
+    # Lines with no verdict and no no-node line are not a no-node result.
+    _PREAMBLE.format(root="/srv/ledger") + "Got 1 attestation(s) from cache",
+])
+def test_no_bitcoin_node_does_not_hide_a_real_verdict(ledger, trust, msg):
+    base = _base_verified(ledger, trust)
+    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+    assert state == State.INVALID and any("FAILED" in r for r in report)
+
+
 def test_truncated_chain_fails_against_contract_latest_index(ledger, sk, mac, trust):
     w3 = Web3(EthereumTesterProvider())
     c = compile_contract()

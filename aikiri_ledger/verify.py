@@ -3,6 +3,7 @@
   INVALID                            something is wrong; the report says what
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
+                                     or could not be checked here (no Bitcoin node)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but
@@ -13,6 +14,7 @@ Every check runs; the report lists everything wrong, not just the first thing.
 """
 from __future__ import annotations
 
+import re
 from enum import IntEnum
 
 from .approval import verify_approval
@@ -31,6 +33,33 @@ class State(IntEnum):
                 State.VALID_LOCALLY: "VALID LOCALLY — NOT WITNESSED",
                 State.BASE_VERIFIED: "BASE VERIFIED — BITCOIN PENDING",
                 State.FULLY_VERIFIED: "FULLY VERIFIED"}[State(state)]
+
+
+# The lines `ots verify` prints when it could not reach a Bitcoin node
+# (opentimestamps-client 0.7.2, otsclient/args.py:148 and otsclient/cmds.py:418),
+# and the lines that carry no verdict: the target it assumed, printed when it is
+# given only the .ots, as BitcoinWitness runs it (cmds.py:473), and what its
+# calendars and local cache said while it tried to complete a pending proof on
+# the way to the node (cmds.py:263, 298, 301, 306; a calendar URL here is one on
+# its whitelist). Matched from the start of each line, never on words anywhere
+# in the output, which also carries the ledger's own path.
+_NO_BITCOIN_NODE = ("could not connect to bitcoin node:",
+                    "could not connect to local bitcoin node:")
+_OTS_NO_VERDICT = re.compile(r"assuming target filename is "
+                             r"|got \d+ attestation\(s\) from \S+$"
+                             r"|calendar \S+: ")
+
+
+def _no_bitcoin_node(msg: str) -> bool:
+    """True only when every line ots printed is a no-node line or carries no verdict."""
+    seen = False
+    for line in (msg or "").lower().splitlines():
+        line = line.strip()
+        if line.startswith(_NO_BITCOIN_NODE):
+            seen = True
+        elif line and not _OTS_NO_VERDICT.match(line):
+            return False
+    return seen
 
 
 def _same_address(a, b) -> bool:
@@ -233,6 +262,15 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
             low = (msg or "").lower()
             if ok:
                 report.append(f"block {b.index}: Bitcoin proof complete")
+            elif _no_bitcoin_node(msg):
+                # A complete proof is checked against a Bitcoin node. Without one
+                # it is unchecked, which is not the same as wrong. Any other line
+                # in the output (ots goes on to the next attestation after a
+                # failed connection, so a real verdict can sit beside it) and
+                # this does not apply.
+                report.append(f"block {b.index}: Bitcoin proof not checked, "
+                              f"no Bitcoin node reachable: {msg}")
+                pending += 1
             elif "no .ots" in low or "missing" in low or "pending" in low or "incomplete" in low:
                 report.append(f"block {b.index}: Bitcoin proof pending")
                 pending += 1
