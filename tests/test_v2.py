@@ -550,6 +550,10 @@ def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, roo
     _PREAMBLE.format(root="/srv/ledger") +
     "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
     "Calendar https://bob.btc.calendar.opentimestamps.org: [Errno -3] Temporary failure in name resolution",
+    # What a calendar says about a commitment it does not have; it can say so for a
+    # while about one it has only just taken (otsserver/rpc.py, issue #10)
+    "Calendar https://alice.btc.calendar.opentimestamps.org: Not found\n"
+    "Calendar https://bob.btc.calendar.opentimestamps.org: Not found",
     # An ignored calendar beside one that answered
     "Ignoring attestation from calendar https://calendar.example.org: Calendar not in whitelist\n"
     "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",

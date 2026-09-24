@@ -62,7 +62,7 @@ BASE VERIFIED — BITCOIN PENDING
 FULLY VERIFIED
 ```
 
-There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. A complete Bitcoin proof is checked against a Bitcoin node; where there is none, the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`, and when all `ots` reports is that it could not connect to one, the report says the proof was not checked.
+There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. A complete Bitcoin proof is checked against a Bitcoin node; where there is none, the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`, and when `ots` gives no verdict but says it could not connect to one, or stops on an error, the report says the proof was not checked.
 
 ```
 aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
