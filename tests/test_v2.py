@@ -2126,7 +2126,7 @@ def test_what_ots_stamp_says_reaches_the_log_as_one_plain_line(ledger, monkeypat
         if argv[:2] == ["ots", "stamp"]:
             captured.append(kw.get("capture_output") or kw.get("stdout") is not None)
             return SimpleNamespace(returncode=1, stdout="",
-                                   stderr="Submitting\n\x1b]0;pwned\x07Failed:\r::error::need 2\n")
+                                   stderr="Submitting\nFailed: \x1b]0;pwned\x07::error::need 2\n")
         return fake(argv, **kw)
     monkeypatch.setattr(W.subprocess, "run", run)
     assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1

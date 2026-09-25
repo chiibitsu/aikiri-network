@@ -239,6 +239,17 @@ class OtsError(RuntimeError):
     """ots failed to run, as opposed to reading a file and finding no proof in it."""
 
 
+class StampFailed(subprocess.CalledProcessError):
+    """`ots stamp` exited non-zero; its last line, already plain, is the reason."""
+
+    def __init__(self, returncode: int, said: str):
+        super().__init__(returncode, ["ots", "stamp"])
+        self.said = said
+
+    def __str__(self) -> str:
+        return f"ots stamp exited {self.returncode}" + (f": {self.said}" if self.said else "")
+
+
 class BitcoinWitness:
     """Wraps the `ots` CLI (opentimestamps-client). Needs network for stamp/upgrade;
     a completed .ots proof verifies against Bitcoin alone, forever."""
@@ -285,7 +296,12 @@ class BitcoinWitness:
         had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
         try:
             p = self._digest_file(block)
-            subprocess.run(["ots", "stamp", str(p)], check=True)
+            # Captured, like every other ots call: what it prints reaches the log
+            # only as the one plain line a failure is reported with.
+            r = subprocess.run(["ots", "stamp", str(p)], capture_output=True, text=True, errors="replace")
+            if r.returncode != 0:
+                said = (r.stderr + r.stdout).strip().splitlines()
+                raise StampFailed(r.returncode, _plain(said[-1]) if said else "")
         except BaseException:  # a failure, or an interrupt: what it left goes either way
             for path, existed in zip((ots, digest), had):
                 if not existed and not path.is_symlink():  # this run makes no links
