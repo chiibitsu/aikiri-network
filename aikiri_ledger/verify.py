@@ -267,14 +267,22 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
             for b in blocks:
                 if b.index > min(latest, local_head):
                     break
-                if not base.matches(b):
+                try:
+                    matched = base.matches(b)
+                except Exception as e:  # noqa: BLE001 - a witness that cannot answer is a failure
+                    report.append(f"block {b.index}: could not read Base: {e}")
+                    failures += 1
+                    continue
+                if not matched:
                     report.append(f"block {b.index}: Base holds a different hash")
                     failures += 1
                     continue
                 try:
                     rec = base.record(b.index)
-                except Exception:  # noqa: BLE001
-                    rec = None
+                except Exception as e:  # noqa: BLE001 - an unread record skips the checks below
+                    report.append(f"block {b.index}: could not read Base record: {e}")
+                    failures += 1
+                    continue
                 if rec and rec.get("anchoredAt"):
                     if int(rec["anchoredAt"]) < int(b.when.timestamp()):
                         report.append(f"block {b.index}: Base anchoredAt "
@@ -289,7 +297,9 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
 
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
-                report.append(f"block {i}: written but not anchored on Base")
+                report.append(f"block {i}: written but not anchored on Base at the height read "
+                              f"(through the quorum that is the finalized height, which "
+                              f"an anchor minutes old may not have reached)")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:
             report.append(f"Base: {min(latest, local_head) + 1} block(s) anchored and matching")

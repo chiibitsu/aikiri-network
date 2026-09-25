@@ -158,8 +158,10 @@ class BaseWitness:
         answering with the wrong number is what it cannot tolerate."""
         return int(self.w3.eth.get_block("finalized")["number"])
 
-    def record(self, index: int) -> dict:
-        h, at, by = self.contract.functions.blocks(index).call()
+    def record(self, index: int, block_identifier=None) -> dict:
+        call = self.contract.functions.blocks(index)
+        h, at, by = (call.call(block_identifier=block_identifier)
+                     if block_identifier is not None else call.call())
         return {"blockHash": h.hex(), "anchoredAt": int(at), "by": by}
 
 
@@ -309,7 +311,8 @@ class QuorumBase:
     One RPC is one party's word. Requiring every endpoint to answer makes a
     verifier that fails whenever a provider is down; requiring none makes a
     verifier that believes whoever answers first. So: a majority must answer,
-    at a block height they all have, and they must agree. Disagreement is never
+    the per-block reads are made at one block height a majority has reached,
+    and they must agree. Disagreement is never
     a success ~ it is the loudest possible signal that something is wrong.
     """
 
@@ -318,6 +321,7 @@ class QuorumBase:
             raise QuorumError("no RPC endpoints given")
         self.readers = list(readers)
         self.quorum = quorum or (len(self.readers) // 2 + 1)
+        self._at = None  # the height every read of this run is made at
 
     def _gather(self, fn):
         answers, errors = [], []
@@ -335,6 +339,11 @@ class QuorumBase:
         return answers[0]
 
     def common_block(self) -> int:
+        # Chosen once and kept: recomputed per read, an endpoint failing after
+        # its first answer moved the height between latestIndex and matches,
+        # and an honest anchor between the two heights read as a mismatch.
+        if self._at is not None:
+            return self._at
         heights = []
         for r in self.readers:
             try:
@@ -345,7 +354,11 @@ class QuorumBase:
             raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
                               f"finalized block; {self.quorum} needed. Reading at each node's "
                               f"own head instead would drop the guarantee this class exists for")
-        return min(heights)
+        # The highest height a quorum has reached, not the lowest any one
+        # reported: the lowest let a single endpoint claiming an old height
+        # pull every read back before the latest anchor.
+        self._at = sorted(heights, reverse=True)[self.quorum - 1]
+        return self._at
 
     # ---- the read interface the verifier uses ----
     @property
@@ -371,5 +384,8 @@ class QuorumBase:
         return self._gather(lambda r: r.owner())
 
     def record(self, index: int) -> dict:
-        return self._gather(lambda r: r.record(index))
+        # Pinned like every other per-block read: at its own head, a node that
+        # had not reached the latest anchor answered with an all-zero record.
+        at = self.common_block()
+        return self._gather(lambda r: r.record(index, at))
 
