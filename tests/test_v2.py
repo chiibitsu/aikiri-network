@@ -2114,6 +2114,28 @@ def test_a_link_planted_between_the_unlink_and_the_open_is_not_written_through(l
     assert asked and all(f & os.O_EXCL and f & os.O_NOFOLLOW for f in asked)
 
 
+def test_what_ots_stamp_says_reaches_the_log_as_one_plain_line(ledger, monkeypatch, capsys):
+    # ots stamp's own output is captured, not streamed to the job's log; when it
+    # fails, its last line is reported as one line of printable ASCII
+    from types import SimpleNamespace
+    from aikiri_ledger import cli, witness as W
+    monkeypatch.setattr(W.BitcoinWitness, "available", staticmethod(lambda: True))
+    fake, captured = _FakeOts(), []
+
+    def run(argv, **kw):
+        if argv[:2] == ["ots", "stamp"]:
+            captured.append(kw.get("capture_output") or kw.get("stdout") is not None)
+            return SimpleNamespace(returncode=1, stdout="",
+                                   stderr="Submitting\n\x1b]0;pwned\x07Failed:\r::error::need 2\n")
+        return fake(argv, **kw)
+    monkeypatch.setattr(W.subprocess, "run", run)
+    assert cli.main(["--ledger", str(ledger.root), "stamp"]) == 1
+    out = capsys.readouterr().out
+    assert captured == [True]
+    (line,) = [l for l in out.splitlines() if "stamping failed" in l]
+    assert all(" " <= c <= "~" for c in line) and "need 2" in line
+
+
 def test_a_link_is_never_a_proof(ledger, monkeypatch, capsys):
     # An .ots that links to its own .bak: the proof in the .bak goes back as a file
     from aikiri_ledger import cli, witness as W
