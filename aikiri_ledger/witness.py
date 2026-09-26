@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -229,6 +230,26 @@ def receipt_cost(rcpt) -> dict:
 
 
 # ------------------------------------------------------------- Bitcoin ----
+def _plain(text: str) -> str:
+    """What ots said, as one line of printable ASCII, for a log or a commit."""
+    return re.sub(r"[^ -~]", "?", text)[:200]
+
+
+class OtsError(RuntimeError):
+    """ots failed to run, as opposed to reading a file and finding no proof in it."""
+
+
+class StampFailed(subprocess.CalledProcessError):
+    """`ots stamp` exited non-zero; its last line, already plain, is the reason."""
+
+    def __init__(self, returncode: int, said: str):
+        super().__init__(returncode, ["ots", "stamp"])
+        self.said = said
+
+    def __str__(self) -> str:
+        return f"ots stamp exited {self.returncode}" + (f": {self.said}" if self.said else "")
+
+
 class BitcoinWitness:
     """Stamps and upgrades with the `ots` CLI (opentimestamps-client), which needs the
     calendars; verifies by reading the .ots, and a complete one needs only Bitcoin."""
@@ -241,21 +262,151 @@ class BitcoinWitness:
         return shutil.which("ots") is not None
 
     def _digest_file(self, block: Block) -> Path:
+        """Written beside and then moved over, so a write that fails never leaves the
+        .hash cut short."""
         self.ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
         p = self.ledger.proof_path(block.index, "hash")
-        p.write_bytes(bytes.fromhex(block.hash))
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            tmp.unlink(missing_ok=True)  # a link left there is removed, never written through
+            data = bytes.fromhex(block.hash)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+            try:
+                if os.write(fd, data) != len(data):
+                    raise OSError(f"short write to {tmp.name}")
+            finally:
+                os.close(fd)
+            os.replace(tmp, p)
+        finally:
+            tmp.unlink(missing_ok=True)
         return p
 
     def stamp(self, block: Block) -> Path:
-        """Creates <index>.hash.ots (pending until upgraded)."""
-        p = self._digest_file(block)
-        subprocess.run(["ots", "stamp", str(p)], check=True)
-        return self.ledger.proof_path(block.index, "hash.ots")
-
-    def upgrade(self, block: Block) -> bool:
+        """Creates <index>.hash.ots (pending until upgraded). `ots stamp` creates the
+        .ots before it writes the proof into it, so when it fails, whatever it left
+        is removed: a cut-short .ots is not a proof, is left for a person to look at,
+        and the block would never be stamped again; a lone .hash would ride into a
+        commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
-        r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
-        return r.returncode == 0
+        digest = self.ledger.proof_path(block.index, "hash")
+        # The cleanup removes only what this run made. _digest_file replaces
+        # whatever is at .hash (a link included) with this run's own file, which
+        # goes unless a real .hash was there before; the cleanup itself never
+        # removes a link, since this run makes none.
+        had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
+        try:
+            p = self._digest_file(block)
+            # Captured, like every other ots call: what it prints reaches the log
+            # only as the one plain line a failure is reported with.
+            r = subprocess.run(["ots", "stamp", str(p)], capture_output=True, text=True, errors="replace")
+            if r.returncode != 0:
+                said = (r.stderr + r.stdout).strip().splitlines()
+                raise StampFailed(r.returncode, _plain(said[-1]) if said else "")
+        except BaseException:  # a failure, or an interrupt: what it left goes either way
+            for path, existed in zip((ots, digest), had):
+                if not existed and not path.is_symlink():  # this run makes no links
+                    path.unlink(missing_ok=True)
+            raise
+        return ots
+
+    def upgrade(self, block: Block) -> str:
+        """What is on disk decides first. A changed .ots that is a proof of this
+        block is an upgrade however ots exited: "upgraded, complete" on exit 0,
+        "upgraded, still pending" when ots says so, and otherwise "upgraded, not
+        called complete". An unchanged one is "complete" on exit 0 and "pending"
+        only on ots's own words for it; any other failure is OtsError.
+        "blocked" when settle_backup leaves a .bak (neither file a proof), and
+        "no proof" when the .ots is not a proof of this block."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
+        bak = ots.with_name(ots.name + ".bak")
+        if not self.settle_backup(block):  # a .bak left, and neither file is a proof
+            return "blocked"
+        if not self.holds_proof(block):  # missing, a link, junk or another block's
+            return "no proof"
+        before = ots.read_bytes()
+        try:
+            r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
+        except OSError as e:  # on PATH but cannot be executed: it renamed nothing
+            raise OtsError(f"ots upgrade did not run: {_plain(str(e))}") from e
+        try:
+            self.settle_backup(block)
+        except OtsError:
+            # Settled above, so any .bak now is the proof ots just renamed, and what
+            # it wrote in its place cannot be checked: the proof goes back.
+            if bak.exists():
+                os.replace(bak, ots)
+            raise
+        said = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        # ots's own words for a proof with no Bitcoin attestation yet
+        # (otsclient/cmds.py upgrade_command); it prints them only with exit 1
+        incomplete = r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said)
+        if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
+            if r.returncode == 0:
+                return "upgraded, complete"
+            if incomplete:
+                return "upgraded, still pending"
+            return f"upgraded, not called complete: ots exited {r.returncode}"
+        if r.returncode == 0:
+            return "complete"
+        if incomplete:
+            return "pending"
+        raise OtsError(f"ots upgrade failed, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
+
+    def settle_backup(self, block: Block) -> bool:
+        """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
+        creates the new file and writes the upgraded proof into it; it will not
+        write an upgrade while a real .bak is there (it checks with exists(), so a
+        dangling link does not stop it). If the proof reads as one, it is that
+        upgrade's output, holding every attestation the backup had, and the backup
+        goes. If it is missing, does not read as a proof (the write failed part-way),
+        or is not a proof of this block, and the backup is one, the backup is the good
+        copy and is put back over it. If neither is, both are left and it returns
+        False: nothing may be stamped then, or the new proof would read as that
+        backup's upgrade and the next settle would delete the backup. Every command
+        that writes a proof settles first, so a .bak is never left beside a proof it
+        did not come from."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
+        bak = ots.with_name(ots.name + ".bak")
+        if not os.path.lexists(bak):  # a link there, even dangling, is a .bak that is no proof
+            return True
+        if self.holds_proof(block):
+            bak.unlink()
+        elif self.proof_of(bak, block):
+            os.replace(bak, ots)
+        else:
+            return False  # neither is a proof of this block: both stay, to be looked at
+        return True
+
+    def holds_proof(self, block: Block) -> bool:
+        """The .ots is there, reads as a proof, and is a proof of this block."""
+        return self.proof_of(self.ledger.proof_path(block.index, "hash.ots"), block)
+
+    @staticmethod
+    def proof_of(path: Path, block: Block) -> bool:
+        """`ots info` names the digest a proof is of, which must be this block's, and
+        says so when the file is not a proof at all (otsclient/cmds.py info_command).
+        Any other failure is ots not running, which says nothing about the file: it
+        raises OtsError, and nothing is stamped over, put back or deleted on it,
+        save in upgrade: there the .bak is the proof ots itself just renamed."""
+        if path.is_symlink() or not path.exists():
+            return False  # a link is never a proof: what it points to is not what is committed
+        try:
+            r = subprocess.run(["ots", "info", str(path)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
+        except OSError as e:  # on PATH but cannot be executed
+            raise OtsError(f"ots info did not run: {_plain(str(e))}") from e
+        if r.returncode == 0:
+            digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
+            first = (r.stdout.splitlines() or [""])[0].strip().lower()
+            return first == f"file sha256 hash: {digest}"
+        for line in (r.stderr or "").splitlines():
+            line = line.strip().lower()
+            if (line.startswith("error! ") and line.endswith("is not a timestamp file.")) \
+                    or line.startswith("invalid timestamp file "):
+                return False
+        said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
+        raise OtsError(f"ots info did not run, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
 
     @staticmethod
     def _node():
