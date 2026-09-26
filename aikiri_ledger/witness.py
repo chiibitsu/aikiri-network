@@ -436,7 +436,7 @@ class BitcoinWitness:
         try:
             data = _read_regular(p, _OTS_MAX + 1)
         except OSError as e:
-            return "failed", f"the .ots cannot be read: {_one_line(e)}"
+            return "failed", f"the .ots cannot be read: {_plain(str(e))}"
         if data is None:
             return "failed", "the .ots is not a regular file"
         if len(data) > _OTS_MAX:
@@ -444,7 +444,7 @@ class BitcoinWitness:
         try:
             proof = DetachedTimestampFile.deserialize(BytesDeserializationContext(data))
         except Exception as e:  # any way of not being a whole proof
-            return "failed", f"the .ots is not a proof: {_one_line(e) or type(e).__name__}"
+            return "failed", f"the .ots is not a proof: {_plain(str(e)) or type(e).__name__}"
         # A proof attests its digest; how that digest was made from a file does not
         # matter, only that it is the SHA-256 of this block's hash.
         if proof.file_digest != hashlib.sha256(bytes.fromhex(block.hash)).digest():
@@ -463,13 +463,13 @@ class BitcoinWitness:
         try:
             node = self._node()
         except Exception as e:
-            return "unchecked", f"no Bitcoin node answered: {_one_line(e)}"
+            return "unchecked", f"no Bitcoin node answered: {_plain(str(e))}"
         contradicted, unanswered = [], ""
         for height, msg in attested:
             try:  # a node behind that block raises IndexError; one warming up, JSONRPCError
                 header = node.getblockheader(node.getblockhash(height))
             except Exception as e:
-                unanswered = unanswered or f"the Bitcoin node could not answer for block {height}: {_one_line(e)}"
+                unanswered = unanswered or f"the Bitcoin node could not answer for block {height}: {_plain(str(e))}"
                 continue
             try:
                 BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
@@ -504,12 +504,6 @@ def _read_regular(p: Path, limit: int) -> bytes | None:
         return b"".join(chunks)
     finally:
         os.close(fd)
-
-
-def _one_line(text) -> str:
-    """Outside text (a node's error, an exception) as one line of printable ASCII."""
-    flat = " ".join(str(text).split())
-    return "".join(c for c in flat if " " <= c <= "~")[:300]
 
 
 # ------------------------------------------------------------ Verifier ----
