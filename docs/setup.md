@@ -22,7 +22,9 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs, proposes them as a pull request, and reports.
+only upgrades Bitcoin proofs, stamps any block with no `.ots` yet (block 0 was
+anchored at deploy but never stamped), proposes them as a pull request, and
+reports.
 See §8.
 
 ## 2. Move the secrets
@@ -175,12 +177,24 @@ it ~ but the workflow contains no path that writes to `main` on its own.
 Merging is a manual click. Nothing merges it for her.
 
 This is a small chore next to the ledger: a proof that lands has no urgency ~
-Bitcoin already confirmed it, and it has been sitting in the OpenTimestamps
-calendar as pending proof, correctly, since it was stamped. Merging late costs
+it only records what the calendars and Bitcoin already hold, and it has been
+sitting in the OpenTimestamps calendar as pending proof, correctly, since it was
+stamped. Merging late costs
 nothing except the ledger reading `BASE VERIFIED — BITCOIN PENDING` a little
-longer than it needed to. The nightly runner reads the repository's own
-`trust.json`, so it never reports more than `VALID LOCALLY`. It has no Bitcoin
-node either, so it cannot check a complete proof; when `ots` gives no verdict but
+longer than it needed to.
+
+A block's first proof is the exception. Nightly also stamps any block with no `.ots`
+on `main` (block 0 was anchored at deploy and never stamped; a stamp that
+fails when a block is written is left to nightly too). That proof is only pending,
+and until the PR carrying it is merged, each night stamps the block again from
+`main`: the PR's proof is replaced, and the time it will prove moves later. A night
+whose stamp fails drops that proof from the PR (and, with nothing else to propose,
+closes it: the action deletes its branch when there is no change); the next night
+that stamps puts it back.
+Merge it when it appears; a later night upgrades it like any other.
+
+The nightly runner reads the repository's own `trust.json`, so it never reports
+more than `VALID LOCALLY`. It has no Bitcoin node either, so it cannot check a complete proof; when `ots` gives no verdict but
 says it could not connect to one (or crashes inside its calendar client), verify
 reports the proof as not checked rather than failed. A calendar that cannot be
 reached, refuses, or has nothing yet only leaves a proof pending.

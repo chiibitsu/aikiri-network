@@ -1,16 +1,18 @@
 name: nightly
-# No longer writes anything. Blocks are written only when Chii approves a request
+# Writes no blocks. Blocks are written only when Chii approves a request
 # on one of her devices, so there is nothing for a schedule to sign. What is left
-# is worth doing nightly: fetch completed Bitcoin proofs, re-verify the whole
-# chain against Base, and say plainly which of the four states it is in.
+# is worth doing nightly: upgrade pending Bitcoin proofs, stamp any block with no
+# proof file yet, re-verify the whole chain against Base, and say plainly which of
+# the four states it is in.
 #
-# A completed proof is not pushed to main directly. It is proposed as a pull
+# A new or upgraded proof is not pushed to main directly. It is proposed as a pull
 # request instead: this job's token can open a PR and push the branch behind
 # it, but merging ~ the only thing that changes main ~ is Chii's click. The
 # token still carries contents: write, because pushing that branch requires
 # it; what changed is the workflow's own logic, which no longer contains a
-# path that writes to main on its own. One persistent branch and PR is reused
-# across nights rather than opening a new one each time a proof lands.
+# path that writes to main on its own. One branch is reused across nights, and
+# its PR with it while it is open, rather than opening a new one each time a proof
+# lands. A night with nothing to propose deletes the branch, which closes the PR.
 on:
   schedule:
     - cron: "0 16 * * *"
@@ -37,18 +39,22 @@ jobs:
           pip install --no-deps -e .
       - name: upgrade pending Bitcoin proofs
         run: aikiri-ledger upgrade || true
-      - name: propose any proof that completed
+      - name: stamp any block with no Bitcoin proof file yet
+        run: aikiri-ledger stamp || true
+      - name: propose any proof stamped or upgraded
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
         with:
           add-paths: ledger/proofs
-          commit-message: "Bitcoin proofs upgraded"
+          commit-message: "Bitcoin proofs stamped or upgraded"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           branch: nightly/bitcoin-proofs
           delete-branch: true
-          title: "Bitcoin proofs upgraded"
+          title: "Bitcoin proofs stamped or upgraded"
           body: >
-            OpenTimestamps proofs that finished stamping since the last run.
+            OpenTimestamps proofs upgraded since the last run (complete, or
+            with new attestations and possibly still pending; the run's log
+            says which), and a first, pending proof for any block that had none.
             Only ledger/proofs changes here; nothing else in this repository
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.
