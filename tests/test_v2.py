@@ -673,6 +673,41 @@ def test_verify_reads_bitcoin_proofs_without_ots_on_the_path(ledger, trust, monk
     assert len(seen) == 1 and isinstance(seen[0], W.BitcoinWitness)
 
 
+class _Says:
+    """A Bitcoin witness that gives each block the result named for its index."""
+    def __init__(self, results):
+        self.results = results
+
+    def verify(self, b):
+        return self.results[b.index], "as told"
+
+
+def test_complete_bitcoin_proofs_alone_are_not_fully_verified(ledger, trust):
+    # without Base, a complete Bitcoin proof for every block is still not two witnesses
+    state, _ = verify_all(ledger, trust, bitcoin=_Says({0: "complete"}))
+    assert state == State.VALID_LOCALLY
+
+
+def test_one_pending_block_keeps_the_ledger_below_fully_verified(ledger, sk, mac, trust):
+    # the last block's complete proof does not hide an earlier block's pending one
+    bw = _base_verified(ledger, trust)
+    b1 = ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                                    now=datetime(2026, 9, 3, tzinfo=MANILA))
+    bw.anchor(b1)
+    assert verify_all(ledger, trust, base=bw, bitcoin=_Says({0: "complete", 1: "complete"}))[0] \
+        == State.FULLY_VERIFIED
+    for results in ({0: "pending", 1: "complete"}, {0: "unchecked", 1: "complete"}):
+        assert verify_all(ledger, trust, base=bw, bitcoin=_Says(results))[0] == State.BASE_VERIFIED
+
+
+def test_what_a_failing_node_connection_says_reaches_the_report_as_one_line(ledger, trust, monkeypatch):
+    # the node cannot even be set up (a cookie file with odd bytes in its path, say)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    _, report = _read(ledger, trust, monkeypatch, data, ValueError("cookie\n\x1b[31m\x85 unusable"))
+    (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
+    assert "not checked" in line and all(" " <= c <= "~" for c in line)
+
+
 def test_the_committed_proofs_read_as_proofs_of_their_blocks():
     # blocks 1 and 2's real .ots files, as the calendars wrote them
     from aikiri_ledger import witness as W
