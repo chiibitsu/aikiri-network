@@ -403,7 +403,7 @@ def test_trailing_unanchored_block_never_reaches_verified(ledger, sk, mac, trust
 def test_failed_bitcoin_proof_is_a_failure_not_a_shrug(ledger, sk, mac, trust):
     class FailingBtc:
         def verify(self, b):
-            return False, "Bad attestation"
+            return "failed", "Bad attestation"
     state, report = verify_all(ledger, trust, bitcoin=FailingBtc())
     assert state == State.INVALID and any("bitcoin" in r.lower() for r in report)
 
@@ -422,225 +422,301 @@ def _base_verified(ledger, trust):
     return bw
 
 
-class _Ots:
-    """Stands in for BitcoinWitness with a given `ots verify` exit and output."""
-    def __init__(self, ok, msg):
-        self.ok, self.msg = ok, msg
+# ------------------------------------------- Bitcoin proof, read from the file ----
+# BitcoinWitness.verify reads the .ots itself (python-opentimestamps) and asks a
+# Bitcoin node only about an attestation that claims a Bitcoin block. It runs no
+# `ots` and asks no calendar, so nothing it decides rests on ots's wording.
 
-    def verify(self, b):
-        return self.ok, self.msg
-
-
-_PREAMBLE = "Assuming target filename is '{root}/proofs/000000.hash'\n"
-
-
-@pytest.mark.parametrize("line", [
-    # opentimestamps-client 0.7.2, otsclient/args.py:148 and otsclient/cmds.py:418
-    "Could not connect to Bitcoin node: Cookie file unusable ([Errno 2] No such file "
-    "or directory: '/root/.bitcoin/.cookie') and rpcpassword not specified in the "
-    "configuration file: '/root/.bitcoin/bitcoin.conf'",
-    "Could not connect to local Bitcoin node: [Errno 111] Connection refused",
-    # otsclient/cmds.py:263 and 306: a pending proof that its cache or calendar
-    # completes on the way, before ots reaches for the node
-    "Got 1 attestation(s) from cache\n"
-    "Could not connect to Bitcoin node: Cookie file unusable",
-    "Got 1 attestation(s) from https://alice.btc.calendar.opentimestamps.org\n"
-    "Could not connect to Bitcoin node: Cookie file unusable",
-    # otsclient/cmds.py:298 and 301: another calendar erred in the same pass
-    "Got 1 attestation(s) from https://alice.btc.calendar.opentimestamps.org\n"
-    "Calendar https://bob.btc.calendar.opentimestamps.org: Service Unavailable\n"
-    "Could not connect to Bitcoin node: Cookie file unusable",
-])
-@pytest.mark.parametrize("root", ["/srv/ledger", "/srv/invalid-ledger",
-                                  "/srv/archive-not supported", "/srv/pending-missing"])
-def test_no_bitcoin_node_is_unchecked_not_failed(ledger, trust, line, root):
-    # A complete proof needs a Bitcoin node to check. A machine without one has
-    # not checked it: the state stops at BASE VERIFIED and the report says so,
-    # whatever the ledger's own path holds: verdict words (which matching words
-    # anywhere in the output would trip on) or the pending check's words.
-    base = _base_verified(ledger, trust)
-    assert verify_all(ledger, trust, base=base, bitcoin=_Ots(True, ""))[0] == State.FULLY_VERIFIED
-    state, report = verify_all(ledger, trust, base=base,
-                               bitcoin=_Ots(False, _PREAMBLE.format(root=root) + line))
-    assert state == State.BASE_VERIFIED
-    assert not any("FAILED" in r for r in report)
-    assert any("no bitcoin node reachable" in r.lower() for r in report)
-    assert not any("proof pending" in r.lower() for r in report)
+def _ots_file(block_hash=None, *atts, digest=None, hash_op=None):
+    """A real .ots of sha256(block hash), each attestation at the end of its own path."""
+    import hashlib, io
+    from opentimestamps.core.op import OpAppend, OpSHA256
+    from opentimestamps.core.serialize import StreamSerializationContext
+    from opentimestamps.core.timestamp import DetachedTimestampFile, Timestamp
+    op = hash_op if hash_op is not None else OpSHA256()  # an Op is a tuple, and empty
+    d = digest if digest is not None else hashlib.sha256(bytes.fromhex(block_hash)).digest()
+    ts = Timestamp(d)
+    for i, att in enumerate(atts):
+        ts.ops.add(OpAppend(bytes([i]) * 32)).ops.add(OpSHA256()).attestations.add(att)
+    buf = io.BytesIO()
+    DetachedTimestampFile(op, ts).serialize(StreamSerializationContext(buf))
+    return buf.getvalue()
 
 
-@pytest.mark.parametrize("msg", [
-    # ots moves on to the next attestation after a failed connection
-    # (otsclient/cmds.py:418), so one run can carry a verdict and a no-node line.
-    _PREAMBLE.format(root="/srv/ledger") + "Bitcoin verification failed: Bad merkleroot\n"
-    "Could not connect to local Bitcoin node: [Errno 111] Connection refused",
-    # A path that holds the no-node words does not make another failure one.
-    _PREAMBLE.format(root="/srv/could not connect to bitcoin node:") +
-    "Could not open target: [Errno 2] No such file or directory: "
-    "'/srv/could not connect to bitcoin node:/proofs/000000.hash'",
-    # Lines that carry no verdict are matched from their start, so a path that
-    # holds one does not excuse the line it sits in.
-    _PREAMBLE.format(root="/srv/ledger") +
-    "Could not open target: [Errno 2] No such file or directory: "
-    "'/srv/calendar a: b/proofs/000000.hash'\n"
-    "Could not connect to Bitcoin node: Cookie file unusable",
-])
-def test_no_bitcoin_node_does_not_hide_a_real_verdict(ledger, trust, msg):
-    base = _base_verified(ledger, trust)
-    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
-    assert state == State.INVALID and any("FAILED" in r for r in report)
+def _roots(data):
+    """{height: merkle root a genuine block at that height would carry} for a proof."""
+    from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
+    from opentimestamps.core.serialize import BytesDeserializationContext
+    from opentimestamps.core.timestamp import DetachedTimestampFile
+    t = DetachedTimestampFile.deserialize(BytesDeserializationContext(data)).timestamp
+    return {a.height: m for m, a in t.all_attestations() if isinstance(a, BitcoinBlockHeaderAttestation)}
 
 
-class _Ran:
-    def __init__(self, returncode, out=""):
-        self.returncode, self.stdout, self.stderr = returncode, out, ""
+class _Node:
+    """A Bitcoin node: the headers it holds, how far it has synced, or an error."""
+    def __init__(self, roots=None, tip=900_000, error=None):
+        self.roots, self.tip, self.error, self.asked = dict(roots or {}), tip, error, []
+
+    def getblockhash(self, height):
+        self.asked.append(height)
+        if self.error is not None:
+            raise self.error
+        if height > self.tip:
+            raise IndexError(f"Proxy.getblockhash(): Block height out of range (-8)")
+        return height.to_bytes(32, "little")
+
+    def getblockheader(self, block_hash):
+        from types import SimpleNamespace
+        h = int.from_bytes(block_hash, "little")
+        return SimpleNamespace(hashMerkleRoot=self.roots.get(h, b"\x00" * 32), nTime=1_700_000_000)
 
 
-def _digest_of(block_hash):
-    import hashlib
-    return hashlib.sha256(bytes.fromhex(block_hash)).hexdigest()
-
-
-def test_bitcoin_proof_is_checked_against_this_blocks_hash(ledger, trust, monkeypatch):
-    # ots checks a proof against a digest. Taken from the .hash file beside it, a
-    # genuine proof of any other data, with that data in the file, would pass; and
-    # a file read twice (once here, once by ots) can answer differently each time.
-    # So ots is given the digest of the block's own hash and reads no file for it.
+def _read(ledger, trust, monkeypatch, data=None, node=None, link=False):
+    """verify_all with a real BitcoinWitness over `data` as block 0's .ots."""
     from aikiri_ledger import witness as W
     base = _base_verified(ledger, trust)
-    ran = []
-    monkeypatch.setattr(W.subprocess, "run", lambda argv, **k: ran.append(argv) or _Ran(0, "Success!"))
+
+    def no_ots(*a, **k):
+        raise AssertionError("verify ran a subprocess")
+    monkeypatch.setattr(W.subprocess, "run", no_ots)
+
+    def node_for(_self):
+        if isinstance(node, BaseException):
+            raise node
+        if node is None:
+            raise AssertionError("verify asked a Bitcoin node")
+        return node
+    monkeypatch.setattr(W.BitcoinWitness, "_node", node_for)
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
-    ledger.proof_path(0, "hash.ots").write_bytes(b"proof")
-    ledger.proof_path(0, "hash").write_bytes(b"something else entirely")
-    state, _ = verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
+    if data is not None:
+        target = ledger.proof_path(0, "hash.ots")
+        if link:
+            real = ledger.proofs_dir / "elsewhere.ots"
+            real.write_bytes(data)
+            target.symlink_to(real)
+        else:
+            target.write_bytes(data)
+    return verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
+
+
+def _pending():
+    from opentimestamps.core.notary import PendingAttestation
+    return PendingAttestation("https://alice.btc.calendar.opentimestamps.org")
+
+
+def _btc(height):
+    from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
+    return BitcoinBlockHeaderAttestation(height)
+
+
+def test_no_proof_yet_is_pending(ledger, trust, monkeypatch):
+    state, report = _read(ledger, trust, monkeypatch)
+    assert state == State.BASE_VERIFIED
+    assert any("block 0: Bitcoin proof pending" in r for r in report)
+
+
+def test_a_pending_proof_is_pending_and_asks_no_one(ledger, trust, monkeypatch):
+    # no node, no subprocess, no calendar: _read fails the test if either is used
+    state, report = _read(ledger, trust, monkeypatch, _ots_file(ledger.read(0).hash, _pending()))
+    assert state == State.BASE_VERIFIED
+    assert any("block 0: Bitcoin proof pending" in r for r in report)
+
+
+def test_a_complete_proof_a_node_confirms_is_fully_verified(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _pending(), _btc(800_000))
+    node = _Node(_roots(data))
+    state, report = _read(ledger, trust, monkeypatch, data, node)
     assert state == State.FULLY_VERIFIED
-    (argv,) = ran
-    assert argv[argv.index("-d") + 1] == _digest_of(ledger.read(0).hash)
-    assert not any(a.endswith(".hash") for a in argv)
+    assert node.asked == [800_000]
+    assert any("block 0: Bitcoin proof complete" in r for r in report)
 
 
-def test_a_proof_of_other_data_fails(ledger, trust):
-    # what `ots verify -d` prints when the proof is not of that digest (cmds.py:461)
-    base = _base_verified(ledger, trust)
-    msg = ("Digest provided does not match digest in timestamp, "
-           "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824 (sha256)")
-    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
-    assert state == State.INVALID and any("FAILED" in r for r in report)
+def test_a_block_that_does_not_carry_the_proof_fails(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    state, report = _read(ledger, trust, monkeypatch, data, _Node({800_000: b"\x11" * 32}))
+    assert state == State.INVALID
+    assert any("block 0: Bitcoin proof FAILED" in r for r in report)
 
 
-@pytest.mark.parametrize("verdict", [
-    "Bitcoin verification failed: Bad merkleroot",
-    "File does not match original!",
-])
-@pytest.mark.parametrize("root", ["/srv/ledger", "/srv/pending", "/srv/missing-incomplete"])
-def test_a_real_verdict_fails_whatever_the_path_says(ledger, trust, verdict, root):
-    # The pending check used to look for "pending"/"missing"/"incomplete" anywhere in
-    # the output, which also carries the ledger's own path.
-    base = _base_verified(ledger, trust)
-    state, report = verify_all(ledger, trust, base=base,
-                               bitcoin=_Ots(False, _PREAMBLE.format(root=root) + verdict))
-    assert state == State.INVALID and any("FAILED" in r for r in report)
+def test_a_genuine_proof_of_other_data_fails(ledger, trust, monkeypatch):
+    # every attestation in it is real; it is simply not a proof of this block
+    import hashlib
+    data = _ots_file(None, _btc(800_000), digest=hashlib.sha256(b"other data").digest())
+    state, report = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)))
+    assert state == State.INVALID
+    assert any("FAILED" in r and "other data" in r for r in report)
 
 
-@pytest.mark.parametrize("msg", [
-    "no .ots proof",
-    # A calendar answering that Bitcoin has not confirmed it yet (a 404 body,
-    # opentimestamps/calendar.py), printed at otsclient/cmds.py:298
-    _PREAMBLE.format(root="/srv/ledger") +
-    "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",
-    # A calendar answering with an empty body: "Calendar <url>:" and nothing after
-    # (opentimestamps/calendar.py get_sanitised_resp_msg, cmds.py:298)
-    "Calendar https://alice.btc.calendar.opentimestamps.org: \n"
-    "Calendar https://bob.btc.calendar.opentimestamps.org:",
-    # No calendar reachable (cmds.py:301): not yet known, not wrong
-    _PREAMBLE.format(root="/srv/ledger") +
-    "Calendar https://alice.btc.calendar.opentimestamps.org: Tunnel connection failed: 403 Forbidden\n"
-    "Calendar https://bob.btc.calendar.opentimestamps.org: [Errno -3] Temporary failure in name resolution",
-    # What a calendar says about a commitment it does not have; it can say so for a
-    # while about one it has only just taken (otsserver/rpc.py, issue #10)
-    "Calendar https://alice.btc.calendar.opentimestamps.org: Not found\n"
-    "Calendar https://bob.btc.calendar.opentimestamps.org: Not found",
-    # An ignored calendar beside one that answered
-    "Ignoring attestation from calendar https://calendar.example.org: Calendar not in whitelist\n"
-    "Calendar https://alice.btc.calendar.opentimestamps.org: Pending confirmation in Bitcoin blockchain",
-    # The cache moved it along but not to Bitcoin: no verdict and no node line,
-    # so pending, not "not checked"
-    _PREAMBLE.format(root="/srv/ledger") + "Got 1 attestation(s) from cache",
-])
-def test_a_proof_not_yet_complete_is_pending(ledger, trust, msg):
-    base = _base_verified(ledger, trust)
-    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
-    assert state == State.BASE_VERIFIED
-    assert any(r.startswith("block 0: Bitcoin proof pending: " + msg.splitlines()[0])
-               for r in report), "the report carries what ots said"
-    assert not any("FAILED" in r for r in report)
-
-
-@pytest.mark.parametrize("msg", [
-    "",
-    # A proof whose only attestations have no way to Bitcoin (unknown or Litecoin
-    # ones: verify_timestamp passes over them in silence) prints nothing under -d,
-    # the "" above; without -d, only the preamble
-    _PREAMBLE.format(root="/srv/ledger").strip(),
-    # One whose only calendar is off the whitelist: ots will never ask it
-    _PREAMBLE.format(root="/srv/ledger") +
-    "Ignoring attestation from calendar https://calendar.example.org: Calendar not in whitelist",
-])
-def test_an_ots_failure_that_says_nothing_is_a_failure(ledger, trust, msg):
-    base = _base_verified(ledger, trust)
-    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+def test_a_proof_hashed_another_way_fails(ledger, trust, monkeypatch):
+    import hashlib
+    from opentimestamps.core.op import OpSHA1
+    digest = hashlib.sha1(bytes.fromhex(ledger.read(0).hash)).digest()
+    data = _ots_file(None, _btc(800_000), digest=digest, hash_op=OpSHA1())
+    state, _ = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)))
     assert state == State.INVALID
 
 
-_TRACEBACK = ("Traceback (most recent call last):\n"
-              "  File \"/usr/local/bin/ots\", line 8, in <module>\n"
-              "    sys.exit(main())\n"
-              "  File \"/usr/local/lib/python3.11/dist-packages/opentimestamps/calendar.py\", "
-              "line 87, in get_timestamp\n"
-              "    with urllib.request.urlopen(req, timeout=timeout) as resp:\n"
-              "http.client.RemoteDisconnected: Remote end closed connection without response")
-# What ots prints when a Bitcoin node answers an RPC it does not catch: a forged
-# attestation at a height past 2^31 gets "JSON integer out of range" (cmds.py:421-431)
-_NODE_TRACEBACK = ("Traceback (most recent call last):\n"
-                   "  File \"/usr/local/lib/python3.11/dist-packages/otsclient/cmds.py\", "
-                   "line 413, in verify_timestamp\n"
-                   "    blockhash = proxy.getblockhash(attestation.height)\n"
-                   "  File \"/usr/local/lib/python3.11/dist-packages/bitcoin/rpc.py\", "
-                   "line 239, in _call\n"
-                   "bitcoin.rpc.JSONRPCError: {'code': -1, 'message': 'JSON integer out of range'}")
-
-
-def test_ots_stopping_on_an_error_is_unchecked_not_failed(ledger, trust):
-    # A calendar that drops the connection, or answers with a page that is not a
-    # proof, stops ots with a traceback (a URLError or a 404 becomes a "Calendar"
-    # line; these do not).
-    # Calendars are asked only while a proof is incomplete, and every verdict ots
-    # reached is printed before the traceback.
-    base = _base_verified(ledger, trust)
-    msg = ("Calendar https://btc.calendar.catallaxy.com: Pending confirmation in Bitcoin blockchain\n"
-           + _TRACEBACK)
-    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
-    assert state == State.BASE_VERIFIED
-    assert any("not checked" in r and "RemoteDisconnected" in r for r in report)
-    # Named for what happened, which a calendar that merely failed to answer is not
-    assert any("ots crashed inside its calendar client" in r for r in report)
-    assert not any("FAILED" in r for r in report)
-
-
-def test_a_traceback_that_is_not_a_calendars_fails(ledger, trust):
-    # Only a calendar failing mid-request is excused: ots asks calendars only while a
-    # proof is incomplete. A node that raises was asked about a proof that claims to
-    # be complete.
-    base = _base_verified(ledger, trust)
-    state, report = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, _NODE_TRACEBACK))
-    assert state == State.INVALID and any("FAILED" in r for r in report)
-
-
-def test_a_verdict_before_a_traceback_still_fails(ledger, trust):
-    base = _base_verified(ledger, trust)
-    msg = "Bitcoin verification failed: Bad merkleroot\n" + _TRACEBACK
-    state, _ = verify_all(ledger, trust, base=base, bitcoin=_Ots(False, msg))
+def test_verify_never_takes_a_link_for_a_proof(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    state, report = _read(ledger, trust, monkeypatch, data, _Node(_roots(data)), link=True)
     assert state == State.INVALID
+    assert any("FAILED" in r and "a link, never a proof" in r for r in report)
+
+
+@pytest.mark.parametrize("damage", [
+    lambda d: b"proof",           # not a proof at all
+    lambda d: d[:-3],             # cut short
+    lambda d: d + b"\x00",        # something after the end
+])
+def test_a_file_that_is_not_a_whole_proof_fails(ledger, trust, monkeypatch, damage):
+    data = damage(_ots_file(ledger.read(0).hash, _btc(800_000)))
+    state, report = _read(ledger, trust, monkeypatch, data, _Node())
+    assert state == State.INVALID
+    assert any("block 0: Bitcoin proof FAILED: the .ots is not a proof" in r for r in report)
+
+
+def test_a_fifo_is_not_a_proof_and_does_not_hang(ledger, trust, monkeypatch):
+    import os
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(ledger.proof_path(0, "hash.ots"))
+    state, report = _read(ledger, trust, monkeypatch, None, _Node())
+    assert state == State.INVALID
+    assert any("not a regular file" in r for r in report)
+
+
+def test_a_file_far_larger_than_any_proof_is_not_read(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000)) + b"\x00" * (1 << 20)
+    state, report = _read(ledger, trust, monkeypatch, data, _Node())
+    assert state == State.INVALID
+    assert any("larger than any proof" in r for r in report)
+
+
+def test_a_proof_with_no_way_to_bitcoin_fails(ledger, trust, monkeypatch):
+    from opentimestamps.core.notary import UnknownAttestation
+    data = _ots_file(ledger.read(0).hash, UnknownAttestation(b"\x01" * 8, b"payload"))
+    state, _ = _read(ledger, trust, monkeypatch, data)
+    assert state == State.INVALID
+
+
+@pytest.mark.parametrize("node", [
+    ConnectionRefusedError(111, "Connection refused"),        # no node at all
+    ValueError("Cookie file unusable ([Errno 2] No such file or directory)"),
+    _Node(error=Exception({"code": -28, "message": "Loading block index..."})),  # warming up
+    _Node(error=Exception({"code": -32601, "message": "401 Unauthorized"})),     # bad credentials
+    _Node(tip=799_999),                                        # behind the attested block
+])
+def test_a_node_that_cannot_answer_leaves_the_proof_unchecked(ledger, trust, monkeypatch, node):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    state, report = _read(ledger, trust, monkeypatch, data, node)
+    assert state == State.BASE_VERIFIED
+    assert any("block 0: Bitcoin proof not checked" in r for r in report)
+
+
+def test_one_attestation_bitcoin_confirms_is_enough(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(800_001))
+    roots = _roots(data)
+    roots[800_000] = b"\x11" * 32  # the first one does not hold
+    state, _ = _read(ledger, trust, monkeypatch, data, _Node(roots))
+    assert state == State.FULLY_VERIFIED
+
+
+def test_an_attestation_bitcoin_contradicts_fails_even_beside_an_unanswered_one(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(950_000))
+    state, _ = _read(ledger, trust, monkeypatch, data, _Node({800_000: b"\x11" * 32}))
+    assert state == State.INVALID
+
+
+def test_what_a_node_says_reaches_the_report_as_one_line(ledger, trust, monkeypatch):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    node = _Node(error=Exception("line one\nline two\x1b[31m\x85"))
+    _, report = _read(ledger, trust, monkeypatch, data, node)
+    (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
+    assert all(" " <= c <= "~" for c in line)
+
+
+def test_a_proof_naming_more_bitcoin_blocks_than_any_proof_fails(ledger, trust, monkeypatch):
+    # a genuine proof names one Bitcoin block per calendar; each one named costs up to
+    # two node requests, so a file listing thousands would hold verify for hours
+    data = _ots_file(ledger.read(0).hash, *[_btc(800_000 + i) for i in range(9)])
+    node = _Node(_roots(data))
+    state, report = _read(ledger, trust, monkeypatch, data, node)
+    assert state == State.INVALID and node.asked == []
+    assert any("more Bitcoin blocks than any proof" in r for r in report)
+
+
+def test_a_node_that_cannot_answer_is_not_asked_again(ledger, trust, monkeypatch):
+    node = _Node(error=ConnectionRefusedError(111, "Connection refused"))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(800_001), _btc(800_002))
+    state, _ = _read(ledger, trust, monkeypatch, data, node)
+    assert state == State.BASE_VERIFIED and node.asked == [800_000]
+
+
+def test_without_the_proof_libraries_the_proof_is_unchecked_not_a_crash(ledger, trust, monkeypatch):
+    import sys
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    monkeypatch.setitem(sys.modules, "opentimestamps.core.notary", None)  # import fails
+    state, report = _read(ledger, trust, monkeypatch, data)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "not installed" in r for r in report)
+
+
+def test_verify_reads_bitcoin_proofs_without_ots_on_the_path(ledger, trust, monkeypatch):
+    # verify runs no ots, so whether ots is installed does not decide whether proofs are read
+    from aikiri_ledger import cli, witness as W
+    seen = []
+    monkeypatch.setattr(W.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli, "_trust", lambda a: trust)
+    monkeypatch.setattr(cli, "_base_reader", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "verify_all", lambda L, t, base=None, bitcoin=None:
+                        (seen.append(bitcoin), (State.BASE_VERIFIED, []))[1])
+    cli.main(["--ledger", str(ledger.root), "verify"])
+    assert len(seen) == 1 and isinstance(seen[0], W.BitcoinWitness)
+
+
+class _Says:
+    """A Bitcoin witness that gives each block the result named for its index."""
+    def __init__(self, results):
+        self.results = results
+
+    def verify(self, b):
+        return self.results[b.index], "as told"
+
+
+def test_complete_bitcoin_proofs_alone_are_not_fully_verified(ledger, trust):
+    # without Base, a complete Bitcoin proof for every block is still not two witnesses
+    state, _ = verify_all(ledger, trust, bitcoin=_Says({0: "complete"}))
+    assert state == State.VALID_LOCALLY
+
+
+def test_one_pending_block_keeps_the_ledger_below_fully_verified(ledger, sk, mac, trust):
+    # the last block's complete proof does not hide an earlier block's pending one
+    bw = _base_verified(ledger, trust)
+    b1 = ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                                    now=datetime(2026, 9, 3, tzinfo=MANILA))
+    bw.anchor(b1)
+    assert verify_all(ledger, trust, base=bw, bitcoin=_Says({0: "complete", 1: "complete"}))[0] \
+        == State.FULLY_VERIFIED
+    for results in ({0: "pending", 1: "complete"}, {0: "unchecked", 1: "complete"}):
+        assert verify_all(ledger, trust, base=bw, bitcoin=_Says(results))[0] == State.BASE_VERIFIED
+
+
+def test_what_a_failing_node_connection_says_reaches_the_report_as_one_line(ledger, trust, monkeypatch):
+    # the node cannot even be set up (a cookie file with odd bytes in its path, say)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    _, report = _read(ledger, trust, monkeypatch, data, ValueError("cookie\n\x1b[31m\x85 unusable"))
+    (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
+    assert "not checked" in line and all(" " <= c <= "~" for c in line)
+
+
+def test_the_committed_proofs_read_as_proofs_of_their_blocks():
+    # blocks 1 and 2's real .ots files, as the calendars wrote them
+    from aikiri_ledger import witness as W
+    repo = Ledger(Path(__file__).resolve().parent.parent / "ledger")
+    w = W.BitcoinWitness(repo)
+    w._node = lambda: (_ for _ in ()).throw(ConnectionRefusedError(111, "Connection refused"))
+    for i in (1, 2):
+        result, why = w.verify(repo.read(i))
+        assert result in ("pending", "unchecked"), (i, result, why)
 
 
 def test_truncated_chain_fails_against_contract_latest_index(ledger, sk, mac, trust):
