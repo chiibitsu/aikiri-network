@@ -423,10 +423,13 @@ class BitcoinWitness:
         hash, and only an attestation that names a Bitcoin block is taken to a node.
         No `ots`, no calendar: moving a pending proof along is nightly's job.
         """
-        from opentimestamps.core.notary import (BitcoinBlockHeaderAttestation,
-                                                PendingAttestation, VerificationError)
-        from opentimestamps.core.serialize import BytesDeserializationContext
-        from opentimestamps.core.timestamp import DetachedTimestampFile
+        try:
+            from opentimestamps.core.notary import (BitcoinBlockHeaderAttestation,
+                                                    PendingAttestation, VerificationError)
+            from opentimestamps.core.serialize import BytesDeserializationContext
+            from opentimestamps.core.timestamp import DetachedTimestampFile
+        except ImportError:
+            return "unchecked", "python-opentimestamps is not installed here"
 
         p = self.ledger.proof_path(block.index, "hash.ots")
         if not os.path.lexists(p):
@@ -450,8 +453,10 @@ class BitcoinWitness:
         if proof.file_digest != hashlib.sha256(bytes.fromhex(block.hash)).digest():
             return "failed", "a proof of other data, not of this block"
 
-        attested = sorted(((a.height, msg) for msg, a in proof.timestamp.all_attestations()
-                           if isinstance(a, BitcoinBlockHeaderAttestation)))
+        attested = sorted({(a.height, msg) for msg, a in proof.timestamp.all_attestations()
+                           if isinstance(a, BitcoinBlockHeaderAttestation)})
+        if len(attested) > _BITCOIN_BLOCKS_MAX:  # each would cost the node a request
+            return "failed", "the .ots names more Bitcoin blocks than any proof does"
         if not attested:
             if any(isinstance(a, PendingAttestation) for _, a in proof.timestamp.all_attestations()):
                 return "pending", "not yet in a Bitcoin block"
@@ -466,11 +471,13 @@ class BitcoinWitness:
             return "unchecked", f"no Bitcoin node answered: {_plain(str(e))}"
         contradicted, unanswered = [], ""
         for height, msg in attested:
-            try:  # a node behind that block raises IndexError; one warming up, JSONRPCError
+            try:
                 header = node.getblockheader(node.getblockhash(height))
             except Exception as e:
-                unanswered = unanswered or f"the Bitcoin node could not answer for block {height}: {_plain(str(e))}"
-                continue
+                # Behind that block (IndexError), warming up, refused, timed out: it is
+                # not asked again. Heights go up, so a node behind this one is behind the rest.
+                unanswered = f"the Bitcoin node could not answer for block {height}: {_plain(str(e))}"
+                break
             try:
                 BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
             except VerificationError:
@@ -484,6 +491,7 @@ class BitcoinWitness:
 
 _OTS_MAX = 1 << 20      # bytes; a proof is a few KB, and calendars answer 10,000 at most
 _NODE_TIMEOUT = 30      # seconds per request to the Bitcoin node
+_BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots uses four
 
 
 def _read_regular(p: Path, limit: int) -> bytes | None:
