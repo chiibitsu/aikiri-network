@@ -634,6 +634,45 @@ def test_what_a_node_says_reaches_the_report_as_one_line(ledger, trust, monkeypa
     assert all(" " <= c <= "~" for c in line)
 
 
+def test_a_proof_naming_more_bitcoin_blocks_than_any_proof_fails(ledger, trust, monkeypatch):
+    # a genuine proof names one Bitcoin block per calendar; each one named costs up to
+    # two node requests, so a file listing thousands would hold verify for hours
+    data = _ots_file(ledger.read(0).hash, *[_btc(800_000 + i) for i in range(9)])
+    node = _Node(_roots(data))
+    state, report = _read(ledger, trust, monkeypatch, data, node)
+    assert state == State.INVALID and node.asked == []
+    assert any("more Bitcoin blocks than any proof" in r for r in report)
+
+
+def test_a_node_that_cannot_answer_is_not_asked_again(ledger, trust, monkeypatch):
+    node = _Node(error=ConnectionRefusedError(111, "Connection refused"))
+    data = _ots_file(ledger.read(0).hash, _btc(800_000), _btc(800_001), _btc(800_002))
+    state, _ = _read(ledger, trust, monkeypatch, data, node)
+    assert state == State.BASE_VERIFIED and node.asked == [800_000]
+
+
+def test_without_the_proof_libraries_the_proof_is_unchecked_not_a_crash(ledger, trust, monkeypatch):
+    import sys
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    monkeypatch.setitem(sys.modules, "opentimestamps.core.notary", None)  # import fails
+    state, report = _read(ledger, trust, monkeypatch, data)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "not installed" in r for r in report)
+
+
+def test_verify_reads_bitcoin_proofs_without_ots_on_the_path(ledger, trust, monkeypatch):
+    # verify runs no ots, so whether ots is installed does not decide whether proofs are read
+    from aikiri_ledger import cli, witness as W
+    seen = []
+    monkeypatch.setattr(W.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli, "_trust", lambda a: trust)
+    monkeypatch.setattr(cli, "_base_reader", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "verify_all", lambda L, t, base=None, bitcoin=None:
+                        (seen.append(bitcoin), (State.BASE_VERIFIED, []))[1])
+    cli.main(["--ledger", str(ledger.root), "verify"])
+    assert len(seen) == 1 and isinstance(seen[0], W.BitcoinWitness)
+
+
 def test_the_committed_proofs_read_as_proofs_of_their_blocks():
     # blocks 1 and 2's real .ots files, as the calendars wrote them
     from aikiri_ledger import witness as W
