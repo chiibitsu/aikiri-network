@@ -422,7 +422,8 @@ class BitcoinWitness:
         The proof is read, not run: its digest must be the SHA-256 of the block's own
         hash, and only an attestation that names a Bitcoin block is taken to a node.
         No `ots`, no calendar: moving a pending proof along is nightly's job.
-        Whatever else breaks while checking a proof fails that proof; verify goes on.
+        Whatever else breaks while checking a proof fails that proof, with a report
+        line, instead of stopping verify with a traceback.
         """
         try:
             return self._check(block)
