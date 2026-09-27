@@ -591,6 +591,21 @@ def test_a_file_far_larger_than_any_proof_is_not_read(ledger, trust, monkeypatch
     assert any("larger than any proof" in r for r in report)
 
 
+def test_a_proof_built_to_be_slow_to_read_fails_within_seconds(ledger, trust, monkeypatch):
+    # python-opentimestamps reads a run of 0xFF bytes as one ever-growing number, in
+    # time that grows with the square of the run. At the size cap it must stay quick.
+    import time
+    from aikiri_ledger import witness as W
+    from opentimestamps.core.timestamp import DetachedTimestampFile
+    magic = DetachedTimestampFile.HEADER_MAGIC
+    data = magic + b"\xff" * (W._OTS_MAX - len(magic))
+    start = time.monotonic()
+    state, report = _read(ledger, trust, monkeypatch, data, _Node())
+    assert time.monotonic() - start < 5
+    assert state == State.INVALID
+    assert any("not a proof" in r for r in report)
+
+
 def test_a_proof_with_no_way_to_bitcoin_fails(ledger, trust, monkeypatch):
     from opentimestamps.core.notary import UnknownAttestation
     data = _ots_file(ledger.read(0).hash, UnknownAttestation(b"\x01" * 8, b"payload"))
