@@ -666,6 +666,15 @@ def test_a_node_that_cannot_answer_is_not_asked_again(ledger, trust, monkeypatch
     assert state == State.BASE_VERIFIED and node.asked == [800_000]
 
 
+def test_a_proof_that_breaks_the_reader_fails_and_does_not_stop_verify(ledger, trust, monkeypatch):
+    # A block number too long for Python to print: whatever breaks while reading a
+    # proof, that proof fails and verify still reports.
+    data = _ots_file(ledger.read(0).hash, _btc(10 ** 5000))
+    state, report = _read(ledger, trust, monkeypatch, data, _Node())
+    assert state == State.INVALID
+    assert any("block 0: Bitcoin proof FAILED" in r and "could not be checked" in r for r in report)
+
+
 def test_without_the_proof_libraries_the_proof_is_unchecked_not_a_crash(ledger, trust, monkeypatch):
     import sys
     data = _ots_file(ledger.read(0).hash, _btc(800_000))
