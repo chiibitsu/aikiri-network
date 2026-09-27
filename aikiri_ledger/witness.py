@@ -422,7 +422,14 @@ class BitcoinWitness:
         The proof is read, not run: its digest must be the SHA-256 of the block's own
         hash, and only an attestation that names a Bitcoin block is taken to a node.
         No `ots`, no calendar: moving a pending proof along is nightly's job.
+        Whatever else breaks while checking a proof fails that proof; verify goes on.
         """
+        try:
+            return self._check(block)
+        except Exception as e:
+            return "failed", f"the .ots could not be checked: {_plain(str(e)) or type(e).__name__}"
+
+    def _check(self, block: Block) -> tuple[str, str]:
         try:
             from opentimestamps.core.notary import (BitcoinBlockHeaderAttestation,
                                                     PendingAttestation, VerificationError)
