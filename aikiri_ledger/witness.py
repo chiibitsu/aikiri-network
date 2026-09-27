@@ -489,7 +489,7 @@ class BitcoinWitness:
         return "unchecked", unanswered
 
 
-_OTS_MAX = 1 << 20      # bytes; a proof is a few KB, and calendars answer 10,000 at most
+_OTS_MAX = 64 << 10     # bytes; a proof is a few KB (4 calendars x 10,000 at most), and reading costs size squared
 _NODE_TIMEOUT = 30      # seconds the node may stay silent; not a limit on a whole request
 _BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots uses four
 
