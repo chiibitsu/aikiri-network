@@ -196,8 +196,8 @@ Merge it when it appears; a later night upgrades it like any other.
 The nightly runner reads the repository's own `trust.json`, so it never reports
 more than `VALID LOCALLY`. It has no Bitcoin node either, so it cannot check a
 complete proof: verify reads each `.ots` itself, and one that names a Bitcoin block
-no node could answer for is reported as not checked rather than failed. Verify asks
-no calendar; a proof not yet in a Bitcoin block is pending until nightly's upgrade
+no node could answer for is reported as not checked rather than failed (as is every
+proof where python-opentimestamps is not installed). Verify asks no calendar; a proof not yet in a Bitcoin block is pending until nightly's upgrade
 moves it along.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin node.
