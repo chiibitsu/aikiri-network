@@ -471,8 +471,9 @@ class _Node:
         return SimpleNamespace(hashMerkleRoot=self.roots.get(h, b"\x00" * 32), nTime=1_700_000_000)
 
 
-def _read(ledger, trust, monkeypatch, data=None, node=None, link=False):
-    """verify_all with a real BitcoinWitness over `data` as block 0's .ots."""
+def _read(ledger, trust, monkeypatch, data=None, node=None, link=False, public=None):
+    """verify_all with a real BitcoinWitness over `data` as block 0's .ots. Public
+    sources are off unless `public` (a stand-in for _fetch) is given."""
     from aikiri_ledger import witness as W
     base = _base_verified(ledger, trust)
 
@@ -496,7 +497,11 @@ def _read(ledger, trust, monkeypatch, data=None, node=None, link=False):
             target.symlink_to(real)
         else:
             target.write_bytes(data)
-    return verify_all(ledger, trust, base=base, bitcoin=W.BitcoinWitness(ledger))
+    bitcoin = W.BitcoinWitness(ledger)
+    bitcoin.public = public is not None
+    if public is not None:
+        monkeypatch.setattr(W, "_fetch", public)
+    return verify_all(ledger, trust, base=base, bitcoin=bitcoin)
 
 
 def _pending():
@@ -730,6 +735,277 @@ def test_what_a_failing_node_connection_says_reaches_the_report_as_one_line(ledg
     _, report = _read(ledger, trust, monkeypatch, data, ValueError("cookie\n\x1b[31m\x85 unusable"))
     (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
     assert "not checked" in line and all(" " <= c <= "~" for c in line)
+
+
+# ----------------------------------- Bitcoin headers from public sources ----
+# With no node to answer, verify asks mempool.space and blockstream.info for the
+# block's header. Both must give the same one, and it must hash to the block they
+# name and carry real proof of work; else the proof is not checked, never failed.
+
+_EASY_BITS = 0x207fffff  # regtest's target: about every other header meets it
+
+
+def _mined(root, bits=_EASY_BITS, prev=b"\x00" * 32):
+    """(80-byte header carrying `root`, its block hash as hex) meeting `bits`."""
+    import struct
+    from aikiri_ledger import witness as W
+    for nonce in range(1 << 16):
+        raw = struct.pack("<I", 0x20000000) + prev + root + struct.pack("<III", 1_700_000_000, bits, nonce)
+        h = hashlib.sha256(hashlib.sha256(raw).digest()).digest()
+        if int.from_bytes(h, "little") <= W._target(bits):
+            return raw, h[::-1].hex()
+    raise AssertionError("no nonce found")
+
+
+def _unworked(root, bits=_EASY_BITS):
+    """(80-byte header carrying `root`, its hash as hex) that does NOT meet `bits`."""
+    import struct
+    from aikiri_ledger import witness as W
+    for nonce in range(1 << 16):
+        raw = struct.pack("<I", 0x20000000) + b"\x00" * 32 + root + struct.pack("<III", 1_700_000_000, bits, nonce)
+        h = hashlib.sha256(hashlib.sha256(raw).digest()).digest()
+        if int.from_bytes(h, "little") > W._target(bits):
+            return raw, h[::-1].hex()
+    raise AssertionError("no nonce found")
+
+
+class _Public:
+    """Stand-in for _fetch: each source's {height: (header, hash hex)}, or an error."""
+    def __init__(self, **by_source):
+        self.by_source, self.asked = by_source, []
+
+    def __call__(self, url):
+        from aikiri_ledger import witness as W
+        self.asked.append(url)
+        for base in W._PUBLIC_SOURCES:
+            if url.startswith(base + "/"):
+                answer = self.by_source[base.split("/")[2]]
+                break
+        else:
+            raise AssertionError(f"verify asked {url}")
+        if isinstance(answer, BaseException):
+            raise answer
+        path = url[len(base):]
+        for height, (raw, block_hash) in answer.items():
+            if path == f"/block-height/{height}":
+                return block_hash
+            if path == f"/block/{block_hash}/header":
+                return raw.hex()
+        raise OSError("HTTP Error 404: Not Found")
+
+
+@pytest.fixture
+def easy_work(monkeypatch):
+    """Headers at regtest's difficulty count as real work, so tests can mine them."""
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W, "_MAX_TARGET", W._target(_EASY_BITS))
+
+
+_NO_NODE = ConnectionRefusedError(111, "Connection refused")
+
+
+def test_both_public_sources_giving_the_block_complete_the_proof(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.FULLY_VERIFIED
+    assert any("block 0: Bitcoin proof complete" in r for r in report)
+
+
+def test_public_sources_that_disagree_leave_the_proof_unchecked(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    root = _roots(data)[800_000]
+    public = _Public(**{"mempool.space": {800_000: _mined(root)},
+                        "blockstream.info": {800_000: _mined(root, prev=b"\x01" * 32)}})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "do not agree" in r for r in report)
+
+
+def test_one_public_source_down_leaves_the_proof_unchecked(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    public = _Public(**{"mempool.space": {800_000: _mined(_roots(data)[800_000])},
+                        "blockstream.info": OSError("HTTP Error 503: Service Unavailable")})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "blockstream.info" in r for r in report)
+
+
+def test_public_sources_agreeing_on_a_block_without_the_proof_fail_it(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _mined(b"\x11" * 32)}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.INVALID
+    assert any("Bitcoin block 800000 does not carry it" in r for r in report)
+
+
+def test_a_public_header_without_its_proof_of_work_is_not_taken(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _unworked(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "proof of work" in r for r in report)
+
+
+def test_a_header_with_less_work_than_bitcoins_main_chain_is_not_taken(ledger, trust, monkeypatch):
+    # Bitcoin's genesis header is genuine but has difficulty 1: at the real floor it,
+    # and anything as cheap to make, is not taken as a block of today's chain
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    genesis = bytes.fromhex(
+        "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd"
+        "7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c")
+    block = {800_000: (genesis, "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f")}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "less proof of work" in r for r in report)
+
+
+def test_the_work_floor_sits_below_bitcoins_recent_difficulty():
+    # Bitcoin Core 28 and 29: nMinimumChainWork 0x88e186b70e0862c193ec44d6 at block
+    # 856,760 and 0xb1f3b93b65b16d035a82be84 at block 886,157. The average block
+    # between them took about 1.0e14 * 2**32 hashes. The floor must sit below that.
+    from aikiri_ledger import witness as W
+    per_block = (0xb1f3b93b65b16d035a82be84 - 0x88e186b70e0862c193ec44d6) // (886_157 - 856_760)
+    average_target = 2 ** 256 // per_block
+    assert average_target < W._MAX_TARGET < 4 * average_target
+
+
+def test_a_header_that_does_not_hash_to_its_block_is_not_taken(ledger, trust, monkeypatch, easy_work):
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    block = {800_000: (raw, "00" * 32)}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "does not hash to" in r for r in report)
+
+
+def test_with_public_sources_off_nothing_public_is_asked(ledger, trust, monkeypatch):
+    from aikiri_ledger import witness as W
+    def no_public(url):
+        raise AssertionError(f"verify asked {url}")
+    monkeypatch.setattr(W, "_fetch", no_public)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    state, _ = _read(ledger, trust, monkeypatch, data, _NO_NODE)  # public stays off
+    assert state == State.BASE_VERIFIED
+
+
+def test_public_sources_are_the_two_named_over_https():
+    from aikiri_ledger import witness as W
+    assert W._PUBLIC_SOURCES == ("https://mempool.space/api", "https://blockstream.info/api")
+
+
+def test_each_bitcoin_block_is_looked_up_once_per_run(ledger, trust, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    monkeypatch.setattr(W, "_fetch", public)
+    made = []
+    def node_for(_self):
+        made.append(1)
+        raise _NO_NODE
+    monkeypatch.setattr(W.BitcoinWitness, "_node", node_for)
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(data)
+    bitcoin = W.BitcoinWitness(ledger)
+    assert bitcoin.verify(ledger.read(0))[0] == "complete"
+    assert bitcoin.verify(ledger.read(0))[0] == "complete"
+    assert len(public.asked) == 4 and len(made) == 1  # two requests per source, one node
+
+
+def test_bitcoin_lookups_stop_at_the_total_deadline(ledger, trust, monkeypatch):
+    import time
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W, "_LOOKUP_BUDGET", 0.5)
+    def slow(url):
+        time.sleep(5)
+        raise AssertionError("never answered in time")
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    start = time.monotonic()
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=slow)
+    assert time.monotonic() - start < 3
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "out of time" in r for r in report)
+
+
+def test_a_trusted_node_that_hangs_stops_at_the_total_deadline(ledger, trust, monkeypatch):
+    import time
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W, "_LOOKUP_BUDGET", 0.5)
+    class Hangs(_Node):
+        def getblockhash(self, height):
+            time.sleep(5)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    start = time.monotonic()
+    state, report = _read(ledger, trust, monkeypatch, data, Hangs())
+    assert time.monotonic() - start < 3
+    assert state == State.BASE_VERIFIED
+    assert any("not checked" in r and "out of time" in r for r in report)
+
+
+def _serve(handler_body):
+    """A local HTTP server whose every GET is answered by handler_body(handler)."""
+    import http.server, threading
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            handler_body(self)
+        def log_message(self, *a):
+            pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_port}"
+
+
+def test_a_public_reply_longer_than_any_header_is_not_read():
+    from aikiri_ledger import witness as W
+    def big(h):
+        h.send_response(200); h.end_headers(); h.wfile.write(b"0" * 100_000)
+    srv, url = _serve(big)
+    try:
+        with pytest.raises(OSError, match="longer"):
+            W._fetch(url + "/block-height/1")
+    finally:
+        srv.shutdown()
+
+
+def test_a_public_source_that_redirects_is_not_followed():
+    from aikiri_ledger import witness as W
+    def moved(h):
+        h.send_response(302); h.send_header("Location", "http://127.0.0.1:1/elsewhere"); h.end_headers()
+    srv, url = _serve(moved)
+    try:
+        with pytest.raises(OSError):
+            W._fetch(url + "/block-height/1")
+    finally:
+        srv.shutdown()
+
+
+def test_a_public_reply_is_read_as_one_line_of_text():
+    from aikiri_ledger import witness as W
+    def ok(h):
+        h.send_response(200); h.end_headers(); h.wfile.write(b"00ab\n")
+    srv, url = _serve(ok)
+    try:
+        assert W._fetch(url + "/block-height/1") == "00ab"
+    finally:
+        srv.shutdown()
+
+
+def test_verify_can_turn_public_sources_off(ledger, trust, monkeypatch):
+    from aikiri_ledger import cli, witness as W
+    seen = []
+    monkeypatch.setattr(cli, "_trust", lambda a: trust)
+    monkeypatch.setattr(cli, "_base_reader", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "verify_all", lambda L, t, base=None, bitcoin=None:
+                        (seen.append(bitcoin.public), (State.BASE_VERIFIED, []))[1])
+    cli.main(["--ledger", str(ledger.root), "verify"])
+    cli.main(["--ledger", str(ledger.root), "verify", "--no-public-bitcoin"])
+    assert seen == [True, False]
 
 
 def test_the_committed_proofs_read_as_proofs_of_their_blocks():
