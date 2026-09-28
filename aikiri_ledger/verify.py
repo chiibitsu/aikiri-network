@@ -232,9 +232,10 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
     if bitcoin is not None:
         pending = 0
         for b in blocks:
-            # BitcoinWitness.verify reads the proof and asks a node only about a block
-            # it names. "Unchecked" is a proof no node could answer for, which is not
-            # the same as wrong; it counts as pending, so FULLY VERIFIED stays out of reach.
+            # BitcoinWitness.verify reads the proof and looks up only a Bitcoin block it
+            # names, from a node or both public sources. "Unchecked" is a proof whose
+            # block header could not be had, which is not the same as wrong; it counts
+            # as pending, so FULLY VERIFIED stays out of reach.
             result, why = bitcoin.verify(b)
             if result == "complete":
                 report.append(f"block {b.index}: Bitcoin proof complete, {why}")

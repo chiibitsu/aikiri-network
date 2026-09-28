@@ -194,10 +194,10 @@ that stamps puts it back.
 Merge it when it appears; a later night upgrades it like any other.
 
 The nightly runner reads the repository's own `trust.json`, so it never reports
-more than `VALID LOCALLY`. It has no Bitcoin node, so verify takes the header of each
-Bitcoin block a complete proof names from mempool.space and blockstream.info: both
-must give the same header, and it must hash to that block and carry Bitcoin's proof
-of work. A proof Bitcoin contradicts makes the night INVALID. When no header can be
+more than `VALID LOCALLY`. Like the block workflow's own verify step, it has no
+Bitcoin node, so verify takes the header of each Bitcoin block a complete proof names
+from mempool.space and blockstream.info: both must give the same header, and it must
+hash to that block and carry Bitcoin's proof of work. A proof Bitcoin contradicts makes the night INVALID. When no header can be
 had (the sources disagree, one is down, or the 60 seconds all Bitcoin lookups share
 run out) the proof is reported as not checked rather than failed, as is every proof
 where python-opentimestamps is not installed. `verify --no-public-bitcoin` asks only

@@ -956,7 +956,33 @@ def test_a_trusted_node_that_hangs_stops_at_the_total_deadline(ledger, trust, mo
     state, report = _read(ledger, trust, monkeypatch, data, Hangs())
     assert time.monotonic() - start < 3
     assert state == State.BASE_VERIFIED
+    (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
+    assert "not checked" in line and "out of time" in line and "could not answer" not in line
+
+
+def test_every_lookup_in_a_run_shares_one_budget(ledger, trust, monkeypatch, easy_work):
+    # four public requests of 0.4 s each fit a fresh 0.6 s apiece, but not one shared 0.6 s
+    import time
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W, "_LOOKUP_BUDGET", 0.6)
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def slow(url):
+        time.sleep(0.4)
+        return public(url)
+    start = time.monotonic()
+    state, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=slow)
+    assert time.monotonic() - start < 1.5
+    assert state == State.BASE_VERIFIED
     assert any("not checked" in r and "out of time" in r for r in report)
+
+
+def test_a_negative_or_empty_target_is_no_target():
+    # Bitcoin's compact form: a set sign bit, or no mantissa, encodes nothing a hash can meet
+    from aikiri_ledger import witness as W
+    assert W._target(0x1d800001) == 0 and W._target(0x1d000000) == 0
+    assert W._target(0x1d00ffff) == 0xffff << 208  # the genesis block's target
 
 
 def _serve(handler_body):
@@ -999,6 +1025,17 @@ def test_a_public_source_that_redirects_is_not_followed():
         srv.shutdown()
 
 
+def test_a_public_reply_of_exactly_the_cap_is_read():
+    from aikiri_ledger import witness as W
+    def full(h):
+        h.send_response(200); h.end_headers(); h.wfile.write(b"0" * W._REPLY_MAX)
+    srv, url = _serve(full)
+    try:
+        assert len(W._fetch(url + "/block-height/1")) == W._REPLY_MAX
+    finally:
+        srv.shutdown()
+
+
 def test_a_public_reply_is_read_as_one_line_of_text():
     from aikiri_ledger import witness as W
     def ok(h):
@@ -1026,7 +1063,7 @@ def test_the_committed_proofs_read_as_proofs_of_their_blocks():
     # blocks 1 and 2's real .ots files, as the calendars wrote them
     from aikiri_ledger import witness as W
     repo = Ledger(Path(__file__).resolve().parent.parent / "ledger")
-    w = W.BitcoinWitness(repo)
+    w = W.BitcoinWitness(repo, public=False)  # once nightly completes them, never the live sources
     w._node = lambda: (_ for _ in ()).throw(ConnectionRefusedError(111, "Connection refused"))
     for i in (1, 2):
         result, why = w.verify(repo.read(i))
