@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "web3[tester]"]
-bitcoin = ["opentimestamps-client"]
+bitcoin = ["opentimestamps-client", "opentimestamps>=0.4.5", "python-bitcoinlib>=0.12.2"]  # verify imports the last two
 
 [project.scripts]
 aikiri-ledger = "aikiri_ledger.cli:main"

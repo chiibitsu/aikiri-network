@@ -449,7 +449,7 @@ def main(argv=None):
         base = btc = None
         if not a.offline:
             base = _base_reader(cfg, trust, a.rpc, need_signer=False)
-            btc = BitcoinWitness(L) if BitcoinWitness.available() else None
+            btc = BitcoinWitness(L)  # verify reads the .ots and runs no ots
         state, report = verify_all(L, trust, base=base, bitcoin=btc)
         print("\n".join(report))
         need = REQUIRE[a.require]
