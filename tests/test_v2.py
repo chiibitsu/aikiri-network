@@ -886,12 +886,23 @@ def test_a_header_that_does_not_hash_to_its_block_is_not_taken(ledger, trust, mo
 
 def test_with_public_sources_off_nothing_public_is_asked(ledger, trust, monkeypatch):
     from aikiri_ledger import witness as W
-    def no_public(url):
-        raise AssertionError(f"verify asked {url}")
-    monkeypatch.setattr(W, "_fetch", no_public)
+    asked = []
+    monkeypatch.setattr(W, "_fetch", asked.append)
     data = _ots_file(ledger.read(0).hash, _btc(800_000))
     state, _ = _read(ledger, trust, monkeypatch, data, _NO_NODE)  # public stays off
-    assert state == State.BASE_VERIFIED
+    assert state == State.BASE_VERIFIED and asked == []
+
+
+def test_a_node_that_cannot_answer_is_not_asked_again_this_run(ledger, trust, monkeypatch):
+    from aikiri_ledger import witness as W
+    node, made = _Node(error=ConnectionRefusedError(111, "Connection refused")), []
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: (made.append(1), node)[1])
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    bitcoin = W.BitcoinWitness(ledger, public=False)
+    for height in (800_000, 800_001):  # two proofs, two Bitcoin blocks, one run
+        ledger.proof_path(0, "hash.ots").write_bytes(_ots_file(ledger.read(0).hash, _btc(height)))
+        assert bitcoin.verify(ledger.read(0))[0] == "unchecked"
+    assert node.asked == [800_000] and made == [1]
 
 
 def test_public_sources_are_the_two_named_over_https():
@@ -976,7 +987,10 @@ def test_a_public_reply_longer_than_any_header_is_not_read():
 def test_a_public_source_that_redirects_is_not_followed():
     from aikiri_ledger import witness as W
     def moved(h):
-        h.send_response(302); h.send_header("Location", "http://127.0.0.1:1/elsewhere"); h.end_headers()
+        if h.path == "/elsewhere":  # what following the redirect would read
+            h.send_response(200); h.end_headers(); h.wfile.write(b"00ab")
+        else:
+            h.send_response(302); h.send_header("Location", "/elsewhere"); h.end_headers()
     srv, url = _serve(moved)
     try:
         with pytest.raises(OSError):

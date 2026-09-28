@@ -14,7 +14,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from web3 import Web3
 
@@ -254,8 +257,12 @@ class BitcoinWitness:
     """Stamps and upgrades with the `ots` CLI (opentimestamps-client), which needs the
     calendars; verifies by reading the .ots, and a complete one needs only Bitcoin."""
 
-    def __init__(self, ledger: Ledger):
+    def __init__(self, ledger: Ledger, public: bool = True):
         self.ledger = ledger
+        self.public = public   # ask mempool.space and blockstream.info when no node answers
+        self._headers = {}     # height -> header, or why it could not be had, for this run
+        self._node_state = None  # not tried yet, the node, or why it cannot answer
+        self._deadline = None  # set by the first Bitcoin lookup of this run
 
     @staticmethod
     def available() -> bool:
@@ -471,20 +478,15 @@ class BitcoinWitness:
             return "failed", "no attestation that leads to Bitcoin"
 
         # One attestation Bitcoin confirms is enough. One it contradicts fails the
-        # proof, whatever else the node could not answer; only when neither happens is
+        # proof, whatever else could not be looked up; only when neither happens is
         # the proof unchecked. Either way nothing short of a confirmed block is complete.
-        try:
-            node = self._node()
-        except Exception as e:
-            return "unchecked", f"no Bitcoin node answered: {_plain(str(e))}"
         contradicted, unanswered = [], ""
         for height, msg in attested:
             try:
-                header = node.getblockheader(node.getblockhash(height))
-            except Exception as e:
-                # Behind that block (IndexError), warming up, refused, timed out: it is
-                # not asked again. Heights go up, so a node behind this one is behind the rest.
-                unanswered = f"the Bitcoin node could not answer for block {height}: {_plain(str(e))}"
+                header = self._header(height)
+            except _Unanswered as e:
+                # Heights go up, so a block not to be had leaves the rest unasked.
+                unanswered = f"Bitcoin block {height} could not be looked up: {_plain(str(e))}"
                 break
             try:
                 BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
@@ -496,10 +498,141 @@ class BitcoinWitness:
             return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
         return "unchecked", unanswered
 
+    def _header(self, height: int):
+        """Bitcoin block `height`'s header, looked up once per run; _Unanswered if not to be had."""
+        if height not in self._headers:
+            try:
+                self._headers[height] = self._look_up(height)
+            except _Unanswered as e:
+                self._headers[height] = e
+        got = self._headers[height]
+        if isinstance(got, _Unanswered):
+            raise got
+        return got
+
+    def _look_up(self, height: int):
+        """From the node while it answers; else from both public sources, if they are on."""
+        if self._node_state is None:
+            try:
+                self._node_state = self._node()
+            except Exception as e:
+                self._node_state = f"no Bitcoin node answered: {_plain(str(e))}"
+        if not isinstance(self._node_state, str):
+            node = self._node_state
+            try:
+                return self._within(lambda: node.getblockheader(node.getblockhash(height)))
+            except _OutOfTime:
+                raise
+            except Exception as e:
+                # Behind that block (IndexError), warming up, refused: not asked again this run.
+                self._node_state = f"the Bitcoin node could not answer: {_plain(str(e))}"
+        if not self.public:
+            raise _Unanswered(self._node_state)
+        return self._from_public(height)
+
+    def _from_public(self, height: int):
+        """The header both public sources give, if it hashes to the block they name and
+        carries Bitcoin's proof of work. Neither source is trusted with anything else."""
+        got = []
+        for base in _PUBLIC_SOURCES:
+            host = base.split("/")[2]
+            try:
+                block_hash = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
+                raw = _hex(self._within(_fetch, f"{base}/block/{block_hash.hex()}/header"), 80)
+            except _OutOfTime:
+                raise
+            except Exception as e:
+                raise _Unanswered(f"{host}: {_plain(str(e)) or type(e).__name__}; {self._node_state}")
+            got.append((raw, block_hash))
+        if len(set(got)) != 1:
+            raise _Unanswered(f"the public sources do not agree on it; {self._node_state}")
+        return _worked(*got[0])
+
+    def _within(self, fn, *args):
+        """fn(*args), unless the run's Bitcoin lookup budget runs out first. What is
+        still running then is left behind, never waited for."""
+        if self._deadline is None:
+            self._deadline = time.monotonic() + _LOOKUP_BUDGET
+        left = self._deadline - time.monotonic()
+        box = {}
+
+        def run():
+            try:
+                box["value"] = fn(*args)
+            except BaseException as e:
+                box["error"] = e
+        if left > 0:
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(left)
+        if not box:
+            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per verify run")
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+
+class _Unanswered(Exception):
+    """A Bitcoin block's header was not to be had: the proof is not checked, never failed."""
+
+
+class _OutOfTime(_Unanswered):
+    pass
+
+
+def _fetch(url: str) -> str:
+    """One GET: the reply's text, if it is at most _REPLY_MAX bytes. Redirects are refused."""
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    request = urllib.request.Request(url, headers={"User-Agent": "aikiri-ledger"})
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=_LOOKUP_BUDGET) as r:
+        body = r.read(_REPLY_MAX + 1)
+    if len(body) > _REPLY_MAX:
+        raise OSError("a reply longer than any header")
+    return body.decode("ascii").strip()
+
+
+def _hex(text: str, size: int) -> bytes:
+    if not re.fullmatch(f"[0-9a-f]{{{2 * size}}}", text):
+        raise OSError(f"not {size} bytes of hex")
+    return bytes.fromhex(text)
+
+
+def _target(bits: int) -> int:
+    """The target a header's nBits encodes (Bitcoin's compact form); 0 if negative or empty."""
+    exponent, mantissa = bits >> 24, bits & 0x007fffff
+    if bits & 0x00800000 or not mantissa:
+        return 0
+    return mantissa << 8 * (exponent - 3) if exponent >= 3 else mantissa >> 8 * (3 - exponent)
+
+
+def _worked(raw: bytes, block_hash: bytes):
+    """The header in `raw`, if it hashes to `block_hash` (as shown, most significant byte
+    first) and carries at least mainnet-scale proof of work; else _Unanswered."""
+    h = hashlib.sha256(hashlib.sha256(raw).digest()).digest()
+    if h[::-1] != block_hash:
+        raise _Unanswered("a header that does not hash to the block it was given for")
+    target = _target(int.from_bytes(raw[72:76], "little"))
+    if target > _MAX_TARGET:
+        raise _Unanswered("a header with less proof of work than Bitcoin's main chain")
+    if int.from_bytes(h, "little") > target:
+        raise _Unanswered("a header whose hash does not meet its own proof of work")
+    return SimpleNamespace(hashMerkleRoot=raw[36:68], nTime=int.from_bytes(raw[68:72], "little"))
+
 
 _OTS_MAX = 64 << 10     # bytes; a proof is a few KB (4 calendars x 10,000 at most), and reading costs size squared
 _NODE_TIMEOUT = 30      # seconds the node may stay silent; not a limit on a whole request
 _BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots uses four
+_PUBLIC_SOURCES = ("https://mempool.space/api", "https://blockstream.info/api")
+_LOOKUP_BUDGET = 60     # seconds for every Bitcoin lookup in one verify run, node and public
+_REPLY_MAX = 1024       # bytes; a block hash is 64 hex characters, a header 160
+# Difficulty 5e13: half Bitcoin's average over blocks 856,760 to 886,157 (from Bitcoin
+# Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
+# block's mining to make; one with less is not taken from a public source.
+_MAX_TARGET = (0xffff << 208) // (5 * 10**13)
 
 
 def _read_regular(p: Path, limit: int) -> bytes | None:

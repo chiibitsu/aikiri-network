@@ -62,7 +62,7 @@ BASE VERIFIED — BITCOIN PENDING
 FULLY VERIFIED
 ```
 
-There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. Verify reads each Bitcoin proof (`.ots`) itself: it must be a proof of that block's hash, and one that names a Bitcoin block is checked against a Bitcoin node. Where no node answers for that block, the report says the proof was not checked and the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`. Verify asks no calendar; a proof not yet in a Bitcoin block is pending.
+There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. Verify reads each Bitcoin proof (`.ots`) itself: it must be a proof of that block's hash, and one that names a Bitcoin block is checked against that block's header. The header comes from your Bitcoin node (the one `~/.bitcoin/bitcoin.conf` names) or, when no node answers, from both mempool.space and blockstream.info: they must give the same header, and it must hash to the block they name and carry Bitcoin's proof of work. `--no-public-bitcoin` turns the public sources off. All Bitcoin lookups in one run share a 60-second limit. Where no header can be had, the report says the proof was not checked and the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`. Verify asks no calendar; a proof not yet in a Bitcoin block is pending.
 
 ```
 aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
