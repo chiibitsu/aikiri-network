@@ -841,6 +841,43 @@ def test_public_sources_agreeing_on_a_block_without_the_proof_fail_it(ledger, tr
     assert any("Bitcoin block 800000 does not carry it" in r for r in report)
 
 
+def test_what_a_public_source_says_never_reaches_the_report(ledger, trust, monkeypatch, easy_work):
+    # a source's own words could be a link in nightly's step summary: only the host
+    # and the kind of failure are reported, never the source's text
+    import urllib.error
+    data = _ots_file(ledger.read(0).hash, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    said = "re-verify at [this link](https://evil.example)"
+    for failure, kind in ((urllib.error.HTTPError("u", 503, said, None, None), "HTTP 503"),
+                          (OSError(said), "OSError")):
+        public = _Public(**{"mempool.space": failure, "blockstream.info": block})
+        _, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
+        (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
+        assert f"mempool.space: {kind}" in line and "evil" not in line and "[" not in line
+
+
+def test_a_block_that_could_not_be_looked_up_is_not_asked_again_this_run(ledger, trust, monkeypatch):
+    from aikiri_ledger import witness as W
+    public = _Public(**{"mempool.space": OSError("down"), "blockstream.info": OSError("down")})
+    monkeypatch.setattr(W, "_fetch", public)
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: (_ for _ in ()).throw(_NO_NODE))
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(_ots_file(ledger.read(0).hash, _btc(800_000)))
+    bitcoin = W.BitcoinWitness(ledger)
+    assert bitcoin.verify(ledger.read(0))[0] == "unchecked"
+    assert bitcoin.verify(ledger.read(0))[0] == "unchecked"
+    assert len(public.asked) == 1  # the first source failed once, and was not asked again
+
+
+def test_a_small_exponent_shifts_the_target_down():
+    # Bitcoin Core's compact form below exponent 3 (arith_uint256::SetCompact)
+    from aikiri_ledger import witness as W
+    assert W._target(0x01123456) == 0x12
+    assert W._target(0x02123456) == 0x1234
+    assert W._target(0x03123456) == 0x123456
+    assert W._target(0x04123456) == 0x12345600
+
+
 def test_a_public_header_without_its_proof_of_work_is_not_taken(ledger, trust, monkeypatch, easy_work):
     data = _ots_file(ledger.read(0).hash, _btc(800_000))
     block = {800_000: _unworked(_roots(data)[800_000])}
