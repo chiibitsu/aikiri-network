@@ -542,7 +542,7 @@ class BitcoinWitness:
             except _OutOfTime:
                 raise
             except Exception as e:
-                raise _Unanswered(f"{host}: {_plain(str(e)) or type(e).__name__}; {self._node_state}")
+                raise _Unanswered(f"{host}: {_kind(e)}; {self._node_state}")
             got.append((raw, block_hash))
         if len(set(got)) != 1:
             raise _Unanswered(f"the public sources do not agree on it; {self._node_state}")
@@ -580,6 +580,21 @@ class _OutOfTime(_Unanswered):
     pass
 
 
+class _BadReply(OSError):
+    """A public source's reply that is not what was asked for; the message is ours."""
+
+
+def _kind(e: Exception) -> str:
+    """What went wrong with a public source, in our words only: a source's own text
+    (an HTTP reason phrase, say) could put a link into nightly's step summary."""
+    import urllib.error
+    if isinstance(e, _BadReply):
+        return str(e)
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {int(e.code)}"
+    return type(e).__name__
+
+
 def _fetch(url: str) -> str:
     """One GET: the reply's text, if it is at most _REPLY_MAX bytes. Redirects are refused."""
     import urllib.request
@@ -591,13 +606,13 @@ def _fetch(url: str) -> str:
     with urllib.request.build_opener(NoRedirect).open(request, timeout=_LOOKUP_BUDGET) as r:
         body = r.read(_REPLY_MAX + 1)
     if len(body) > _REPLY_MAX:
-        raise OSError("a reply longer than any header")
+        raise _BadReply("a reply longer than any header")
     return body.decode("ascii").strip()
 
 
 def _hex(text: str, size: int) -> bytes:
     if not re.fullmatch(f"[0-9a-f]{{{2 * size}}}", text):
-        raise OSError(f"not {size} bytes of hex")
+        raise _BadReply(f"not {size} bytes of hex")
     return bytes.fromhex(text)
 
 

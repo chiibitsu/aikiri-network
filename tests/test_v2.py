@@ -853,7 +853,7 @@ def test_what_a_public_source_says_never_reaches_the_report(ledger, trust, monke
         public = _Public(**{"mempool.space": failure, "blockstream.info": block})
         _, report = _read(ledger, trust, monkeypatch, data, _NO_NODE, public=public)
         (line,) = [r for r in report if r.startswith("block 0: Bitcoin")]
-        assert f"mempool.space: {kind}" in line and "evil" not in line and "[" not in line
+        assert f"mempool.space: {kind}" in line and "evil" not in line and "this link" not in line
 
 
 def test_a_block_that_could_not_be_looked_up_is_not_asked_again_this_run(ledger, trust, monkeypatch):
