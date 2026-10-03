@@ -770,7 +770,10 @@ def _unworked(root, bits=_EASY_BITS):
 
 
 class _Public:
-    """Stand-in for _fetch: each source's {height: (header, hash hex)}, or an error."""
+    """Stand-in for _fetch: each source's {height: (header, hash hex)}, or an error.
+    Each source's chain tip is at `tip`."""
+    tip = 900_000
+
     def __init__(self, **by_source):
         self.by_source, self.asked = by_source, []
 
@@ -786,6 +789,8 @@ class _Public:
         if isinstance(answer, BaseException):
             raise answer
         path = url[len(base):]
+        if path == "/blocks/tip/height":
+            return str(self.tip)
         for height, (raw, block_hash) in answer.items():
             if path == f"/block-height/{height}":
                 return block_hash
@@ -964,6 +969,341 @@ def test_each_bitcoin_block_is_looked_up_once_per_run(ledger, trust, monkeypatch
     assert bitcoin.verify(ledger.read(0))[0] == "complete"
     assert bitcoin.verify(ledger.read(0))[0] == "complete"
     assert len(public.asked) == 4 and len(made) == 1  # two requests per source, one node
+
+
+# ----------------------------------------- Bitcoin headers saved beside proofs ----
+# A Bitcoin header deep in the chain never changes, so once a block is confirmed its
+# header is saved beside the proof (nightly's upgrade does it, and proposes it with
+# the proofs). Verify checks a saved header itself; one that does not hold is ignored
+# and the block looked up as before. A saved header confirms a proof, never fails one.
+
+def _save(ledger, index, *lines, text=None):
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    body = text if text is not None else "".join(f"{h} {raw.hex()}\n" for h, raw in lines)
+    ledger.proof_path(index, "btc-header").write_text(body)
+
+
+def _lookups(monkeypatch, public=None):
+    """Every node or public request a BitcoinWitness makes, the node never answering."""
+    from aikiri_ledger import witness as W
+    asked = []
+    def fetch(url):
+        asked.append(url)
+        if public is None:
+            raise OSError("down")
+        return public(url)
+    def node(_self):
+        asked.append("node")
+        raise _NO_NODE
+    monkeypatch.setattr(W, "_fetch", fetch)
+    monkeypatch.setattr(W.BitcoinWitness, "_node", node)
+    return asked
+
+
+def _proof_of_block_0(ledger, *atts):
+    data = _ots_file(ledger.read(0).hash, *atts)
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(data)
+    return data
+
+
+def test_a_saved_header_completes_the_proof_with_no_lookup(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    asked = _lookups(monkeypatch)
+    result, why = W.BitcoinWitness(ledger).verify(ledger.read(0))
+    assert (result, asked) == ("complete", []) and "saved header" in why
+
+
+def test_a_saved_header_that_does_not_carry_the_proof_never_fails_it(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(b"\x11" * 32)[0]))
+    asked = _lookups(monkeypatch)  # and the block cannot be looked up
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked" and asked
+
+
+def test_a_saved_header_without_the_work_is_not_taken(ledger, monkeypatch):
+    # at the real floor, a header mined at regtest's difficulty is not Bitcoin's
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
+
+
+@pytest.mark.parametrize("kind", ["link", "huge", "junk", "long height", "other height"])
+def test_a_saved_header_file_that_is_not_one_is_ignored(ledger, monkeypatch, easy_work, kind):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw = _mined(_roots(data)[800_000])[0]
+    if kind == "link":
+        real = ledger.proofs_dir / "elsewhere"
+        real.write_text(f"800000 {raw.hex()}\n")
+        ledger.proof_path(0, "btc-header").symlink_to(real)
+    elif kind == "huge":
+        _save(ledger, 0, text=f"800000 {raw.hex()}\n" * 100)
+    elif kind == "junk":
+        _save(ledger, 0, text=f"800000 {raw.hex()[:-1]}\nnot a header\n")
+    elif kind == "long height":
+        _save(ledger, 0, text="9" * 5000 + f" {raw.hex()}\n")
+    else:
+        _save(ledger, 0, (800_001, raw))  # saved for a block the proof does not name
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
+
+
+def test_a_confirmed_header_is_saved_beside_the_proof(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, block_hash = _mined(_roots(data)[800_000])
+    block = {800_000: (raw, block_hash)}
+    _lookups(monkeypatch, _Public(**{"mempool.space": block, "blockstream.info": block}))
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == "saved"
+    assert ledger.proof_path(0, "btc-header").read_text() == f"800000 {raw.hex()}\n"
+
+
+def test_a_header_the_node_confirms_is_saved_too(ledger, monkeypatch, easy_work):
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    class Node:
+        def getblockhash(self, height):
+            return b"\x00" * 32
+        def getblockheader(self, block_hash):
+            return CBlockHeader.deserialize(raw)  # what python-bitcoinlib's Proxy returns
+        def getblockcount(self):
+            return 900_000
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    assert W.BitcoinWitness(ledger, public=False).save_header(ledger.read(0)) == "saved"
+    assert ledger.proof_path(0, "btc-header").read_text() == f"800000 {raw.hex()}\n"
+
+
+@pytest.mark.parametrize("tip, saved", [(800_004, False), (800_005, True)])
+def test_a_header_is_saved_only_once_six_blocks_bury_it(ledger, monkeypatch, easy_work, tip, saved):
+    # a block with fewer on top can still be replaced; its header must not stay saved
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    public.tip = tip
+    _lookups(monkeypatch, public)
+    said = W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert (said == "saved") is saved and ledger.proof_path(0, "btc-header").exists() is saved
+    if not saved:
+        assert "confirmations" in said
+
+
+def test_the_shallower_tip_of_the_two_sources_decides(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        if url == "https://blockstream.info/api/blocks/tip/height":
+            return "800003"
+        return public(url)
+    _lookups(monkeypatch, fetch)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)).startswith("not saved")
+
+
+def test_a_header_the_node_has_not_buried_is_not_saved(ledger, monkeypatch, easy_work):
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    class Node:
+        def getblockhash(self, height):
+            return b"\x00" * 32
+        def getblockheader(self, block_hash):
+            return CBlockHeader.deserialize(raw)
+        def getblockcount(self):
+            return 800_002
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    said = W.BitcoinWitness(ledger, public=False).save_header(ledger.read(0))
+    assert "confirmations" in said and not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_no_header_is_saved_when_the_chain_tip_cannot_be_had(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        if url.endswith("/blocks/tip/height"):
+            raise OSError("down")
+        return public(url)
+    _lookups(monkeypatch, fetch)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)).startswith("not saved")
+    assert not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_a_tip_that_is_not_a_height_saves_nothing(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        return "<html>tip</html>" if url.endswith("/blocks/tip/height") else public(url)
+    _lookups(monkeypatch, fetch)
+    said = W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert "not a block height" in said and not ledger.proof_path(0, "btc-header").exists()
+
+
+def _saving(ledger, monkeypatch):
+    """Block 0's proof, confirmed by both public sources at a buried height."""
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, block_hash = _mined(_roots(data)[800_000])
+    block = {800_000: (raw, block_hash)}
+    _lookups(monkeypatch, _Public(**{"mempool.space": block, "blockstream.info": block}))
+    return raw
+
+
+def test_saving_replaces_a_link_and_never_writes_through_it(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    raw = _saving(ledger, monkeypatch)
+    outside = ledger.root.parent / "outside.txt"
+    outside.write_text("untouched")
+    ledger.proof_path(0, "btc-header").symlink_to(outside)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == "saved"
+    p = ledger.proof_path(0, "btc-header")
+    assert not p.is_symlink() and p.read_text() == f"800000 {raw.hex()}\n"
+    assert outside.read_text() == "untouched"
+
+
+def test_a_save_that_fails_leaves_no_temp_file(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    _saving(ledger, monkeypatch)
+    ledger.proof_path(0, "btc-header").mkdir()  # nothing can be moved over a directory
+    with pytest.raises(OSError):
+        W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert not list(ledger.proofs_dir.glob("*.tmp"))
+
+
+def test_a_saved_header_that_cannot_be_read_is_ignored(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    real = W._read_regular
+    def unreadable(p, limit):
+        if p.name.endswith(".btc-header"):
+            raise PermissionError(13, "Permission denied")
+        return real(p, limit)
+    monkeypatch.setattr(W, "_read_regular", unreadable)
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
+
+
+@pytest.mark.parametrize("first", ["none saved", "one that does not carry it"])
+def test_one_saved_header_among_several_blocks_is_enough(ledger, monkeypatch, easy_work, first):
+    # good for the second block the proof names, not the first: still complete, no lookup
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000), _btc(800_001))
+    good = (800_001, _mined(_roots(data)[800_001])[0])
+    if first == "none saved":
+        _save(ledger, 0, good)
+    else:
+        _save(ledger, 0, (800_000, _mined(b"\x11" * 32)[0]), good)
+    asked = _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "complete" and asked == []
+
+
+def test_a_node_header_without_the_work_is_not_saved(ledger, monkeypatch):
+    # verify would never take it back from the file, so it would be saved every night
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])  # regtest's difficulty, below the floor
+    class Node:
+        def getblockhash(self, height):
+            return b"\x00" * 32
+        def getblockheader(self, block_hash):
+            return CBlockHeader.deserialize(raw)
+        def getblockcount(self):
+            return 900_000
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    said = W.BitcoinWitness(ledger, public=False).save_header(ledger.read(0))
+    assert said.startswith("not saved") and not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_a_saved_header_is_readable_like_the_proofs(ledger, monkeypatch, easy_work):
+    import os
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    _lookups(monkeypatch, _Public(**{"mempool.space": block, "blockstream.info": block}))
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == "saved"
+    umask = os.umask(0); os.umask(umask)
+    assert ledger.proof_path(0, "btc-header").stat().st_mode & 0o777 == 0o666 & ~umask
+
+
+def test_no_header_is_saved_for_a_proof_not_yet_complete(ledger, monkeypatch):
+    from aikiri_ledger import witness as W
+    _proof_of_block_0(ledger, _pending())
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)).startswith("not saved")
+    assert not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_a_header_already_saved_is_not_looked_up_or_written_again(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    before = ledger.proof_path(0, "btc-header").stat().st_mtime_ns
+    asked = _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == "already saved"
+    assert asked == [] and ledger.proof_path(0, "btc-header").stat().st_mtime_ns == before
+
+
+def test_upgrade_saves_the_header_of_each_complete_proof(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    saved = []
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "complete")
+    monkeypatch.setattr(W.BitcoinWitness, "save_header",
+                        lambda self, b: (saved.append(b.index), "saved")[1])
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert saved == [0] and "block 0: Bitcoin header saved" in capsys.readouterr().out
+
+
+def test_upgrade_says_why_a_complete_proofs_header_was_not_saved(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "complete")
+    monkeypatch.setattr(W.BitcoinWitness, "save_header",
+                        lambda self, b: "not saved: Bitcoin block 800000 has 3 confirmations, 6 needed")
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert "block 0: Bitcoin header not saved: Bitcoin block 800000 has 3" in capsys.readouterr().out
+
+
+def test_upgrade_is_quiet_about_proofs_not_yet_complete(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    _proof_of_block_0(ledger, _pending())
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "pending")
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert "header" not in capsys.readouterr().out
+
+
+def test_upgrade_says_so_when_a_header_cannot_be_saved(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "complete")
+    def cannot(self, b):
+        raise OSError("[Errno 28] No space left\non device")
+    monkeypatch.setattr(W.BitcoinWitness, "save_header", cannot)
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if "header" in l]
+    assert "could not save its Bitcoin header" in line and "No space left?on device" in line
 
 
 def test_bitcoin_lookups_stop_at_the_total_deadline(ledger, trust, monkeypatch):
