@@ -175,6 +175,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--rpc", action="append", default=[])
     v.add_argument("--offline", action="store_true", help="skip the witnesses entirely")
     v.add_argument("--require", choices=sorted(REQUIRE), default="full")
+    v.add_argument("--no-public-bitcoin", action="store_true",
+                   help="never ask mempool.space or blockstream.info for Bitcoin headers")
 
     d = sub.add_parser("deploy"); d.add_argument("--rpc", required=True)
     d.add_argument("--chain-id", type=int, default=8453)
@@ -449,7 +451,7 @@ def main(argv=None):
         base = btc = None
         if not a.offline:
             base = _base_reader(cfg, trust, a.rpc, need_signer=False)
-            btc = BitcoinWitness(L)  # verify reads the .ots and runs no ots
+            btc = BitcoinWitness(L, public=not a.no_public_bitcoin)  # reads the .ots, runs no ots
         state, report = verify_all(L, trust, base=base, bitcoin=btc)
         print("\n".join(report))
         need = REQUIRE[a.require]
