@@ -263,7 +263,7 @@ class BitcoinWitness:
         self._headers = {}     # height -> header, or why it could not be had, for this run
         self._node_state = None  # not tried yet, the node, or why it cannot answer
         self._deadline = None  # set by the first Bitcoin lookup of this run
-        self._confirmed = {}   # block index -> (Bitcoin height, raw header or None, from a saved one)
+        self._confirmed = {}   # block index -> (Bitcoin height, raw header or None, "saved" | "node" | "public")
 
     @staticmethod
     def available() -> bool:
@@ -478,9 +478,6 @@ class BitcoinWitness:
                 return "pending", "not yet in a Bitcoin block"
             return "failed", "no attestation that leads to Bitcoin"
 
-        # One attestation Bitcoin confirms is enough. One it contradicts fails the
-        # proof, whatever else could not be looked up; only when neither happens is
-        # the proof unchecked. Either way nothing short of a confirmed block is complete.
         # A saved header (see save_header) is taken only if it carries this proof and
         # Bitcoin's proof of work; any other is ignored, and the block looked up.
         saved = self._saved_headers(block)
@@ -492,9 +489,12 @@ class BitcoinWitness:
                 BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
             except VerificationError:
                 continue
-            self._confirmed[block.index] = (height, header.raw, True)
+            self._confirmed[block.index] = (height, header.raw, "saved")
             return "complete", f"in Bitcoin block {height}, by its saved header"
 
+        # One attestation Bitcoin confirms is enough. One it contradicts fails the
+        # proof, whatever else could not be looked up; only when neither happens is
+        # the proof unchecked. Either way nothing short of a confirmed block is complete.
         contradicted, unanswered = [], ""
         for height, msg in attested:
             try:
@@ -511,7 +511,7 @@ class BitcoinWitness:
             raw = getattr(header, "raw", None)
             if raw is None and hasattr(header, "serialize"):  # python-bitcoinlib's, from the node
                 raw = header.serialize()
-            self._confirmed[block.index] = (height, raw, False)
+            self._confirmed[block.index] = (height, raw, "public" if isinstance(self._node_state, str) else "node")
             return "complete", f"in Bitcoin block {height}"
         if contradicted:
             return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
@@ -520,27 +520,54 @@ class BitcoinWitness:
     def save_header(self, block: Block) -> str:
         """Saves the header of the Bitcoin block that confirms this proof beside it, as
         <index>.btc-header, so later runs need no lookup: "saved", "already saved", or
-        why not. A header deep in the chain never changes."""
+        why not. Only once _SAVE_DEPTH blocks bury it (the block itself counted), by
+        the same source's chain tip: a buried header never changes, a shallow one can
+        still be replaced."""
         result, _ = self.verify(block)
         if result != "complete":
             return f"not saved: the proof is {result}"
-        height, raw, from_saved = self._confirmed[block.index]
-        if from_saved:
+        height, raw, source = self._confirmed[block.index]
+        if source == "saved":
             return "already saved"
         if raw is None or len(raw) != 80:
             return "not saved: no header to save"
+        if _from_saved(raw) is None:  # verify would never take it back from the file
+            return "not saved: the header has less proof of work than Bitcoin's main chain"
+        try:
+            tip = self._tip(source)
+        except Exception as e:  # out of time, or the tip not to be had
+            return f"not saved: the chain's tip could not be had ({_kind(e) if source == 'public' else _plain(str(e))})"
+        if tip - height + 1 < _SAVE_DEPTH:
+            return f"not saved: Bitcoin block {height} has {max(tip - height + 1, 0)} confirmations, {_SAVE_DEPTH} needed"
         import tempfile
         p = self.ledger.proof_path(block.index, "btc-header")
         fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(f"{height} {raw.hex()}\n")
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp, 0o666 & ~umask)  # readable like the proofs; mkstemp makes 0600
             os.replace(tmp, p)  # replaces a link there, never writes through it
         except BaseException:
             if os.path.lexists(tmp):
                 os.unlink(tmp)
             raise
         return "saved"
+
+    def _tip(self, source: str) -> int:
+        """The height of the chain's tip, as the source that confirmed the block sees it:
+        the node, or the lower of the two public sources' tips."""
+        if source == "node":
+            node = self._node_state
+            return int(self._within(node.getblockcount))
+        tips = []
+        for base in _PUBLIC_SOURCES:
+            text = self._within(_fetch, f"{base}/blocks/tip/height")
+            if not re.fullmatch(r"\d{1,8}", text):
+                raise _BadReply("not a block height")
+            tips.append(int(text))
+        return min(tips)
 
     def _saved_headers(self, block: Block) -> dict:
         """{Bitcoin height: raw header} from the block's .btc-header, if that is a small
@@ -718,9 +745,10 @@ _PUBLIC_SOURCES = ("https://mempool.space/api", "https://blockstream.info/api")
 _LOOKUP_BUDGET = 60     # seconds for every Bitcoin lookup in one verify run, node and public
 _REPLY_MAX = 1024       # bytes; a block hash is 64 hex characters, a header 160
 _SAVED_MAX = 4096       # bytes of a saved .btc-header: a line per Bitcoin block, ots uses four
+_SAVE_DEPTH = 6         # confirmations before a header is saved: the block and five on top
 # Difficulty 5e13: half Bitcoin's average over blocks 856,760 to 886,157 (from Bitcoin
 # Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
-# block's mining to make; one with less is not taken from a public source.
+# block's mining to make; one with less is not taken from a public source or a saved file.
 _MAX_TARGET = (0xffff << 208) // (5 * 10**13)
 
 

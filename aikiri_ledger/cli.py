@@ -10,7 +10,8 @@
   block                     write the block a sealed request approves
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
-  upgrade                   fetch what the calendars have for pending Bitcoin proofs
+  upgrade                   fetch what the calendars have for pending Bitcoin proofs, and
+                            save the Bitcoin header of each confirmed one beside it
   stamp                     stamp on Bitcoin every block with no .ots yet; a good
                             .ots.bak is put back instead, a bad one blocks it
   proof-status <index>      what the block's Bitcoin proof file is, in one line
@@ -387,8 +388,11 @@ def main(argv=None):
             if not os.path.lexists(L.proof_path(blk.index, "hash.ots")):
                 continue
             try:
-                if bw.save_header(blk) == "saved":
+                said = bw.save_header(blk)
+                if said == "saved":
                     print(f"block {blk.index}: Bitcoin header saved beside its proof")
+                elif said.startswith("not saved") and not said.startswith("not saved: the proof is"):
+                    print(f"block {blk.index}: Bitcoin header {said}")
             except OSError as e:  # the folder not writable
                 print(f"block {blk.index}: could not save its Bitcoin header ({_plain(str(e))})")
         return 0
