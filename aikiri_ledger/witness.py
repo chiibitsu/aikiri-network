@@ -744,7 +744,7 @@ _BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots
 _PUBLIC_SOURCES = ("https://mempool.space/api", "https://blockstream.info/api")
 _LOOKUP_BUDGET = 60     # seconds for every Bitcoin lookup in one verify run, node and public
 _REPLY_MAX = 1024       # bytes; a block hash is 64 hex characters, a header 160
-_SAVED_MAX = 4096       # bytes of a saved .btc-header: a line per Bitcoin block, ots uses four
+_SAVED_MAX = 4096       # bytes of a saved .btc-header: save_header writes one 168-byte line
 _SAVE_DEPTH = 6         # confirmations before a header is saved: the block and five on top
 # Difficulty 5e13: half Bitcoin's average over blocks 856,760 to 886,157 (from Bitcoin
 # Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
