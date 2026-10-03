@@ -1105,6 +1105,20 @@ def test_upgrade_saves_the_header_of_each_complete_proof(ledger, monkeypatch, ca
     assert saved == [0] and "block 0: Bitcoin header saved" in capsys.readouterr().out
 
 
+def test_upgrade_says_so_when_a_header_cannot_be_saved(ledger, monkeypatch, capsys):
+    from aikiri_ledger import cli, witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "complete")
+    def cannot(self, b):
+        raise OSError("[Errno 28] No space left\non device")
+    monkeypatch.setattr(W.BitcoinWitness, "save_header", cannot)
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if "header" in l]
+    assert "could not save its Bitcoin header" in line and "No space left?on device" in line
+
+
 def test_bitcoin_lookups_stop_at_the_total_deadline(ledger, trust, monkeypatch):
     import time
     from aikiri_ledger import witness as W

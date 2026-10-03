@@ -44,7 +44,7 @@ from . import softkey
 from .trust import Trust
 from .verify import State, verify_all
 from .witness import (BASE_KEY_ENV, BaseWitness, BitcoinWitness, OtsError, QuorumBase, base_key_from_env,
-                      compile_contract, find_deployment, receipt_cost, wait_for_code)
+                      _plain, compile_contract, find_deployment, receipt_cost, wait_for_code)
 
 DEFAULT_KEYFILE = os.path.expanduser("~/.aikiri/chii.key")
 DEFAULT_BASE_ENV = os.path.expanduser("~/.aikiri/base.env")
@@ -382,6 +382,15 @@ def main(argv=None):
                                                 "pending": "still pending"}.get(done, done))
             except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"block {blk.index}: could not check or upgrade the proof file ({e})")
+        # A complete proof's Bitcoin header is saved beside it, so verify needs no lookup.
+        for blk in L.blocks():
+            if not os.path.lexists(L.proof_path(blk.index, "hash.ots")):
+                continue
+            try:
+                if bw.save_header(blk) == "saved":
+                    print(f"block {blk.index}: Bitcoin header saved beside its proof")
+            except OSError as e:  # the folder not writable
+                print(f"block {blk.index}: could not save its Bitcoin header ({_plain(str(e))})")
         return 0
 
     if a.cmd == "proof-status":

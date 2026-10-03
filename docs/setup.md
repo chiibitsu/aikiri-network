@@ -202,6 +202,11 @@ had (the sources disagree, one is down, or the 60 seconds all Bitcoin lookups sh
 run out) the proof is reported as not checked rather than failed, as is every proof
 where python-opentimestamps is not installed. `verify --no-public-bitcoin` asks only
 the node. Verify asks no calendar; a proof not yet in a Bitcoin block is pending until
-nightly's upgrade moves it along.
+nightly's upgrade moves it along. Once a proof is complete, the same upgrade saves the
+header of the Bitcoin block that confirms it as `<index>.btc-header` beside the proof,
+and the nightly PR carries it with the proofs. A Bitcoin header deep in the chain never
+changes, so each block is looked up once, not every night. Verify still checks a saved
+header itself (it must carry the proof and Bitcoin's proof of work) and ignores one
+that does not; a saved header can confirm a proof, never fail one.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin block header from a node or from both public sources.
