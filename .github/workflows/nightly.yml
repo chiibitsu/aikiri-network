@@ -1,9 +1,9 @@
 name: nightly
 # Writes no blocks. Blocks are written only when Chii approves a request
 # on one of her devices, so there is nothing for a schedule to sign. What is left
-# is worth doing nightly: upgrade pending Bitcoin proofs, stamp any block with no
-# proof file yet, re-verify the whole chain against Base, and say plainly which of
-# the four states it is in.
+# is worth doing nightly: upgrade pending Bitcoin proofs, save the Bitcoin header of
+# each confirmed one, stamp any block with no proof file yet, re-verify the whole
+# chain against Base, and say plainly which of the four states it is in.
 #
 # A new or upgraded proof is not pushed to main directly. It is proposed as a pull
 # request instead: this job's token can open a PR and push the branch behind
@@ -37,7 +37,7 @@ jobs:
         run: |
           pip install --require-hashes -r requirements.lock
           pip install --no-deps -e .
-      - name: upgrade pending Bitcoin proofs
+      - name: upgrade pending Bitcoin proofs, and save confirmed ones' Bitcoin headers
         run: aikiri-ledger upgrade || true
       - name: stamp any block with no Bitcoin proof file yet
         run: aikiri-ledger stamp || true
@@ -55,6 +55,9 @@ jobs:
             OpenTimestamps proofs upgraded since the last run (complete, or
             with new attestations and possibly still pending; the run's log
             says which), and a first, pending proof for any block that had none.
+            It may also carry a saved Bitcoin header (<index>.btc-header) for
+            each proof whose Bitcoin block has six confirmations, so verify needs
+            no lookup for it; verify still checks each one itself.
             Only ledger/proofs changes here; nothing else in this repository
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.
