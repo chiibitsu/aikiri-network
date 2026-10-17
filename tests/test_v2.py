@@ -2183,6 +2183,81 @@ def test_a_lagging_endpoint_cannot_fail_verify_through_record(ledger, sk, mac, t
     assert not any("disagree" in r for r in report), report
 
 
+def _scripted_rpc(*script):
+    """An RPC answering eth_chainId 8453, after first doing each of `script` in
+    turn, one per request: an HTTP status to send, "reset" (close without an
+    answer) or a number of seconds to stall."""
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    hits = []
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(1)
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            step = script[len(hits) - 1] if len(hits) <= len(script) else None
+            if step == "reset":
+                self.close_connection = True
+                return
+            if isinstance(step, float):
+                time.sleep(step)
+            elif isinstance(step, int):
+                self.send_response(step)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            req = json.loads(body)
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        def log_message(self, *a):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
+    server.daemon_threads = True
+    return server, hits
+
+
+@pytest.mark.parametrize("blip", [502, 503, 504, "reset"])
+def test_a_one_off_server_error_or_reset_is_retried_as_web3_did(blip):
+    """main's read path (web3's own retry) got past a single 5xx or reset;
+    the session that replaced it must too, or one blip fails a check main
+    passed."""
+    import threading
+    from aikiri_ledger.cli import _w3
+    server, hits = _scripted_rpc(blip)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453, retrying=True)
+        assert w3.eth.chain_id == 8453
+    finally:
+        server.shutdown()
+    assert len(hits) == 3  # the blip, then _w3's chainId check and this one
+
+
+def test_a_read_that_times_out_is_still_not_retried():
+    """A stalled read costs its whole timeout each time; retrying it is how
+    one host held the job for minutes. Only a reset is retried."""
+    import threading
+    from web3 import Web3
+    from aikiri_ledger.cli import _retrying_session
+    server, hits = _scripted_rpc(2.0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        w3 = Web3(Web3.HTTPProvider(f"http://127.0.0.1:{server.server_port}",
+                                    session=_retrying_session(), request_kwargs={"timeout": 0.5},
+                                    exception_retry_configuration=None))
+        with pytest.raises(Exception):
+            w3.eth.chain_id
+    finally:
+        server.shutdown()
+    assert len(hits) == 1
+
+
 def test_the_retrying_read_path_does_not_stack_web3s_own_retry():
     """web3 retries requests.Timeout five times itself, so a host that
     silently dropped connections cost ten 30s attempts per call: our
