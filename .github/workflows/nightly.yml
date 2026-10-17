@@ -59,4 +59,7 @@ jobs:
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.
       - name: verify and report the state
+        # bash here means -eo pipefail: without it the step exits with tee's
+        # status and goes green at INVALID.
+        shell: bash
         run: aikiri-ledger --trust trust.json verify --require local | tee -a "$GITHUB_STEP_SUMMARY"
