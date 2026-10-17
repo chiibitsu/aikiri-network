@@ -194,7 +194,9 @@ that stamps puts it back.
 Merge it when it appears; a later night upgrades it like any other.
 
 The nightly runner reads the repository's own `trust.json`, so it never reports
-more than `VALID LOCALLY`. Like the block workflow's own verify step, it has no
+more than `VALID LOCALLY`. It reads Base through the same three public servers as the
+block workflow's verify, at the finalized height, so it is the run that checks the
+newest block's anchor once that block is final. Like the block workflow's own verify step, it has no
 Bitcoin node, so verify takes the header of each Bitcoin block a complete proof names
 from mempool.space and blockstream.info: both must give the same header, and it must
 hash to that block and carry Bitcoin's proof of work. A proof Bitcoin contradicts makes the night INVALID. When no header can be
