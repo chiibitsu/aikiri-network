@@ -1883,6 +1883,103 @@ def test_verify_reads_base_through_more_than_one_endpoint():
                     f"{name}: verify reads Base through {len(urls)} endpoint(s), not a quorum: {line!r}"
 
 
+def test_verify_reads_base_only_over_https():
+    import re
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        urls = re.findall(r"--rpc\s+(\S+)", text)
+        assert urls and all(u.startswith("https://") for u in urls), (name, urls)
+
+
+def test_the_quorum_reads_at_the_height_a_majority_reached_not_the_highest_claimed():
+    """One endpoint claiming a far higher finalized height must not pull the
+    reads to a height the others have not reached."""
+    class R:
+        def __init__(self, finalized):
+            self.f = finalized
+        def finalized_block(self): return self.f
+    assert QuorumBase([R(100), R(100), R(10**9)]).common_block() == 100
+    assert QuorumBase([R(90), R(100), R(10**9)]).common_block() == 100
+
+
+def test_a_record_is_read_at_the_height_it_is_asked_for():
+    """record() was read at each node's head: a lagging node then held a
+    zero record for an anchored block, and an honest ledger read INVALID."""
+    seen = []
+
+    class Call:
+        def call(self, **kw):
+            seen.append(kw)
+            return (b"\x00" * 32, 0, "0x" + "00" * 20)
+
+    class Functions:
+        def blocks(self, index):
+            return Call()
+
+    bw = object.__new__(BaseWitness)
+    bw.contract = type("C", (), {"functions": Functions()})()
+    bw.record(3, block_identifier=100)
+    assert seen == [{"block_identifier": 100}]
+
+
+def _readers(monkeypatch, *, chain_ok=True):
+    """_base_reader with every endpoint stubbed: [(url, retrying)] as asked."""
+    from aikiri_ledger import cli
+    asked = []
+    def w3(url, chain_id, retrying=False):
+        asked.append((url, retrying))
+        if not chain_ok:
+            raise SystemExit(f"rpc {url} is chainId 1, expected 8453; refusing")
+        return object()
+    monkeypatch.setattr(cli, "_w3", w3)
+    monkeypatch.setattr(cli, "compile_contract", lambda: {"abi": []})
+    monkeypatch.setattr(cli, "BaseWitness", lambda w3, contract, abi, **k: ("witness", k))
+    monkeypatch.setattr(cli, "_base_key", lambda: "0x" + "11" * 32)
+    return asked
+
+
+def test_the_signing_path_keeps_web3s_own_retry(monkeypatch, trust):
+    from aikiri_ledger import cli
+    asked = _readers(monkeypatch)
+    trust.contract = "0x" + "22" * 20
+    got = cli._base_reader({}, trust, ["https://a", "https://b", "https://c"], need_signer=True)
+    assert asked == [("https://a", False)] and got[0] == "witness"
+
+
+def test_a_single_endpoint_is_one_reader_and_a_wrong_chain_refuses(monkeypatch, trust):
+    from aikiri_ledger import cli
+    trust.contract = "0x" + "22" * 20
+    asked = _readers(monkeypatch)
+    got = cli._base_reader({}, trust, ["https://a"], need_signer=False)
+    assert asked == [("https://a", True)] and got[0] == "witness"  # not a QuorumBase
+    _readers(monkeypatch, chain_ok=False)
+    with pytest.raises(SystemExit, match="refusing"):
+        cli._base_reader({}, trust, ["https://a"], need_signer=False)
+
+
+def test_the_read_retry_is_bounded_as_stated():
+    from aikiri_ledger.cli import _retrying_session
+    retry = _retrying_session().get_adapter("https://x").max_retries
+    assert set(retry.status_forcelist) == {429, 502, 503, 504}
+    assert (retry.total, retry.status, retry.connect, retry.read) == (8, 8, 1, 1)
+    assert retry.respect_retry_after_header
+
+
+def test_a_connect_timeout_drops_an_endpoint():
+    from requests.exceptions import ConnectTimeout
+    from aikiri_ledger.cli import _DropOnTransportFailure
+
+    class Silent:
+        def finalized_block(self):
+            raise ConnectTimeout("connect timed out")
+
+    r = _DropOnTransportFailure("https://silent", Silent())
+    with pytest.raises(ConnectTimeout):
+        r.finalized_block()
+    with pytest.raises(ConnectionError, match="dropped"):
+        r.finalized_block()
+
+
 def _stub_rpc(answer):
     """An RPC whose every reply is `answer(req)`: a JSON-RPC result or error."""
     import threading
