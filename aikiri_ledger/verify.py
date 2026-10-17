@@ -3,6 +3,9 @@
   INVALID                            something is wrong; the report says what
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
+                                     or could not be checked here (neither a Bitcoin
+                                     node nor both public sources gave the header of
+                                     the block the proof names)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but
@@ -239,15 +242,21 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
     if bitcoin is not None:
         pending = 0
         for b in blocks:
-            ok, msg = bitcoin.verify(b)
-            low = (msg or "").lower()
-            if ok:
-                report.append(f"block {b.index}: Bitcoin proof complete")
-            elif "no .ots" in low or "missing" in low or "pending" in low or "incomplete" in low:
-                report.append(f"block {b.index}: Bitcoin proof pending")
+            # BitcoinWitness.verify reads the proof and looks up only a Bitcoin block it
+            # names, from a node or both public sources. "Unchecked" is a proof whose
+            # block header could not be had, which is not the same as wrong; it counts
+            # as pending, so FULLY VERIFIED stays out of reach.
+            result, why = bitcoin.verify(b)
+            if result == "complete":
+                report.append(f"block {b.index}: Bitcoin proof complete, {why}")
+            elif result == "unchecked":
+                report.append(f"block {b.index}: Bitcoin proof not checked, {why}")
+                pending += 1
+            elif result == "pending":
+                report.append(f"block {b.index}: Bitcoin proof pending, {why}")
                 pending += 1
             else:
-                report.append(f"block {b.index}: Bitcoin proof FAILED: {msg}")
+                report.append(f"block {b.index}: Bitcoin proof FAILED: {why}")
                 return State.INVALID, report
         if not pending and state >= State.BASE_VERIFIED:
             state = State.FULLY_VERIFIED

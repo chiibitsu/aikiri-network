@@ -8,11 +8,16 @@ A receipt never depends on a single chain to be believed.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from web3 import Web3
 
@@ -230,40 +235,441 @@ def receipt_cost(rcpt) -> dict:
 
 
 # ------------------------------------------------------------- Bitcoin ----
-class BitcoinWitness:
-    """Wraps the `ots` CLI (opentimestamps-client). Needs network for stamp/upgrade;
-    a completed .ots proof verifies against Bitcoin alone, forever."""
+def _plain(text: str) -> str:
+    """What ots said, as one line of printable ASCII, for a log or a commit."""
+    return re.sub(r"[^ -~]", "?", text)[:200]
 
-    def __init__(self, ledger: Ledger):
+
+class OtsError(RuntimeError):
+    """ots failed to run, as opposed to reading a file and finding no proof in it."""
+
+
+class StampFailed(subprocess.CalledProcessError):
+    """`ots stamp` exited non-zero; its last line, already plain, is the reason."""
+
+    def __init__(self, returncode: int, said: str):
+        super().__init__(returncode, ["ots", "stamp"])
+        self.said = said
+
+    def __str__(self) -> str:
+        return f"ots stamp exited {self.returncode}" + (f": {self.said}" if self.said else "")
+
+
+class BitcoinWitness:
+    """Stamps and upgrades with the `ots` CLI (opentimestamps-client), which needs the
+    calendars; verifies by reading the .ots, and a complete one needs only Bitcoin."""
+
+    def __init__(self, ledger: Ledger, public: bool = True):
         self.ledger = ledger
+        self.public = public   # ask mempool.space and blockstream.info when no node answers
+        self._headers = {}     # height -> header, or why it could not be had, for this run
+        self._node_state = None  # not tried yet, the node, or why it cannot answer
+        self._deadline = None  # set by the first Bitcoin lookup of this run
 
     @staticmethod
     def available() -> bool:
         return shutil.which("ots") is not None
 
     def _digest_file(self, block: Block) -> Path:
+        """Written beside and then moved over, so a write that fails never leaves the
+        .hash cut short."""
         self.ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
         p = self.ledger.proof_path(block.index, "hash")
-        p.write_bytes(bytes.fromhex(block.hash))
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            tmp.unlink(missing_ok=True)  # a link left there is removed, never written through
+            data = bytes.fromhex(block.hash)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+            try:
+                if os.write(fd, data) != len(data):
+                    raise OSError(f"short write to {tmp.name}")
+            finally:
+                os.close(fd)
+            os.replace(tmp, p)
+        finally:
+            tmp.unlink(missing_ok=True)
         return p
 
     def stamp(self, block: Block) -> Path:
-        """Creates <index>.hash.ots (pending until upgraded)."""
-        p = self._digest_file(block)
-        subprocess.run(["ots", "stamp", str(p)], check=True)
-        return self.ledger.proof_path(block.index, "hash.ots")
-
-    def upgrade(self, block: Block) -> bool:
+        """Creates <index>.hash.ots (pending until upgraded). `ots stamp` creates the
+        .ots before it writes the proof into it, so when it fails, whatever it left
+        is removed: a cut-short .ots is not a proof, is left for a person to look at,
+        and the block would never be stamped again; a lone .hash would ride into a
+        commit on its own."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
-        r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True, text=True)
-        return r.returncode == 0
+        digest = self.ledger.proof_path(block.index, "hash")
+        # The cleanup removes only what this run made. _digest_file replaces
+        # whatever is at .hash (a link included) with this run's own file, which
+        # goes unless a real .hash was there before; the cleanup itself never
+        # removes a link, since this run makes none.
+        had = os.path.lexists(ots), digest.exists() and not digest.is_symlink()
+        try:
+            p = self._digest_file(block)
+            # Captured, like every other ots call: what it prints reaches the log
+            # only as the one plain line a failure is reported with.
+            r = subprocess.run(["ots", "stamp", str(p)], capture_output=True, text=True, errors="replace")
+            if r.returncode != 0:
+                said = (r.stderr + r.stdout).strip().splitlines()
+                raise StampFailed(r.returncode, _plain(said[-1]) if said else "")
+        except BaseException:  # a failure, or an interrupt: what it left goes either way
+            for path, existed in zip((ots, digest), had):
+                if not existed and not path.is_symlink():  # this run makes no links
+                    path.unlink(missing_ok=True)
+            raise
+        return ots
 
-    def verify(self, block: Block) -> tuple[bool, str]:
+    def upgrade(self, block: Block) -> str:
+        """What is on disk decides first. A changed .ots that is a proof of this
+        block is an upgrade however ots exited: "upgraded, complete" on exit 0,
+        "upgraded, still pending" when ots says so, and otherwise "upgraded, not
+        called complete". An unchanged one is "complete" on exit 0 and "pending"
+        only on ots's own words for it; any other failure is OtsError.
+        "blocked" when settle_backup leaves a .bak (neither file a proof), and
+        "no proof" when the .ots is not a proof of this block."""
         ots = self.ledger.proof_path(block.index, "hash.ots")
-        if not ots.exists():
-            return False, "no .ots proof"
-        r = subprocess.run(["ots", "verify", str(ots)], capture_output=True, text=True)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()
+        bak = ots.with_name(ots.name + ".bak")
+        if not self.settle_backup(block):  # a .bak left, and neither file is a proof
+            return "blocked"
+        if not self.holds_proof(block):  # missing, a link, junk or another block's
+            return "no proof"
+        before = ots.read_bytes()
+        try:
+            r = subprocess.run(["ots", "upgrade", str(ots)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
+        except OSError as e:  # on PATH but cannot be executed: it renamed nothing
+            raise OtsError(f"ots upgrade did not run: {_plain(str(e))}") from e
+        try:
+            self.settle_backup(block)
+        except OtsError:
+            # Settled above, so any .bak now is the proof ots just renamed, and what
+            # it wrote in its place cannot be checked: the proof goes back.
+            if bak.exists():
+                os.replace(bak, ots)
+            raise
+        said = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        # ots's own words for a proof with no Bitcoin attestation yet
+        # (otsclient/cmds.py upgrade_command); it prints them only with exit 1
+        incomplete = r.returncode == 1 and "failed! timestamp not complete" in (l.lower() for l in said)
+        if os.path.lexists(ots) and ots.read_bytes() != before and self.holds_proof(block):
+            if r.returncode == 0:
+                return "upgraded, complete"
+            if incomplete:
+                return "upgraded, still pending"
+            return f"upgraded, not called complete: ots exited {r.returncode}"
+        if r.returncode == 0:
+            return "complete"
+        if incomplete:
+            return "pending"
+        raise OtsError(f"ots upgrade failed, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
+
+    def settle_backup(self, block: Block) -> bool:
+        """`ots upgrade`, when it has something new, renames the proof to <name>.bak,
+        creates the new file and writes the upgraded proof into it; it will not
+        write an upgrade while a real .bak is there (it checks with exists(), so a
+        dangling link does not stop it). If the proof reads as one, it is that
+        upgrade's output, holding every attestation the backup had, and the backup
+        goes. If it is missing, does not read as a proof (the write failed part-way),
+        or is not a proof of this block, and the backup is one, the backup is the good
+        copy and is put back over it. If neither is, both are left and it returns
+        False: nothing may be stamped then, or the new proof would read as that
+        backup's upgrade and the next settle would delete the backup. Every command
+        that writes a proof settles first, so a .bak is never left beside a proof it
+        did not come from."""
+        ots = self.ledger.proof_path(block.index, "hash.ots")
+        bak = ots.with_name(ots.name + ".bak")
+        if not os.path.lexists(bak):  # a link there, even dangling, is a .bak that is no proof
+            return True
+        if self.holds_proof(block):
+            bak.unlink()
+        elif self.proof_of(bak, block):
+            os.replace(bak, ots)
+        else:
+            return False  # neither is a proof of this block: both stay, to be looked at
+        return True
+
+    def holds_proof(self, block: Block) -> bool:
+        """The .ots is there, reads as a proof, and is a proof of this block."""
+        return self.proof_of(self.ledger.proof_path(block.index, "hash.ots"), block)
+
+    @staticmethod
+    def proof_of(path: Path, block: Block) -> bool:
+        """`ots info` names the digest a proof is of, which must be this block's, and
+        says so when the file is not a proof at all (otsclient/cmds.py info_command).
+        Any other failure is ots not running, which says nothing about the file: it
+        raises OtsError, and nothing is stamped over, put back or deleted on it,
+        save in upgrade: there the .bak is the proof ots itself just renamed."""
+        if path.is_symlink() or not path.exists():
+            return False  # a link is never a proof: what it points to is not what is committed
+        try:
+            r = subprocess.run(["ots", "info", str(path)], capture_output=True,
+                               text=True, errors="replace")  # what ots says is never a reason to crash
+        except OSError as e:  # on PATH but cannot be executed
+            raise OtsError(f"ots info did not run: {_plain(str(e))}") from e
+        if r.returncode == 0:
+            digest = hashlib.sha256(bytes.fromhex(block.hash)).hexdigest()
+            first = (r.stdout.splitlines() or [""])[0].strip().lower()
+            return first == f"file sha256 hash: {digest}"
+        for line in (r.stderr or "").splitlines():
+            line = line.strip().lower()
+            if (line.startswith("error! ") and line.endswith("is not a timestamp file.")) \
+                    or line.startswith("invalid timestamp file "):
+                return False
+        said = [l.strip() for l in (r.stderr or r.stdout or "").splitlines() if l.strip()]
+        raise OtsError(f"ots info did not run, exit {r.returncode}" + (f": {_plain(said[-1])}" if said else ""))
+
+    @staticmethod
+    def _node():
+        """The Bitcoin node `ots` would use: the one $HOME/.bitcoin/bitcoin.conf names."""
+        import bitcoin
+        import bitcoin.rpc
+        bitcoin.SelectParams("mainnet")
+        return bitcoin.rpc.Proxy(timeout=_NODE_TIMEOUT)
+
+    def verify(self, block: Block) -> tuple[str, str]:
+        """(complete | pending | unchecked | failed, why), from the .ots itself.
+
+        The proof is read, not run: its digest must be the SHA-256 of the block's own
+        hash, and only an attestation that names a Bitcoin block is taken to a node.
+        No `ots`, no calendar: moving a pending proof along is nightly's job.
+        Whatever else breaks while checking a proof fails that proof, with a report
+        line, instead of stopping verify with a traceback.
+        """
+        try:
+            return self._check(block)
+        except Exception as e:
+            return "failed", f"the .ots could not be checked: {_plain(str(e)) or type(e).__name__}"
+
+    def _check(self, block: Block) -> tuple[str, str]:
+        try:
+            from opentimestamps.core.notary import (BitcoinBlockHeaderAttestation,
+                                                    PendingAttestation, VerificationError)
+            from opentimestamps.core.serialize import BytesDeserializationContext
+            from opentimestamps.core.timestamp import DetachedTimestampFile
+        except ImportError:
+            return "unchecked", "python-opentimestamps is not installed here"
+
+        p = self.ledger.proof_path(block.index, "hash.ots")
+        if not os.path.lexists(p):
+            return "pending", "no .ots proof yet"
+        if p.is_symlink():
+            return "failed", "the .ots is a link, never a proof"
+        try:
+            data = _read_regular(p, _OTS_MAX + 1)
+        except OSError as e:
+            return "failed", f"the .ots cannot be read: {_plain(str(e))}"
+        if data is None:
+            return "failed", "the .ots is not a regular file"
+        if len(data) > _OTS_MAX:
+            return "failed", "the .ots is far larger than any proof"
+        try:
+            proof = DetachedTimestampFile.deserialize(BytesDeserializationContext(data))
+        except Exception as e:  # any way of not being a whole proof
+            return "failed", f"the .ots is not a proof: {_plain(str(e)) or type(e).__name__}"
+        # A proof attests its digest; how that digest was made from a file does not
+        # matter, only that it is the SHA-256 of this block's hash.
+        if proof.file_digest != hashlib.sha256(bytes.fromhex(block.hash)).digest():
+            return "failed", "a proof of other data, not of this block"
+
+        attested = sorted({(a.height, msg) for msg, a in proof.timestamp.all_attestations()
+                           if isinstance(a, BitcoinBlockHeaderAttestation)})
+        if len(attested) > _BITCOIN_BLOCKS_MAX:  # each would cost the node a request
+            return "failed", "the .ots names more Bitcoin blocks than any proof does"
+        if not attested:
+            if any(isinstance(a, PendingAttestation) for _, a in proof.timestamp.all_attestations()):
+                return "pending", "not yet in a Bitcoin block"
+            return "failed", "no attestation that leads to Bitcoin"
+
+        # One attestation Bitcoin confirms is enough. One it contradicts fails the
+        # proof, whatever else could not be looked up; only when neither happens is
+        # the proof unchecked. Either way nothing short of a confirmed block is complete.
+        contradicted, unanswered = [], ""
+        for height, msg in attested:
+            try:
+                header = self._header(height)
+            except _Unanswered as e:
+                # Heights go up, so a block not to be had leaves the rest unasked.
+                unanswered = f"Bitcoin block {height} could not be looked up: {_plain(str(e))}"
+                break
+            try:
+                BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
+            except VerificationError:
+                contradicted.append(height)
+                continue
+            return "complete", f"in Bitcoin block {height}"
+        if contradicted:
+            return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
+        return "unchecked", unanswered
+
+    def _header(self, height: int):
+        """Bitcoin block `height`'s header, looked up once per run; _Unanswered if not to be had."""
+        if height not in self._headers:
+            try:
+                self._headers[height] = self._look_up(height)
+            except _Unanswered as e:
+                self._headers[height] = e
+        got = self._headers[height]
+        if isinstance(got, _Unanswered):
+            raise got
+        return got
+
+    def _look_up(self, height: int):
+        """From the node while it answers; else from both public sources, if they are on."""
+        if self._node_state is None:
+            try:
+                self._node_state = self._node()
+            except Exception as e:
+                self._node_state = f"no Bitcoin node answered: {_plain(str(e))}"
+        if not isinstance(self._node_state, str):
+            node = self._node_state
+            try:
+                return self._within(lambda: node.getblockheader(node.getblockhash(height)))
+            except _OutOfTime:
+                raise
+            except Exception as e:
+                # Behind that block (IndexError), warming up, refused: not asked again this run.
+                self._node_state = f"the Bitcoin node could not answer: {_plain(str(e))}"
+        if not self.public:
+            raise _Unanswered(self._node_state)
+        return self._from_public(height)
+
+    def _from_public(self, height: int):
+        """The header both public sources give, if it hashes to the block they name and
+        carries Bitcoin's proof of work. Neither source is trusted with anything else."""
+        got = []
+        for base in _PUBLIC_SOURCES:
+            host = base.split("/")[2]
+            try:
+                block_hash = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
+                raw = _hex(self._within(_fetch, f"{base}/block/{block_hash.hex()}/header"), 80)
+            except _OutOfTime:
+                raise
+            except Exception as e:
+                raise _Unanswered(f"{host}: {_kind(e)}; {self._node_state}")
+            got.append((raw, block_hash))
+        if len(set(got)) != 1:
+            raise _Unanswered(f"the public sources do not agree on it; {self._node_state}")
+        return _worked(*got[0])
+
+    def _within(self, fn, *args):
+        """fn(*args), unless the run's Bitcoin lookup budget runs out first. What is
+        still running then is left behind, never waited for."""
+        if self._deadline is None:
+            self._deadline = time.monotonic() + _LOOKUP_BUDGET
+        left = self._deadline - time.monotonic()
+        box = {}
+
+        def run():
+            try:
+                box["value"] = fn(*args)
+            except BaseException as e:
+                box["error"] = e
+        if left > 0:
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(left)
+        if not box:
+            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per verify run")
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+
+class _Unanswered(Exception):
+    """A Bitcoin block's header was not to be had: the proof is not checked, never failed."""
+
+
+class _OutOfTime(_Unanswered):
+    pass
+
+
+class _BadReply(OSError):
+    """A public source's reply that is not what was asked for; the message is ours."""
+
+
+def _kind(e: Exception) -> str:
+    """What went wrong with a public source, in our words only: a source's own text
+    (an HTTP reason phrase, say) could put a link into nightly's step summary."""
+    import urllib.error
+    if isinstance(e, _BadReply):
+        return str(e)
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {int(e.code)}"
+    return type(e).__name__
+
+
+def _fetch(url: str) -> str:
+    """One GET: the reply's text, if it is at most _REPLY_MAX bytes. Redirects are refused."""
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    request = urllib.request.Request(url, headers={"User-Agent": "aikiri-ledger"})
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=_LOOKUP_BUDGET) as r:
+        body = r.read(_REPLY_MAX + 1)
+    if len(body) > _REPLY_MAX:
+        raise _BadReply("a reply longer than any header")
+    return body.decode("ascii").strip()
+
+
+def _hex(text: str, size: int) -> bytes:
+    if not re.fullmatch(f"[0-9a-f]{{{2 * size}}}", text):
+        raise _BadReply(f"not {size} bytes of hex")
+    return bytes.fromhex(text)
+
+
+def _target(bits: int) -> int:
+    """The target a header's nBits encodes (Bitcoin's compact form); 0 if negative or empty."""
+    exponent, mantissa = bits >> 24, bits & 0x007fffff
+    if bits & 0x00800000 or not mantissa:
+        return 0
+    return mantissa << 8 * (exponent - 3) if exponent >= 3 else mantissa >> 8 * (3 - exponent)
+
+
+def _worked(raw: bytes, block_hash: bytes):
+    """The header in `raw`, if it hashes to `block_hash` (as shown, most significant byte
+    first) and carries at least mainnet-scale proof of work; else _Unanswered."""
+    h = hashlib.sha256(hashlib.sha256(raw).digest()).digest()
+    if h[::-1] != block_hash:
+        raise _Unanswered("a header that does not hash to the block it was given for")
+    target = _target(int.from_bytes(raw[72:76], "little"))
+    if target > _MAX_TARGET:
+        raise _Unanswered("a header with less proof of work than Bitcoin's main chain")
+    if int.from_bytes(h, "little") > target:
+        raise _Unanswered("a header whose hash does not meet its own proof of work")
+    return SimpleNamespace(hashMerkleRoot=raw[36:68], nTime=int.from_bytes(raw[68:72], "little"))
+
+
+_OTS_MAX = 64 << 10     # bytes; a proof is a few KB (4 calendars x 10,000 at most), and reading costs size squared
+_NODE_TIMEOUT = 30      # seconds the node may stay silent; not a limit on a whole request
+_BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots uses four
+_PUBLIC_SOURCES = ("https://mempool.space/api", "https://blockstream.info/api")
+_LOOKUP_BUDGET = 60     # seconds for every Bitcoin lookup in one verify run, node and public
+_REPLY_MAX = 1024       # bytes; a block hash is 64 hex characters, a header 160
+# Difficulty 5e13: half Bitcoin's average over blocks 856,760 to 886,157 (from Bitcoin
+# Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
+# block's mining to make; one with less is not taken from a public source.
+_MAX_TARGET = (0xffff << 208) // (5 * 10**13)
+
+
+def _read_regular(p: Path, limit: int) -> bytes | None:
+    """At most `limit` bytes of a regular file, never through a link; None if `p` is
+    not a regular file. O_NONBLOCK so that a FIFO does not hang the open."""
+    import stat
+    fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, left = [], limit
+        while left > 0:
+            chunk = os.read(fd, min(left, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 # ------------------------------------------------------------ Verifier ----
@@ -281,8 +687,8 @@ def verify_all(ledger: Ledger, base: BaseWitness | None = None, bitcoin: Bitcoin
                 return False, report
     if bitcoin is not None:
         for b in ledger.blocks():
-            good, msg = bitcoin.verify(b)
-            report.append(f"block {b.index}: Bitcoin witness {'ok' if good else 'pending/missing'}")
+            result, why = bitcoin.verify(b)
+            report.append(f"block {b.index}: Bitcoin witness {'ok' if result == 'complete' else result}: {why}")
     return True, report
 
 
