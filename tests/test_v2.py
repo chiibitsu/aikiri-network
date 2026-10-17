@@ -1202,6 +1202,72 @@ def test_a_header_that_could_not_be_looked_up_says_why_it_was_not_saved(ledger, 
     assert said.startswith("not saved: Bitcoin block 800000 could not be looked up"), said
 
 
+@pytest.mark.parametrize("tip, says", [(800_004, "has 5 confirmations, 6 needed"),
+                                        (799_000, "has 0 confirmations, 6 needed")])
+def test_upgrade_says_how_many_confirmations_a_shallow_block_has(ledger, monkeypatch, easy_work, tip, says):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    public.tip = tip
+    _lookups(monkeypatch, public)
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == f"not saved: Bitcoin block 800000 {says}"
+
+
+def test_a_tip_of_more_than_eight_digits_is_not_a_height(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    public.tip = 100_000_000
+    _lookups(monkeypatch, public)
+    assert "not a block height" in W.BitcoinWitness(ledger).save_header(ledger.read(0))
+
+
+def test_the_tip_lookup_counts_against_the_runs_budget(ledger, monkeypatch, easy_work):
+    import time
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    _lookups(monkeypatch, _Public(**{"mempool.space": block, "blockstream.info": block}))
+    bw = W.BitcoinWitness(ledger)
+    assert bw.verify(ledger.read(0))[0] == "complete"
+    bw._deadline = time.monotonic() - 1  # the run's 60 s are spent
+    said = bw.save_header(ledger.read(0))
+    assert "out of time" in said and not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_a_saved_header_is_read_with_the_public_sources_off(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    asked = _lookups(monkeypatch)
+    result, why = W.BitcoinWitness(ledger, public=False).verify(ledger.read(0))
+    assert (result, asked) == ("complete", []) and "saved header" in why
+
+
+def test_a_saved_header_is_read_before_a_node_that_answers(ledger, monkeypatch, easy_work):
+    # the "keep" ruling: a saved header that carries the proof decides; the node is not asked
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    _save(ledger, 0, (800_000, raw))
+    asked = []
+    class Node:
+        def getblockhash(self, height):
+            asked.append(height)
+            return b"\x00" * 32
+        def getblockheader(self, block_hash):
+            return CBlockHeader.deserialize(raw)
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    bw = W.BitcoinWitness(ledger, public=False)
+    bw._header(800_000)  # the node is live and answering this run
+    asked.clear()
+    result, why = bw.verify(ledger.read(0))
+    assert (result, asked) == ("complete", []) and "saved header" in why
+
+
 def _saving(ledger, monkeypatch):
     """Block 0's proof, confirmed by both public sources at a buried height."""
     data = _proof_of_block_0(ledger, _btc(800_000))

@@ -55,7 +55,7 @@ jobs:
             Any of: OpenTimestamps proofs upgraded since the last run (complete,
             or with new attestations and possibly still pending; the run's log
             says which); a first, pending proof for any block that had none; a
-            saved Bitcoin header (<index>.btc-header) for each complete proof
+            saved Bitcoin header (`<index>.btc-header`) for each complete proof
             whose Bitcoin block now has six confirmations, so verify needs no
             lookup for it (verify still checks each one itself). A night may
             carry headers only.
