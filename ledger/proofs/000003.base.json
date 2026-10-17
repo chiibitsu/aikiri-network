@@ -1,0 +1,13 @@
+{
+  "index": 3,
+  "hash": "98960c20479fa673fe4b9fd1cdee2c846fda4a8d35141266e391f1f3e20d52a3",
+  "tx": "fc17725d7fcd66edd18aac69cc6916e405c9ba513ac56aa4f34c6d000248d762",
+  "contract": "0x15eFF43a5CFA703215fAa943D42168aF5a7A6a9e",
+  "chainId": 8453,
+  "baseBlock": 52478065,
+  "gasUsed": 75625,
+  "effectiveGasPrice": 6000000,
+  "l2FeeWei": 453750000000,
+  "l1FeeWei": 2451337059,
+  "totalWei": 456201337059
+}
