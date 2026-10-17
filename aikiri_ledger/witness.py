@@ -420,7 +420,8 @@ class BitcoinWitness:
 
     @staticmethod
     def _node():
-        """The Bitcoin node `ots` would use: the one $HOME/.bitcoin/bitcoin.conf names."""
+        """The Bitcoin node `ots` would use: the one bitcoin.conf names (python-bitcoinlib
+        reads ~/Library/Application Support/Bitcoin/ on a Mac, ~/.bitcoin/ on Linux)."""
         import bitcoin
         import bitcoin.rpc
         bitcoin.SelectParams("mainnet")

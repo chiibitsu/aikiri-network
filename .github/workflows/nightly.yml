@@ -45,19 +45,20 @@ jobs:
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
         with:
           add-paths: ledger/proofs
-          commit-message: "Bitcoin proofs stamped or upgraded"
+          commit-message: "Bitcoin proofs stamped or upgraded, or their headers saved"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           branch: nightly/bitcoin-proofs
           delete-branch: true
-          title: "Bitcoin proofs stamped or upgraded"
+          title: "Bitcoin proofs stamped or upgraded, or their headers saved"
           body: >
-            OpenTimestamps proofs upgraded since the last run (complete, or
-            with new attestations and possibly still pending; the run's log
-            says which), and a first, pending proof for any block that had none.
-            It may also carry a saved Bitcoin header (<index>.btc-header) for
-            each proof whose Bitcoin block has six confirmations, so verify needs
-            no lookup for it; verify still checks each one itself.
+            Any of: OpenTimestamps proofs upgraded since the last run (complete,
+            or with new attestations and possibly still pending; the run's log
+            says which); a first, pending proof for any block that had none; a
+            saved Bitcoin header (<index>.btc-header) for each complete proof
+            whose Bitcoin block now has six confirmations, so verify needs no
+            lookup for it (verify still checks each one itself). A night may
+            carry headers only.
             Only ledger/proofs changes here; nothing else in this repository
             can be touched by this PR. Merging is the only step left ~ nothing
             in this workflow does it for you.

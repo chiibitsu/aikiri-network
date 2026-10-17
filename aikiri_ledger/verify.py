@@ -3,9 +3,9 @@
   INVALID                            something is wrong; the report says what
   VALID LOCALLY — NOT WITNESSED      the chain is internally sound, nothing more
   BASE VERIFIED — BITCOIN PENDING    a stranger's chain agrees, Bitcoin has not settled
-                                     or could not be checked here (no saved header,
-                                     Bitcoin node or both public sources gave the
-                                     header of the block the proof names)
+                                     or could not be checked here (none of a saved
+                                     header, a Bitcoin node or both public sources
+                                     gave the header of the block the proof names)
   FULLY VERIFIED                     both witnesses agree
 
 There is no grace window and no partial credit. A block that is written but

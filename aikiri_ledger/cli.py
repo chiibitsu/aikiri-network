@@ -177,7 +177,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--offline", action="store_true", help="skip the witnesses entirely")
     v.add_argument("--require", choices=sorted(REQUIRE), default="full")
     v.add_argument("--no-public-bitcoin", action="store_true",
-                   help="never ask mempool.space or blockstream.info for Bitcoin headers")
+                   help="never ask mempool.space or blockstream.info for Bitcoin headers "
+                        "(saved headers and the node are still read)")
 
     d = sub.add_parser("deploy"); d.add_argument("--rpc", required=True)
     d.add_argument("--chain-id", type=int, default=8453)

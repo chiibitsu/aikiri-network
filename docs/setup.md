@@ -196,7 +196,7 @@ Merge it when it appears; a later night upgrades it like any other.
 The nightly runner reads the repository's own `trust.json`, so it never reports
 more than `VALID LOCALLY`. Like the block workflow's own verify step, it has no
 Bitcoin node, so verify takes the header of each Bitcoin block a complete proof names
-from mempool.space and blockstream.info: both must give the same header, and it must
+from its saved header (below) or else from mempool.space and blockstream.info: both must give the same header, and it must
 hash to that block and carry Bitcoin's proof of work. A proof Bitcoin contradicts makes the night INVALID. When no header can be
 had (the sources disagree, one is down, or the 60 seconds all Bitcoin lookups share
 run out) the proof is reported as not checked rather than failed, as is every proof
@@ -206,7 +206,7 @@ yet in a Bitcoin block is pending until nightly's upgrade moves it along. Once a
 is complete and its Bitcoin block has six confirmations (the block and five on top, by
 the confirming source's own chain tip), the same upgrade saves that block's header as
 `<index>.btc-header` beside the proof, and the nightly PR carries it with the proofs.
-A block that deep is not replaced, so its header never changes, and each block is
+A block that deep is, in practice, not replaced, so its header does not change, and each block is
 looked up once rather than every night; until then, upgrade says how many
 confirmations it has. A saved header is read before the node or the public sources.
 Verify still checks it itself (it must carry the proof and Bitcoin's proof of work) and
