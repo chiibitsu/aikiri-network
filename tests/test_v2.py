@@ -2183,18 +2183,6 @@ def test_a_lagging_endpoint_cannot_fail_verify_through_record(ledger, sk, mac, t
     assert not any("disagree" in r for r in report), report
 
 
-def test_nightly_verify_fails_its_step_when_verify_fails():
-    """`verify | tee` under GitHub's default `bash -e` exits with tee's
-    status, so nightly went green at INVALID. That mattered more once the
-    quorum moved the newest block's Base check from block.yml to nightly:
-    without pipefail, a bad newest anchor turned no run red at all."""
-    text = Path(".github/workflows/nightly.yml").read_text()
-    step = text[text.index("- name: verify and report the state"):]
-    step = step.split("\n      - name:")[0]
-    assert "| tee" in step
-    assert "shell: bash" in step, step  # GitHub runs `shell: bash` with -eo pipefail
-
-
 def test_the_retrying_read_path_does_not_stack_web3s_own_retry():
     """web3 retries requests.Timeout five times itself, so a host that
     silently dropped connections cost ten 30s attempts per call: our
@@ -2585,6 +2573,16 @@ def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     text = (Path(".github/workflows") / "nightly.yml").read_text()
     assert "aikiri-ledger stamp" in text
     assert text.index("aikiri-ledger stamp") < text.index("uses: peter-evans/create-pull-request@")
+
+
+def test_nightly_verify_step_fails_when_verify_fails():
+    # Without its own shell line a step runs under `bash -e`, so `verify | tee`
+    # exits with tee's status: nightly goes green at INVALID. `shell: bash`
+    # runs it with -eo pipefail, so verify's own exit status decides the step.
+    text = (Path(".github/workflows") / "nightly.yml").read_text()
+    step = text[text.index("- name: verify and report the state"):].split("\n      - name:")[0]
+    assert "aikiri-ledger --trust trust.json verify" in step and "| tee" in step
+    assert "shell: bash" in [line.strip() for line in step.splitlines()], step
 
 
 def test_block_commit_says_whether_there_is_a_bitcoin_proof():
