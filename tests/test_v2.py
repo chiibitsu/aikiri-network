@@ -1603,6 +1603,28 @@ class _Honest:
     def code_hash(self, block=None): return self._code
 
 
+def test_a_base_failure_ends_the_report_with_the_state(ledger, trust):
+    """Nightly's summary is the report: a failed Base check must say INVALID,
+    not only "required at least VALID LOCALLY"."""
+    class Lying(_Honest):
+        def latest_index(self, block=None): return 0
+        def matches(self, b, block=None): return False
+    state, report = verify_all(ledger, trust, base=Lying())
+    assert state == State.INVALID and report[-1] == State.text(State.INVALID), report
+
+
+def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
+    """The line named the quorum and its finalized height on every path, the
+    single endpoint's included, and never what Base was seen to hold."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    state, report = verify_all(ledger, trust, base=Behind())
+    (line,) = [r for r in report if r.startswith("block 1:")]
+    assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
+
+
 def test_a_quorum_still_checks_the_deployed_code_pin(ledger, sk, mac, trust):
     """The pin was read through `base.w3`, which a QuorumBase does not have. So the
     multi-endpoint setup ~ the one that is actually recommended ~ skipped the check
