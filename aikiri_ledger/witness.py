@@ -261,7 +261,9 @@ class BitcoinWitness:
         self.ledger = ledger
         self.public = public   # ask mempool.space and blockstream.info when no node answers
         self._headers = {}     # height -> header, or why it could not be had, for this run
+        self._sources = {}     # height -> "node" | "public": where that header came from
         self._node_state = None  # not tried yet, the node, or why it cannot answer
+        self._node_proxy = None  # the node once reached, kept for its tip after a failure
         self._deadline = None  # set by the first Bitcoin lookup of this run
         self._confirmed = {}   # block index -> (Bitcoin height, raw header or None, "saved" | "node" | "public")
 
@@ -511,7 +513,7 @@ class BitcoinWitness:
             raw = getattr(header, "raw", None)
             if raw is None and hasattr(header, "serialize"):  # python-bitcoinlib's, from the node
                 raw = header.serialize()
-            self._confirmed[block.index] = (height, raw, "public" if isinstance(self._node_state, str) else "node")
+            self._confirmed[block.index] = (height, raw, self._sources[height])
             return "complete", f"in Bitcoin block {height}"
         if contradicted:
             return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
@@ -523,7 +525,9 @@ class BitcoinWitness:
         why not. Only once _SAVE_DEPTH blocks bury it (the block itself counted), by
         the same source's chain tip: a buried header never changes, a shallow one can
         still be replaced."""
-        result, _ = self.verify(block)
+        result, why = self.verify(block)
+        if result == "unchecked":  # complete as a proof, but its block not to be had
+            return f"not saved: {why}"
         if result != "complete":
             return f"not saved: the proof is {result}"
         height, raw, source = self._confirmed[block.index]
@@ -535,7 +539,9 @@ class BitcoinWitness:
             return "not saved: the header has less proof of work than Bitcoin's main chain"
         try:
             tip = self._tip(source)
-        except Exception as e:  # out of time, or the tip not to be had
+        except _OutOfTime as e:  # its text is ours
+            return f"not saved: the chain's tip could not be had ({e})"
+        except Exception as e:  # the tip not to be had
             return f"not saved: the chain's tip could not be had ({_kind(e) if source == 'public' else _plain(str(e))})"
         if tip - height + 1 < _SAVE_DEPTH:
             return f"not saved: Bitcoin block {height} has {max(tip - height + 1, 0)} confirmations, {_SAVE_DEPTH} needed"
@@ -543,11 +549,12 @@ class BitcoinWitness:
         p = self.ledger.proof_path(block.index, "btc-header")
         fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as f:
-                f.write(f"{height} {raw.hex()}\n")
             umask = os.umask(0)
             os.umask(umask)
-            os.chmod(tmp, 0o666 & ~umask)  # readable like the proofs; mkstemp makes 0600
+            with os.fdopen(fd, "w") as f:
+                # by the open file, not its name: readable like the proofs; mkstemp makes 0600
+                os.fchmod(f.fileno(), 0o666 & ~umask)
+                f.write(f"{height} {raw.hex()}\n")
             os.replace(tmp, p)  # replaces a link there, never writes through it
         except BaseException:
             if os.path.lexists(tmp):
@@ -559,8 +566,7 @@ class BitcoinWitness:
         """The height of the chain's tip, as the source that confirmed the block sees it:
         the node, or the lower of the two public sources' tips."""
         if source == "node":
-            node = self._node_state
-            return int(self._within(node.getblockcount))
+            return int(self._within(self._node_proxy.getblockcount))
         tips = []
         for base in _PUBLIC_SOURCES:
             text = self._within(_fetch, f"{base}/blocks/tip/height")
@@ -604,21 +610,26 @@ class BitcoinWitness:
         """From the node while it answers; else from both public sources, if they are on."""
         if self._node_state is None:
             try:
-                self._node_state = self._node()
+                self._node_state = self._node_proxy = self._node()
             except Exception as e:
                 self._node_state = f"no Bitcoin node answered: {_plain(str(e))}"
         if not isinstance(self._node_state, str):
             node = self._node_state
             try:
-                return self._within(lambda: node.getblockheader(node.getblockhash(height)))
+                header = self._within(lambda: node.getblockheader(node.getblockhash(height)))
             except _OutOfTime:
                 raise
             except Exception as e:
                 # Behind that block (IndexError), warming up, refused: not asked again this run.
                 self._node_state = f"the Bitcoin node could not answer: {_plain(str(e))}"
+            else:
+                self._sources[height] = "node"
+                return header
         if not self.public:
             raise _Unanswered(self._node_state)
-        return self._from_public(height)
+        header = self._from_public(height)
+        self._sources[height] = "public"
+        return header
 
     def _from_public(self, height: int):
         """The header both public sources give, if it hashes to the block they name and
