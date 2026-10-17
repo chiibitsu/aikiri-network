@@ -2567,6 +2567,16 @@ def test_nightly_stamps_blocks_without_a_proof_before_proposing():
     assert text.index("aikiri-ledger stamp") < text.index("uses: peter-evans/create-pull-request@")
 
 
+def test_nightly_verify_step_fails_when_verify_fails():
+    # Without its own shell line a step runs under `bash -e`, so `verify | tee`
+    # exits with tee's status: nightly goes green at INVALID. `shell: bash`
+    # runs it with -eo pipefail, so verify's own exit status decides the step.
+    text = (Path(".github/workflows") / "nightly.yml").read_text()
+    step = text[text.index("- name: verify and report the state"):].split("\n      - name:")[0]
+    assert "aikiri-ledger --trust trust.json verify" in step and "| tee" in step
+    assert "shell: bash" in [line.strip() for line in step.splitlines()], step
+
+
 def test_block_commit_says_whether_there_is_a_bitcoin_proof():
     # witness goes on when the stamp fails or finds a file that is not a proof, and
     # main's history is never rewritten: the commit's OTS line comes from what is
