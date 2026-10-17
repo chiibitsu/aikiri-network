@@ -1152,6 +1152,56 @@ def test_a_tip_that_is_not_a_height_saves_nothing(ledger, monkeypatch, easy_work
     assert "not a block height" in said and not ledger.proof_path(0, "btc-header").exists()
 
 
+def test_the_tip_comes_from_the_source_that_gave_the_header(ledger, monkeypatch, easy_work):
+    # the node gave the header, then could not answer another block: its own tip still decides
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    class Node:
+        def getblockhash(self, height):
+            if height != 800_000:
+                raise IndexError("Block height out of range")
+            return b"\x00" * 32
+        def getblockheader(self, block_hash):
+            return CBlockHeader.deserialize(raw)
+        def getblockcount(self):
+            return 800_002
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    public = _Public(**{"mempool.space": {}, "blockstream.info": {}})
+    public.tip = 800_100
+    monkeypatch.setattr(W, "_fetch", public)
+    bw = W.BitcoinWitness(ledger)
+    assert bw.verify(ledger.read(0))[0] == "complete"
+    with pytest.raises(W._Unanswered):
+        bw._header(900_000)  # another block's lookup: the node is behind it
+    said = bw.save_header(ledger.read(0))
+    assert "has 3 confirmations" in said and not ledger.proof_path(0, "btc-header").exists()
+
+
+def test_a_tip_lookup_out_of_time_says_so_in_words(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        if url.endswith("/blocks/tip/height"):
+            raise W._OutOfTime("out of time: Bitcoin lookups get 60 s per verify run")
+        return public(url)
+    _lookups(monkeypatch, fetch)
+    said = W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert "out of time" in said and "_OutOfTime" not in said
+
+
+def test_a_header_that_could_not_be_looked_up_says_why_it_was_not_saved(ledger, monkeypatch):
+    # upgrade prints every "not saved" but "the proof is ...": a lookup that failed must show
+    from aikiri_ledger import witness as W
+    _proof_of_block_0(ledger, _btc(800_000))
+    _lookups(monkeypatch)  # node and both sources down
+    said = W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert said.startswith("not saved: Bitcoin block 800000 could not be looked up"), said
+
+
 def _saving(ledger, monkeypatch):
     """Block 0's proof, confirmed by both public sources at a buried height."""
     data = _proof_of_block_0(ledger, _btc(800_000))
