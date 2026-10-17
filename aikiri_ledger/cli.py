@@ -114,23 +114,37 @@ def _base_key() -> str:
 def _retrying_session():
     """For reads only. A public RPC rate-limits under load, and web3.py's own
     tolerance for that is short: measured at 5 attempts total, giving up
-    inside 2.4s. This stretches one call to 9 attempts. The waits between
-    them come to ~13s, or up to 80s when the server sends Retry-After (each
-    wait is the backoff step or that header capped at 10s instead); each
-    attempt can also take up to web3's 30s timeout before its 429 arrives. A rate limit longer than that is the quorum's job; with only
-    one endpoint nothing outlasts it, and verify fails. The signing path keeps web3's
-    default: a retried broadcast can report "already known" for a
-    transaction that landed, and reconcile already owns that case."""
+    inside 2.4s. This gives each HTTP request 9 attempts; a contract read
+    makes 3 requests (measured, web3 8: eth_chainId, eth_call, eth_chainId), so the
+    figures below are per request and up to three times that per read. The
+    waits between attempts come to ~13s, or up to 80s when the server sends
+    Retry-After (each wait is the backoff step or that header capped at 10s
+    instead); each attempt can also take up to web3's 30s timeout before its
+    answer arrives. A rate limit longer than that is the quorum's job; with
+    only one endpoint nothing outlasts it, and verify fails. The signing path
+    keeps web3's default: a retried broadcast can report "already known" for
+    a transaction that landed, and reconcile already owns that case."""
     from requests import Session
     from requests.adapters import HTTPAdapter
+    from urllib3.exceptions import MaxRetryError, ReadTimeoutError
     from urllib3.util.retry import Retry
-    # Only 429 is retried: a read that timed out is not retried (web3's own
-    # timeout is 30s, and nine of those would hold the job), a refused
-    # connection once.
-    retry = Retry(total=8, connect=1, read=0, status=8, backoff_factor=0.05,
-                  status_forcelist=(429,),
-                  allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
-                  retry_after_max=10)
+
+    class NoStalledRetry(Retry):
+        """A read that timed out is never retried: web3's timeout is 30s, and
+        retries of it would hold the job. Any other read error is a reset."""
+        def increment(self, method=None, url=None, response=None, error=None, _pool=None,
+                      _stacktrace=None):
+            if isinstance(error, ReadTimeoutError):
+                raise MaxRetryError(_pool, url, error) from error
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+
+    # A rate limit (429) or a gateway's 502/503/504 is retried up to 8 times,
+    # as main's web3 retry got past a single one; a reset and a refused
+    # connection once each.
+    retry = NoStalledRetry(total=8, connect=1, read=1, status=8, backoff_factor=0.05,
+                           status_forcelist=(429, 502, 503, 504),
+                           allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
+                           retry_after_max=10)
     session = Session()
     session.max_redirects = 0  # an endpoint may not send verify's POST anywhere else
     session.mount("https://", HTTPAdapter(max_retries=retry))
@@ -170,7 +184,7 @@ class _Unreachable:
 class _DropOnTransportFailure:
     """One endpoint's reader, until a read exhausts its retries or times
     out. From then on every call fails at once. The quorum asks its readers
-    one after another, about 5 reads per run plus 2 per block, so an
+    one after another, 4 or 5 reads per run plus 2 per block, so an
     endpoint left in paying its full retry budget or web3's 30s timeout each
     time would hold the job past its timeout. A one-off reset or refusal
     costs nothing to try again and fails only that read; a JSON-RPC error
