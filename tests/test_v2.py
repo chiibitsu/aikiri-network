@@ -1621,7 +1621,7 @@ def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
     class Behind(_Honest):
         def latest_index(self, block=None): return 0
     state, report = verify_all(ledger, trust, base=Behind())
-    (line,) = [r for r in report if r.startswith("block 1:")]
+    (line,) = [r for r in report if r.startswith("block 1:") and "anchored" in r]
     assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
 
 

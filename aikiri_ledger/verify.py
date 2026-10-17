@@ -227,13 +227,14 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                     failures += 1
 
         if failures:
+            report.append(State.text(State.INVALID))
             return State.INVALID, report
 
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
-                report.append(f"block {i}: written but not anchored on Base at the height read "
-                              f"(through the quorum that is the finalized height, which "
-                              f"an anchor minutes old may not have reached)")
+                report.append(f"block {i}: written but not anchored on Base as read "
+                              f"(latestIndex {latest}); an anchor made minutes ago may "
+                              f"not be final yet")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:
             report.append(f"Base: {min(latest, local_head) + 1} block(s) anchored and matching")
@@ -257,6 +258,7 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                 pending += 1
             else:
                 report.append(f"block {b.index}: Bitcoin proof FAILED: {why}")
+                report.append(State.text(State.INVALID))
                 return State.INVALID, report
         if not pending and state >= State.BASE_VERIFIED:
             state = State.FULLY_VERIFIED
