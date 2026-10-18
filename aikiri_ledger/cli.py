@@ -203,7 +203,7 @@ class _DropOnTransportFailure:
     def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
                  clock=None):
         import time
-        self.rpc = self._rpc = rpc
+        self.rpc = rpc
         self._reader, self._dropped = reader, None
         self._budget, self._slow, self._spent_s = budget, slow, 0.0
         self._clock = clock or time.monotonic
@@ -264,7 +264,7 @@ def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
         try:
             readers.append(_DropOnTransportFailure(u, BaseWitness(
                 _w3(u, chain_id, retrying=True), contract, abi, account=cfg.get("account"))))
-        except (Exception, SystemExit) as e:  # noqa: BLE001 - dead or wrong-chain: it does not vote
+        except (Exception, WrongChain) as e:  # noqa: BLE001 - dead or wrong-chain: it does not vote
             readers.append(_Unreachable(u, e))
     return QuorumBase(readers)
 

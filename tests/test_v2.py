@@ -2240,7 +2240,8 @@ def _readers(monkeypatch, *, chain_ok=True):
     def w3(url, chain_id, retrying=False):
         asked.append((url, retrying))
         if not chain_ok and chain_id is not None:  # only a check that is asked for can refuse
-            raise SystemExit(f"rpc {url} is chainId 1, expected {chain_id}; refusing")
+            from aikiri_ledger.errors import WrongChain
+            raise WrongChain(f"rpc {url} is chainId 1, expected {chain_id}; refusing")
         return object()
     monkeypatch.setattr(cli, "_w3", w3)
     monkeypatch.setattr(cli, "compile_contract", lambda: {"abi": []})
