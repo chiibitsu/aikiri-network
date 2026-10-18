@@ -583,6 +583,50 @@ class BitcoinWitness:
             tips.append(int(text))
         return min(tips)
 
+    def check_saved(self, block: Block) -> list[tuple[bool, str]]:
+        """Each header saved beside the block's proof, looked up by its height from both
+        public sources: [(passed, what was found)], [] if there is no .btc-header. One
+        either source does not name at that height fails, and so does one a source
+        could not be asked about: this is the check that a saved header is the real
+        one, and a check that did not happen is not a pass. A file verify would not
+        read in full fails too, so nothing in it goes unchecked."""
+        p = self.ledger.proof_path(block.index, "btc-header")
+        if not os.path.lexists(p):
+            return []
+        unread = [(False, "its .btc-header is not a saved header file verify reads in full")]
+        try:
+            data = None if p.is_symlink() else _read_regular(p, _SAVED_MAX + 1)
+        except OSError:
+            return unread
+        if data is None or len(data) > _SAVED_MAX:
+            return unread
+        lines = [line for line in data.decode("ascii", "replace").splitlines() if line]
+        found = [re.fullmatch(r"(\d{1,8}) ([0-9a-f]{160})", line) for line in lines]
+        if not found or not all(found):
+            return unread
+        out = []
+        for m in found:
+            height, raw = int(m[1]), bytes.fromhex(m[2])
+            said = f"the saved header for Bitcoin block {height}"
+            if _from_saved(raw) is None:
+                out.append((False, f"{said} lacks Bitcoin's proof of work"))
+                continue
+            own = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1]
+            verdict = (True, f"{said} is the one both public sources name")
+            for base in _PUBLIC_SOURCES:
+                host = base.split("/")[2]
+                try:
+                    named = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
+                except Exception as e:  # noqa: BLE001 - not asked is not checked, and not a pass
+                    why = str(e) if isinstance(e, _Unanswered) else f"{host}: {_kind(e)}"  # ours: out of time
+                    verdict = (False, f"{said} was not checked ({why})")
+                    break
+                if named != own:
+                    verdict = (False, f"{said} is not the block {host} names at that height")
+                    break
+            out.append(verdict)
+        return out
+
     def _saved_headers(self, block: Block) -> dict:
         """{Bitcoin height: raw header} from the block's .btc-header, if that is a small
         regular file; a link, anything larger, or a line that is not one is ignored."""

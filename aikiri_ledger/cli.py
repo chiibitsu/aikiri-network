@@ -169,6 +169,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("witness").add_argument("index", type=int)
     sub.add_parser("reconcile")
     sub.add_parser("upgrade")
+    sub.add_parser("check-headers", help="look up every saved Bitcoin header by its height "
+                                         "from mempool.space and blockstream.info")
     sub.add_parser("stamp")
     sub.add_parser("proof-status").add_argument("index", type=int)
 
@@ -397,6 +399,19 @@ def main(argv=None):
             except OSError as e:  # the folder not writable
                 print(f"block {blk.index}: could not save its Bitcoin header ({_plain(str(e))})")
         return 0
+
+    if a.cmd == "check-headers":
+        # CI's check that a saved header is the real one: verify takes any that carries
+        # the proof and Bitcoin's work, and faking one costs about half a block's mining.
+        checked, passed = 0, True
+        for blk in L.blocks():
+            for ok, said in BitcoinWitness(L).check_saved(blk):  # each block its own 60 s
+                checked += 1
+                passed = passed and ok
+                print(f"block {blk.index}: {said}")
+        if not checked:
+            print("no saved Bitcoin headers")
+        return 0 if passed else 1
 
     if a.cmd == "proof-status":
         # block.yml's commit message reads this: main's history is never rewritten,

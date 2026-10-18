@@ -215,8 +215,12 @@ header does not carry its own height, so verify names a block confirmed this way
 what the header proves: its block hash and the time it was mined ("in the Bitcoin
 block 0000…, mined 2026-…"). Paste that hash into any Bitcoin explorer to see the
 block and its height. A saved header reaches `main` only through a PR you merge, and
-one that passes costs about half a Bitcoin block's mining to make. To check a header
-PR yourself before merging, check out its branch, delete `ledger/proofs/*.btc-header`,
-and run verify: every complete proof is then looked up from the public sources.
+one that passes costs about half a Bitcoin block's mining to make. So CI's
+`saved-headers` check (`aikiri-ledger check-headers`) looks every saved header up by
+its height from both public sources: red if either names another block there, or if
+either cannot be asked (not checked is not a pass). It runs on every PR and push to
+`main`. Nightly's own header PRs are opened by its token, so GitHub runs no CI on them
+before you merge; their headers are the ones both public sources gave, and the check
+runs on `main` once merged. A red `saved-headers` on a PR means do not merge it.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin block header: saved beside the proof, from a node, or from both public sources.
