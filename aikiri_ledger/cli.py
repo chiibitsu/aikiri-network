@@ -35,7 +35,6 @@ import os
 import re
 import subprocess
 import sys
-import unicodedata
 from pathlib import Path
 
 from .approval import ApprovalKey, verify_approval
@@ -416,26 +415,6 @@ def main(argv=None):
                 checked += 1
                 passed = passed and ok
                 print(f"block {blk.index}: {said}")
-        # Each block's own file is checked above, by its exact path. A Mac's disk ignores
-        # case, so there ledger/Proofs/000003.BTC-header is that file and verify reads it:
-        # any name like one anywhere beside the ledger fails here. Named escaped, since a
-        # file name is the PR's to choose and this prints to the CI log.
-        base = L.root.absolute().parent
-        owned = {str(L.proof_path(blk.index, "btc-header").absolute()) for blk in blocks}
-        def shown(path):
-            return ascii(os.path.relpath(path, base))[1:-1]
-        unread, strays = [], []
-        for top, dirs, files in os.walk(base, onerror=unread.append):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]  # .git; no case of ledger starts with .
-            strays += [os.path.join(top, n) for n in dirs + files
-                       if unicodedata.normalize("NFKC", n).casefold().endswith(".btc-header")
-                       and os.path.join(top, n) not in owned]
-        for path in sorted(strays):
-            checked, passed = checked + 1, False
-            print(f"{shown(path)}: not the .btc-header of a block in this ledger, by its exact path")
-        for e in unread:
-            checked, passed = checked + 1, False
-            print(f"could not look in {shown(e.filename)} for header files ({type(e).__name__})")
         if not checked:
             print("no saved Bitcoin headers")
         return 0 if passed else 1

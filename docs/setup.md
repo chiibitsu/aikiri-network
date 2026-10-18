@@ -227,7 +227,10 @@ runs on `main` once merged. A red `saved-headers` on a PR means do not merge it
 run at all (a commit message with `[skip ci]` skips CI) means run
 `aikiri-ledger check-headers` on the branch yourself. Red on `main` after a merge
 reads the same way: "not checked" means re-run; "is not the block", "lacks Bitcoin's
-proof of work", "not a saved header file" or "not the .btc-header of a block" means
-remove the file it names, in a PR.
+proof of work" or "not a saved header file" on `block N` means remove
+`ledger/proofs/<N, six digits>.btc-header` in a PR. Verify, and the check, read a saved
+header only where every name on the way (`ledger`, `proofs`, the file) is stored
+exactly so and none is a link: a Mac's disk opens the file for `Ledger/Proofs/…BTC-header`
+too, and no check on Linux could list every such alias, so an alias is never read.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin block header: saved beside the proof, from a node, or from both public sources.

@@ -589,13 +589,14 @@ class BitcoinWitness:
         header either source does not name at that height fails, and so does one a source
         could not be asked about: this is the check that a saved header is the real
         one, and a check that did not happen is not a pass. A file verify would not
-        read in full fails too, so nothing in it goes unchecked. `named` keeps what each
+        read in full fails too, so nothing in it goes unchecked; one verify never reads
+        (reached by a name in another form, or through a linked folder) is not checked. `named` keeps what each
         source named at each height across calls, or why it could not, so a height is
         asked once a run."""
         named = {} if named is None else named
         p = self.ledger.proof_path(block.index, "btc-header")
-        if not os.path.lexists(p):
-            return []
+        if not os.path.lexists(p) or not _stored_exactly(self.ledger.root, p) and not p.is_symlink():
+            return []  # as verify: an alias of the name is not this block's file, and never read
         unread = [(False, "its .btc-header is not a saved header file verify reads in full")]
         try:
             data = None if p.is_symlink() else _read_regular(p, _SAVED_MAX + 1)
@@ -637,7 +638,7 @@ class BitcoinWitness:
         regular file; a link, anything larger, or a line that is not one is ignored."""
         p = self.ledger.proof_path(block.index, "btc-header")
         try:
-            if not os.path.lexists(p) or p.is_symlink():
+            if not os.path.lexists(p) or not _stored_exactly(self.ledger.root, p):
                 return {}
             data = _read_regular(p, _SAVED_MAX + 1)
         except OSError:
@@ -818,6 +819,21 @@ _SAVE_DEPTH = 6         # confirmations before a header is saved: the block and 
 # Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
 # block's mining to make; one with less is not taken from a public source or a saved file.
 _MAX_TARGET = (0xffff << 208) // (5 * 10**13)
+
+
+def _stored_exactly(root: Path, p: Path) -> bool:
+    """True if every name from `root` down to `p` is stored on disk exactly as asked
+    and none is a link. A Mac's disk opens ledger/proofs/000003.btc-header for
+    Ledger/Proofs/000003.BTC-header, or through a linked folder, and no check on Linux
+    can list every such alias; so a saved header is read only by its exact names."""
+    for q in [root, *(root / Path(*p.relative_to(root).parts[:i + 1])
+                      for i in range(len(p.relative_to(root).parts)))]:
+        try:
+            if q.is_symlink() or q.name not in os.listdir(q.parent):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _read_regular(p: Path, limit: int) -> bytes | None:
