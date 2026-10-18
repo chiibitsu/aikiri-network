@@ -482,18 +482,23 @@ class BitcoinWitness:
             return "failed", "no attestation that leads to Bitcoin"
 
         # A saved header (see save_header) is taken only if it carries this proof and
-        # Bitcoin's proof of work; any other is ignored, and the block looked up.
+        # Bitcoin's proof of work; any other is ignored, and the block looked up. It is
+        # named by what it proves itself, its hash and the time it was mined, never by
+        # the height saved beside it: a header does not carry its height, so a genuine
+        # later header saved under an earlier one would otherwise backdate the proof.
         saved = self._saved_headers(block)
         for height, msg in attested:
             header = _from_saved(saved.get(height))
             if header is None:
                 continue
             try:
-                BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
+                mined = BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
             except VerificationError:
                 continue
             self._confirmed[block.index] = (height, header.raw, "saved")
-            return "complete", f"in Bitcoin block {height}, by its saved header"
+            block_hash = hashlib.sha256(hashlib.sha256(header.raw).digest()).digest()[::-1].hex()
+            when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(mined))
+            return "complete", f"in the Bitcoin block {block_hash}, mined {when}, by its saved header"
 
         # One attestation Bitcoin confirms is enough. One it contradicts fails the
         # proof, whatever else could not be looked up; only when neither happens is
@@ -545,7 +550,9 @@ class BitcoinWitness:
         except Exception as e:  # the tip not to be had
             return f"not saved: the chain's tip could not be had ({_kind(e) if source == 'public' else _plain(str(e))})"
         if tip - height + 1 < _SAVE_DEPTH:
-            return f"not saved: Bitcoin block {height} has {max(tip - height + 1, 0)} confirmations, {_SAVE_DEPTH} needed"
+            n = max(tip - height + 1, 0)
+            return (f"not saved: Bitcoin block {height} has {n} confirmation{'' if n == 1 else 's'}, "
+                    f"{_SAVE_DEPTH} needed")
         import tempfile
         p = self.ledger.proof_path(block.index, "btc-header")
         fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
@@ -668,7 +675,7 @@ class BitcoinWitness:
             t.start()
             t.join(left)
         if not box:
-            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per verify run")
+            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per run")
         if "error" in box:
             raise box["error"]
         return box["value"]
