@@ -1626,6 +1626,64 @@ def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
     assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
 
 
+class _Named(_Honest):
+    def __init__(self, rpc, **kw):
+        super().__init__(**kw)
+        self.rpc = rpc
+
+
+class _DeadNamed:
+    address = None
+
+    def __init__(self, rpc):
+        self.rpc = rpc
+
+    def __getattr__(self, name):
+        def fail(*a, **k):
+            raise ConnectionError("refused")
+        return fail
+
+
+def test_a_passing_quorum_names_an_endpoint_that_did_not_answer(ledger, trust):
+    """A 2-of-3 pass printed what a 3-of-3 pass printed, so a check meant to show the
+    servers answer could not show one was dead."""
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.BASE_VERIFIED, report
+    assert "Base: 2 of 3 endpoints answered every read; not https://dead" in report, report
+
+
+def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert "Base: all 3 endpoints answered every read" in report, report
+
+
+def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
+    q = QuorumBase([_DeadNamed("https://dead"), _Named("https://b"), _Named("https://c")])
+    assert q.address == _Honest.address
+
+
+@pytest.mark.parametrize("hours, state", [(1, State.VALID_LOCALLY), (7, State.INVALID)])
+def test_a_block_still_not_anchored_hours_after_it_was_written_fails(ledger, sk, mac, trust, hours, state):
+    """Nightly is the run that checks the newest block's anchor once it is final; one
+    still missing long after can no longer pass as "still settling"."""
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    got, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=hours))
+    assert got == state, report
+    if state == State.INVALID:
+        assert any("block 1: not anchored on Base 7 hours after it was written" in r for r in report)
+
+
+def test_the_runners_install_the_urllib3_the_retry_needs():
+    assert "urllib3>=2.6.3" in Path("requirements.in").read_text()
+
+
 def test_a_quorum_still_checks_the_deployed_code_pin(ledger, sk, mac, trust):
     """The pin was read through `base.w3`, which a QuorumBase does not have. So the
     multi-endpoint setup ~ the one that is actually recommended ~ skipped the check
@@ -1961,8 +2019,8 @@ def test_a_single_endpoint_is_one_reader_and_a_wrong_chain_refuses(monkeypatch, 
 def test_the_read_retry_is_bounded_as_stated():
     from aikiri_ledger.cli import _retrying_session
     retry = _retrying_session().get_adapter("https://x").max_retries
-    assert set(retry.status_forcelist) == {429, 502, 503, 504}
-    assert (retry.total, retry.status, retry.connect, retry.read) == (8, 8, 1, 1)
+    assert set(retry.status_forcelist) == {429, *range(500, 600)}
+    assert (retry.total, retry.status, retry.connect, retry.read, retry.other) == (8, 8, 1, 1, 1)
     assert retry.respect_retry_after_header
 
 
@@ -1971,6 +2029,15 @@ def test_the_drop_budget_is_as_stated():
     from aikiri_ledger.cli import _DropOnTransportFailure
     params = inspect.signature(_DropOnTransportFailure.__init__).parameters
     assert (params["budget"].default, params["slow"].default) == (120.0, 5.0)
+
+
+def test_a_body_that_stalls_after_the_headers_drops_an_endpoint():
+    """requests raises ConnectionError(ReadTimeoutError) itself when the body stalls,
+    with no MaxRetryError around it, so the timeout was missed and the endpoint kept."""
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+    from urllib3.exceptions import ReadTimeoutError
+    from aikiri_ledger.cli import _spent
+    assert _spent(RequestsConnectionError(ReadTimeoutError(None, "/", "Read timed out.")))
 
 
 def test_a_connect_timeout_drops_an_endpoint():
@@ -2349,9 +2416,10 @@ def _scripted_rpc(*script):
     return server, hits
 
 
-@pytest.mark.parametrize("blip", [502, 503, 504, "reset"])
+@pytest.mark.parametrize("blip", [500, 502, 503, 504, 520, 522, 524, "reset"])
 def test_a_one_off_server_error_or_reset_is_retried_as_web3_did(blip):
-    """main's read path (web3's own retry) got past a single 5xx or reset;
+    """main's read path (web3's own retry) got past a single 5xx (Cloudflare's 52x
+    included) or reset;
     the session that replaced it must too, or one blip fails a check main
     passed."""
     import threading
