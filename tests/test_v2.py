@@ -2937,9 +2937,19 @@ def test_the_test_message_is_sent_only_by_hand():
 def test_a_failed_alert_never_turns_a_block_run_red():
     """A Telegram error on `ask` would fail its job, so the block run, though the block
     landed, and alerts.yml would then report "block failure"."""
-    text = _wf("block.yml")
-    ask = text[text.index("  ask:\n"):text.index("  block:\n")]
-    assert "continue-on-error: true" in ask
+    keys = [l.split("#")[0].rstrip() for l in _wf("block.yml").splitlines()]
+    ask = keys[keys.index("  ask:"):keys.index("  block:")]
+    assert "    continue-on-error: true" in ask            # the job: a timeout, a lost runner
+    assert "        continue-on-error: true" in ask        # the step: a Telegram error
+
+
+@pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
+def test_the_manual_test_fails_when_a_secret_is_not_set(tmp_path, missing):
+    step = _step("alerts.yml", "the secrets are set")
+    env = {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42"}
+    assert _send(step["run"], tmp_path, **env)[0] == 0
+    env[missing] = ""
+    assert _send(step["run"], tmp_path, **env)[0] != 0
 
 
 def test_an_alert_text_is_built_only_from_known_fields():

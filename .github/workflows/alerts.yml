@@ -44,6 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - name: the secrets are set
+        # A test with nothing to send must not look like one that worked.
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "repository secret TELEGRAM_BOT_TOKEN is not set"; exit 1; }
+          test -n "$TELEGRAM_CHAT_ID" || { echo "repository secret TELEGRAM_CHAT_ID is not set"; exit 1; }
       - name: send a test message
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

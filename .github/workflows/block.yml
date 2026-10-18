@@ -25,6 +25,7 @@ jobs:
     # never holds a block or turns its run red.
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    continue-on-error: true  # the job's own failure too: a timeout, a lost runner
     permissions: {}
     steps:
       - name: tell Chii a block is waiting for her approval
