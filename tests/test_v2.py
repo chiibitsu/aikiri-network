@@ -1617,11 +1617,11 @@ def test_a_base_failure_ends_the_report_with_the_state(ledger, trust):
 def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
     """The line named the quorum and its finalized height on every path, the
     single endpoint's included, and never what Base was seen to hold."""
-    ledger.append_from_request(make_request(ledger, sk, mac), sk,
-                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
     class Behind(_Honest):
         def latest_index(self, block=None): return 0
-    state, report = verify_all(ledger, trust, base=Behind())
+    state, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(minutes=5))
     (line,) = [r for r in report if r.startswith("block 1:") and "anchored" in r]
     assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
 
@@ -1630,6 +1630,8 @@ class _Named(_Honest):
     def __init__(self, rpc, **kw):
         super().__init__(**kw)
         self.rpc = rpc
+
+    def latest_index(self, block=None): return 0  # the fixture ledger is genesis alone
 
 
 class _DeadNamed:

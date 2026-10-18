@@ -138,11 +138,11 @@ def _retrying_session():
                 raise MaxRetryError(_pool, url, error) from error
             return super().increment(method, url, response, error, _pool, _stacktrace)
 
-    # A rate limit (429) or a gateway's 502/503/504 is retried up to 8 times,
-    # as main's web3 retry got past a single one; a reset and a refused
-    # connection once each.
-    retry = NoStalledRetry(total=8, connect=1, read=1, status=8, backoff_factor=0.05,
-                           status_forcelist=(429, 502, 503, 504),
+    # A rate limit (429) or any server error (5xx, Cloudflare's 52x included) is
+    # retried up to 8 times, as main's web3 retry got past a single one; a reset,
+    # a refused connection and any other error (a TLS failure, say) once each.
+    retry = NoStalledRetry(total=8, connect=1, read=1, other=1, status=8, backoff_factor=0.05,
+                           status_forcelist=(429, *range(500, 600)),
                            allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
                            retry_after_max=10)
     session = Session()
@@ -173,6 +173,7 @@ class _Unreachable:
     address = None
 
     def __init__(self, rpc: str, error: BaseException):
+        self.rpc = rpc
         self.reason = f"rpc {rpc} unusable: {error}"
 
     def __getattr__(self, name):
@@ -202,7 +203,8 @@ class _DropOnTransportFailure:
     def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
                  clock=None):
         import time
-        self._rpc, self._reader, self._dropped = rpc, reader, None
+        self.rpc = self._rpc = rpc
+        self._reader, self._dropped = reader, None
         self._budget, self._slow, self._spent_s = budget, slow, 0.0
         self._clock = clock or time.monotonic
 
@@ -240,10 +242,11 @@ def _spent(e: BaseException) -> bool:
     if isinstance(e, (RetryError, Timeout)):
         return True
     inner = e.args[0] if e.args else None
-    reason = getattr(inner, "reason", None)
-    # NewConnectionError subclasses ConnectTimeoutError, but a refusal is
-    # instant: it is not what makes an endpoint expensive to keep asking.
-    return isinstance(reason, Urllib3Timeout) and not isinstance(reason, NewConnectionError)
+    # Wrapped in MaxRetryError when the retry gave up; bare when the body stalled
+    # after the headers. NewConnectionError subclasses ConnectTimeoutError, but a
+    # refusal is instant: it is not what makes an endpoint expensive to keep asking.
+    return any(isinstance(x, Urllib3Timeout) and not isinstance(x, NewConnectionError)
+               for x in (inner, getattr(inner, "reason", None)))
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):

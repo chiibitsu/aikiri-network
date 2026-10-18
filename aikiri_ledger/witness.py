@@ -722,14 +722,16 @@ class QuorumBase:
         self.readers = list(readers)
         self.quorum = quorum or (len(self.readers) // 2 + 1)
         self._at = None  # the height every read of this run is made at
+        self._missed = set()  # readers that failed a read this run
 
     def _gather(self, fn):
         answers, errors = [], []
-        for r in self.readers:
+        for i, r in enumerate(self.readers):
             try:
                 answers.append(fn(r))
             except Exception as e:  # noqa: BLE001 - an endpoint that cannot answer does not vote
                 errors.append(repr(e))
+                self._missed.add(i)
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
                               f"{self.quorum} needed. {'; '.join(errors)}")
@@ -745,11 +747,11 @@ class QuorumBase:
         if self._at is not None:
             return self._at
         heights = []
-        for r in self.readers:
+        for i, r in enumerate(self.readers):
             try:
                 heights.append(int(r.finalized_block()))
             except Exception:  # noqa: BLE001
-                pass
+                self._missed.add(i)
         if len(heights) < self.quorum:
             raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
                               f"finalized block; {self.quorum} needed. Reading at each node's "
@@ -761,9 +763,21 @@ class QuorumBase:
         return self._at
 
     # ---- the read interface the verifier uses ----
+    def summary(self) -> str:
+        """Which endpoints answered every read, said on a pass too: a 2-of-3 pass
+        otherwise reads like a 3-of-3 one, and one dead server goes unseen."""
+        n = len(self.readers)
+        if not self._missed:
+            return f"Base: all {n} endpoints answered every read"
+        names = [getattr(self.readers[i], "rpc", None) or f"endpoint {i + 1}"
+                 for i in sorted(self._missed)]
+        return f"Base: {n - len(self._missed)} of {n} endpoints answered every read; not {', '.join(names)}"
+
     @property
     def address(self):
-        return getattr(self.readers[0], "address", None)
+        # From the first reader that has one: a dead first endpoint has none, and
+        # taking its None skipped the contract pin.
+        return next((a for r in self.readers if (a := getattr(r, "address", None)) is not None), None)
 
     def latest_index(self) -> int:
         at = self.common_block()
