@@ -62,13 +62,13 @@ BASE VERIFIED — BITCOIN PENDING
 FULLY VERIFIED
 ```
 
-There is no grace window. A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it. Only the top state may be called verified. Verify reads each Bitcoin proof (`.ots`) itself: it must be a proof of that block's hash, and one that names a Bitcoin block is checked against that block's header. The header comes from your Bitcoin node (the one `~/.bitcoin/bitcoin.conf` names) or, when no node answers, from both mempool.space and blockstream.info: they must give the same header, and it must hash to the block they name and carry Bitcoin's proof of work. `--no-public-bitcoin` turns the public sources off. All Bitcoin lookups in one run share a 60-second limit. Where no header can be had, the report says the proof was not checked and the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`. Verify asks no calendar; a proof not yet in a Bitcoin block is pending.
+A block that is written but not yet anchored leaves the ledger at `VALID LOCALLY`, which is the honest thing to say about it, for up to 6 hours after it was written (time for its anchor to land and become final on Base); still missing after that, verify fails. Only the top state may be called verified. Verify reads each Bitcoin proof (`.ots`) itself: it must be a proof of that block's hash, and one that names a Bitcoin block is checked against that block's header. The header comes from your Bitcoin node (the one `~/.bitcoin/bitcoin.conf` names) or, when no node answers, from both mempool.space and blockstream.info: they must give the same header, and it must hash to the block they name and carry Bitcoin's proof of work. `--no-public-bitcoin` turns the public sources off. All Bitcoin lookups in one run share a 60-second limit. Where no header can be had, the report says the proof was not checked and the ledger goes no higher than `BASE VERIFIED — BITCOIN PENDING`. Verify asks no calendar; a proof not yet in a Bitcoin block is pending.
 
 ```
 aikiri-ledger --trust ~/aikiri-trust.json verify --rpc <a> --rpc <b> --rpc <c>
 ```
 
-Several RPCs are read at a common finalized block. A majority must answer and they must agree; disagreement is never success. A trust file loaded from inside this repository is labelled `repo` and capped at `VALID LOCALLY`, because a verifier that reads its expectations from the thing it is checking proves nothing.
+Several RPCs are read, the per-block reads at the finalized height a majority of them has reached. A majority must answer and they must agree; disagreement is never success. A trust file loaded from inside this repository is labelled `repo` and capped at `VALID LOCALLY`, because a verifier that reads its expectations from the thing it is checking proves nothing.
 
 ## Writing a block
 
@@ -92,9 +92,9 @@ solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-stati
 ## Workflows
 
 - `ci.yml` ~ tests on Linux and macOS, Python 3.11, 3.12, 3.13.
-- `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify. A failed stamp does not stop the commit; nightly stamps it.
+- `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify. A failed stamp does not stop the commit; nightly stamps it. Its verify reads Base through three public servers at the finalized height, which the block just anchored has usually not reached, so it checks the blocks before it. Verify names any server that did not answer, even when the run passes, and fails a block still not anchored 6 hours after it was written.
 - `nightly.yml` ~ upgrade Bitcoin proofs, stamp any block with no `.ots` yet, and report
-  the state. Writes no blocks, and proposes any new proof as a pull request rather
+  the state, checking the newest block on Base once it is final. Writes no blocks, and proposes any new proof as a pull request rather
   than pushing it.
 - `deploy.yml`, `genesis.yml` ~ ran once each; both refuse to run again.
 - `alerts.yml` ~ Telegram messages about this repository's runs on `main` (never a fork's or a branch's): when a block run is requested, and so waits for your approval, and when a run of block, nightly, tests, deploy or genesis fails or is cancelled. `block.yml` itself is not touched. Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as secrets of an `alerts` environment (Settings → Environments), limited to `main`, with no required reviewer; without them nothing is sent. Run it by hand (Actions → alerts → Run workflow) to send a test message; that run is red until both secrets are set, and says Telegram's reason if Telegram refuses.

@@ -18,11 +18,12 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from web3 import Web3
 
 from .chain import Ledger, Block
-from .errors import QuorumError
+from .errors import QuorumError, describe
 
 CONTRACT_SRC = Path(__file__).resolve().parent.parent / "contracts" / "AikiriLedger.sol"
 
@@ -162,8 +163,10 @@ class BaseWitness:
         answering with the wrong number is what it cannot tolerate."""
         return int(self.w3.eth.get_block("finalized")["number"])
 
-    def record(self, index: int) -> dict:
-        h, at, by = self.contract.functions.blocks(index).call()
+    def record(self, index: int, block_identifier=None) -> dict:
+        call = self.contract.functions.blocks(index)
+        h, at, by = (call.call(block_identifier=block_identifier)
+                     if block_identifier is not None else call.call())
         return {"blockHash": h.hex(), "anchoredAt": int(at), "by": by}
 
 
@@ -703,13 +706,23 @@ def write_base_receipt(ledger: Ledger, block: Block, tx_hash: str, contract_addr
     return p
 
 
+def _host(rpc) -> str | None:
+    """An endpoint's host, the one part of its URL a report names: a key sits in
+    the path (https://host/v2/<key>), the query or the userinfo."""
+    try:
+        return urlsplit(rpc or "").hostname
+    except ValueError:  # malformed, e.g. an unclosed "[": named by its place instead
+        return None
+
+
 class QuorumBase:
     """Several independent readers of the same contract.
 
     One RPC is one party's word. Requiring every endpoint to answer makes a
     verifier that fails whenever a provider is down; requiring none makes a
     verifier that believes whoever answers first. So: a majority must answer,
-    at a block height they all have, and they must agree. Disagreement is never
+    the per-block reads are made at one block height a majority has reached,
+    and they must agree. Disagreement is never
     a success ~ it is the loudest possible signal that something is wrong.
     """
 
@@ -718,39 +731,72 @@ class QuorumBase:
             raise QuorumError("no RPC endpoints given")
         self.readers = list(readers)
         self.quorum = quorum or (len(self.readers) // 2 + 1)
+        self._at = None  # the height every read of this run is made at
+        self._missed = {}  # reader index: describe() of the first read it failed this run
+        self._disagreed = False
 
     def _gather(self, fn):
         answers, errors = [], []
-        for r in self.readers:
+        for i, r in enumerate(self.readers):
             try:
                 answers.append(fn(r))
             except Exception as e:  # noqa: BLE001 - an endpoint that cannot answer does not vote
-                errors.append(repr(e))
+                # By its host and describe(), never the error's own text: that
+                # carries the endpoint's URL, and a keyed URL its key.
+                name = _host(getattr(r, "rpc", None)) or f"endpoint {i + 1}"
+                errors.append(f"{name}: {describe(e)}")
+                self._missed.setdefault(i, describe(e))
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
                               f"{self.quorum} needed. {'; '.join(errors)}")
         distinct = {repr(a) for a in answers}
         if len(distinct) > 1:
+            self._disagreed = True
             raise QuorumError(f"endpoints disagree: {sorted(distinct)}")
         return answers[0]
 
     def common_block(self) -> int:
+        # Chosen once and kept: recomputed per read, an endpoint failing after
+        # its first answer moved the height between latestIndex and matches,
+        # and an honest anchor between the two heights read as a mismatch.
+        if self._at is not None:
+            return self._at
         heights = []
-        for r in self.readers:
+        for i, r in enumerate(self.readers):
             try:
                 heights.append(int(r.finalized_block()))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                self._missed.setdefault(i, describe(e))
         if len(heights) < self.quorum:
             raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
                               f"finalized block; {self.quorum} needed. Reading at each node's "
                               f"own head instead would drop the guarantee this class exists for")
-        return min(heights)
+        # The highest height a quorum has reached, not the lowest any one
+        # reported: the lowest let a single endpoint claiming an old height
+        # pull every read back before the latest anchor.
+        self._at = sorted(heights, reverse=True)[self.quorum - 1]
+        return self._at
 
     # ---- the read interface the verifier uses ----
+    def summary(self) -> str:
+        """Which endpoints answered every read, said on a pass too: a 2-of-3 pass
+        otherwise reads like a 3-of-3 one, and one dead server goes unseen."""
+        n = len(self.readers)
+        but = " (and they disagreed)" if self._disagreed else ""
+        if not self._missed:
+            return f"Base: all {n} endpoints answered every read{but}"
+        # Each with why, by type and status only: a one-off 429 is rerun, a server that
+        # cannot serve state at the finalized height is swapped, and only the why tells.
+        names = [f"{_host(getattr(self.readers[i], 'rpc', None)) or f'endpoint {i + 1}'} ({why})"
+                 for i, why in sorted(self._missed.items())]
+        return (f"Base: {n - len(self._missed)} of {n} endpoints answered every read{but}; "
+                f"not {', '.join(names)}")
+
     @property
     def address(self):
-        return getattr(self.readers[0], "address", None)
+        # From the first reader that has one: a dead first endpoint has none, and
+        # taking its None skipped the contract pin.
+        return next((a for r in self.readers if (a := getattr(r, "address", None)) is not None), None)
 
     def latest_index(self) -> int:
         at = self.common_block()
@@ -771,5 +817,8 @@ class QuorumBase:
         return self._gather(lambda r: r.owner())
 
     def record(self, index: int) -> dict:
-        return self._gather(lambda r: r.record(index))
+        # Pinned like every other per-block read: at its own head, a node that
+        # had not reached the latest anchor answered with an all-zero record.
+        at = self.common_block()
+        return self._gather(lambda r: r.record(index, at))
 

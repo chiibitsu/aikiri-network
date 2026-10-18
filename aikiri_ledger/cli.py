@@ -38,7 +38,7 @@ from .approval import ApprovalKey, verify_approval
 from .canonical import canonical_bytes, loads_strict
 from .chain import (Ledger, VALIDATOR_KEY_ENV, key_from_env, load_key, new_key, save_key,
                     sha256_file)
-from .errors import SchemaError, TrustError
+from .errors import EndpointDropped, EndpointUnusable, SchemaError, TrustError, WrongChain, describe
 from .request import Request, new_nonce, parse_roots
 from . import softkey
 from .trust import Trust
@@ -111,12 +111,141 @@ def _base_key() -> str:
     raise SystemExit(f"no wallet key: set {BASE_KEY_ENV} or write it to {DEFAULT_BASE_ENV}")
 
 
-def _w3(rpc: str, chain_id: int | None):
+def _retrying_session():
+    """For reads only. A public RPC rate-limits under load, and web3.py's own
+    tolerance for that is short: measured at 5 attempts total, giving up
+    inside 2.4s. This gives each HTTP request 9 attempts; a contract read
+    makes 3 requests (measured, web3 8: eth_chainId, eth_call, eth_chainId), so the
+    figures below are per request and up to three times that per read. The
+    waits between attempts come to ~13s, or up to 80s when the server sends
+    Retry-After (each wait is the backoff step or that header capped at 10s
+    instead); each attempt can also take up to web3's 30s timeout before its
+    answer arrives. A rate limit longer than that is the quorum's job; with
+    only one endpoint nothing outlasts it, and verify fails. The signing path
+    keeps web3's default: a retried broadcast can report "already known" for
+    a transaction that landed, and reconcile already owns that case."""
+    from requests import Session
+    from requests.adapters import HTTPAdapter
+    from urllib3.exceptions import MaxRetryError, ReadTimeoutError
+    from urllib3.util.retry import Retry
+
+    class NoStalledRetry(Retry):
+        """A read that timed out is never retried: web3's timeout is 30s, and
+        retries of it would hold the job. Any other read error is a reset."""
+        def increment(self, method=None, url=None, response=None, error=None, _pool=None,
+                      _stacktrace=None):
+            if isinstance(error, ReadTimeoutError):
+                raise MaxRetryError(_pool, url, error) from error
+            return super().increment(method, url, response, error, _pool, _stacktrace)
+
+    # A rate limit (429) or any server error (5xx, Cloudflare's 52x included) is
+    # retried up to 8 times, as main's web3 retry got past a single one; a reset,
+    # a refused connection and any other error (a TLS failure, say) once each.
+    retry = NoStalledRetry(total=8, connect=1, read=1, other=1, status=8, backoff_factor=0.05,
+                           status_forcelist=(429, *range(500, 600)),
+                           allowed_methods=frozenset({"POST"}), respect_retry_after_header=True,
+                           retry_after_max=10)
+    session = Session()
+    session.max_redirects = 0  # an endpoint may not send verify's POST anywhere else
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
     from web3 import Web3
-    w3 = Web3(Web3.HTTPProvider(rpc))
+    if retrying:  # the session is the one retry layer; web3's own would multiply it
+        provider = Web3.HTTPProvider(rpc, session=_retrying_session(),
+                                     exception_retry_configuration=None)
+    else:
+        provider = Web3.HTTPProvider(rpc)
+    w3 = Web3(provider)
     if chain_id is not None and w3.eth.chain_id != chain_id:
-        raise SystemExit(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
+        raise WrongChain(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
     return w3
+
+
+class _Unreachable:
+    """An endpoint that could not be used while the quorum was being built:
+    unreachable, still rate-limited, or on the wrong chain. It stays in the
+    count, so it votes against and never for, and every call on it raises
+    why it was dropped."""
+    address = None
+
+    def __init__(self, rpc: str, error: BaseException):
+        self.rpc = rpc
+        self.reason = describe(error)
+
+    def __getattr__(self, name):
+        def fail(*a, **k):
+            raise EndpointUnusable(self.reason)
+        return fail
+
+
+class _DropOnTransportFailure:
+    """One endpoint's reader, until a read exhausts its retries or times
+    out. From then on every call fails at once. The quorum asks its readers
+    one after another, 4 or 5 reads per run plus 2 per block, so an
+    endpoint left in paying its full retry budget or web3's 30s timeout each
+    time would hold the job past its timeout. A one-off reset or refusal
+    costs nothing to try again and fails only that read; a JSON-RPC error
+    is an answer. Neither drops it. An endpoint that answers every time but
+    only after its 7th or 8th retry spends nothing and is dropped instead
+    once its reads over `slow` seconds have taken `budget` seconds in all
+    this run. Only reads over `slow` count, so a healthy endpoint never runs
+    the budget down however many blocks the ledger holds; the cost is that
+    an endpoint just under `slow` on every read is never dropped, and what
+    it adds grows with the ledger. The budget is checked between reads, not
+    inside one: an endpoint that trickles a single reply out byte by byte is
+    stopped only by the step's own timeout. Both fail the run, never pass
+    it."""
+
+    def __init__(self, rpc: str, reader, budget: float = 120.0, slow: float = 5.0,
+                 clock=None):
+        import time
+        self.rpc = rpc
+        self._reader, self._dropped = reader, None
+        self._budget, self._slow, self._spent_s = budget, slow, 0.0
+        self._clock = clock or time.monotonic
+
+    def __getattr__(self, name):
+        attr = getattr(self._reader, name)
+        if not callable(attr):
+            return attr
+
+        def call(*a, **k):
+            if self._dropped:
+                raise EndpointDropped(self._dropped)
+            start = self._clock()
+            try:
+                return attr(*a, **k)
+            except Exception as e:  # noqa: BLE001 - re-raised; only the kind decides a drop
+                if _spent(e):
+                    self._dropped = describe(e)
+                raise
+            finally:
+                took = self._clock() - start
+                if took > self._slow:
+                    self._spent_s += took
+                if not self._dropped and self._spent_s > self._budget:
+                    self._dropped = f"over its {self._budget:.0f}s budget ({self._spent_s:.0f}s)"
+        return call
+
+
+def _spent(e: BaseException) -> bool:
+    """Retries exhausted, or a timeout. requests reports a read timeout under
+    a retrying adapter as ConnectionError(MaxRetryError(ReadTimeoutError)),
+    not as Timeout, so the reason is read off the wrapped error."""
+    from requests.exceptions import RetryError, Timeout
+    from urllib3.exceptions import NewConnectionError, TimeoutError as Urllib3Timeout
+    if isinstance(e, (RetryError, Timeout)):
+        return True
+    inner = e.args[0] if e.args else None
+    # Wrapped in MaxRetryError when the retry gave up; bare when the body stalled
+    # after the headers. NewConnectionError subclasses ConnectTimeoutError, but a
+    # refusal is instant: it is not what makes an endpoint expensive to keep asking.
+    return any(isinstance(x, Urllib3Timeout) and not isinstance(x, NewConnectionError)
+               for x in (inner, getattr(inner, "reason", None)))
 
 
 def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
@@ -125,11 +254,18 @@ def _base_reader(cfg: dict, trust: Trust, rpcs: list[str], need_signer: bool):
     if not contract or not urls:
         return None
     abi = compile_contract()["abi"]
-    pk = _base_key() if need_signer else None
-    readers = [BaseWitness(_w3(u, trust.chain_id or cfg.get("chainId")), contract, abi,
-                           account=cfg.get("account"), private_key=pk) for u in urls]
-    if need_signer or len(readers) == 1:
-        return readers[0]
+    chain_id = trust.chain_id or cfg.get("chainId")
+    if need_signer or len(urls) == 1:
+        pk = _base_key() if need_signer else None
+        return BaseWitness(_w3(urls[0], chain_id, retrying=not need_signer), contract, abi,
+                           account=cfg.get("account"), private_key=pk)
+    readers = []
+    for u in urls:
+        try:
+            readers.append(_DropOnTransportFailure(u, BaseWitness(
+                _w3(u, chain_id, retrying=True), contract, abi, account=cfg.get("account"))))
+        except (Exception, WrongChain) as e:  # noqa: BLE001 - dead or wrong-chain: it does not vote
+            readers.append(_Unreachable(u, e))
     return QuorumBase(readers)
 
 

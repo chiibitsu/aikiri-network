@@ -16,7 +16,7 @@ from web3 import Web3, EthereumTesterProvider
 from aikiri_ledger.chain import Ledger, Block, new_key, MANILA
 from aikiri_ledger.canonical import (canonical_bytes, domain_hash, loads_strict, strict, hex64,
                                      BLOCK_DOMAIN_V2, APPROVAL_DOMAIN_V1)
-from aikiri_ledger.errors import SchemaError, TrustError
+from aikiri_ledger.errors import EndpointDropped, EndpointUnusable, SchemaError, TrustError
 from aikiri_ledger.approval import ApprovalKey, SoftwareApprover, approval_message, verify_approval
 from aikiri_ledger.request import Request
 from aikiri_ledger.trust import Trust
@@ -406,6 +406,7 @@ def test_failed_bitcoin_proof_is_a_failure_not_a_shrug(ledger, sk, mac, trust):
             return "failed", "Bad attestation"
     state, report = verify_all(ledger, trust, bitcoin=FailingBtc())
     assert state == State.INVALID and any("bitcoin" in r.lower() for r in report)
+    assert report[-1] == State.text(State.INVALID), report  # nightly's summary says the state
 
 
 @functools.lru_cache(maxsize=None)
@@ -1598,9 +1599,387 @@ class _Honest:
     def latest_index(self, block=None): return 1
     def genesis_hash(self): return None
     def owner(self): return None
-    def record(self, i): return {"blockHash": None, "anchoredAt": 0, "by": None}
+    def record(self, i, block=None): return {"blockHash": None, "anchoredAt": 0, "by": None}
     def finalized_block(self): return self._finalized
     def code_hash(self, block=None): return self._code
+
+
+def test_a_base_failure_ends_the_report_with_the_state(ledger, trust):
+    """Nightly's summary is the report: a failed Base check must say INVALID,
+    not only "required at least VALID LOCALLY"."""
+    class Lying(_Honest):
+        def latest_index(self, block=None): return 0
+        def matches(self, b, block=None): return False
+    state, report = verify_all(ledger, trust, base=Lying())
+    assert state == State.INVALID and report[-1] == State.text(State.INVALID), report
+
+
+def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
+    """The line named the quorum and its finalized height on every path, the
+    single endpoint's included, and never what Base was seen to hold."""
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    state, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(minutes=5))
+    (line,) = [r for r in report if r.startswith("block 1:") and "Base" in r]
+    assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
+
+
+class _Named(_Honest):
+    def __init__(self, rpc, **kw):
+        super().__init__(**kw)
+        self.rpc = rpc
+
+    def latest_index(self, block=None): return 0  # the fixture ledger is genesis alone
+
+
+class _DeadNamed:
+    address = None
+
+    def __init__(self, rpc):
+        self.rpc = rpc
+
+    def __getattr__(self, name):
+        def fail(*a, **k):
+            raise ConnectionError("refused")
+        return fail
+
+
+def test_a_passing_quorum_names_an_endpoint_that_did_not_answer(ledger, trust):
+    """A 2-of-3 pass printed what a 3-of-3 pass printed, so a check meant to show the
+    servers answer could not show one was dead."""
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.BASE_VERIFIED, report
+    assert "Base: 2 of 3 endpoints answered every read; not dead (ConnectionError)" in report, report
+
+
+def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert "Base: all 3 endpoints answered every read" in report, report
+
+
+def test_the_endpoint_summary_is_printed_on_a_failure_too(ledger, trust):
+    trust.code_keccak = None
+    class Lying(_Named):
+        def matches(self, b, block=None): return False
+    q = QuorumBase([Lying("https://a"), _DeadNamed("https://dead"), Lying("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.INVALID and report[-2] == "Base: 2 of 3 endpoints answered every read; not dead (ConnectionError)", report
+
+
+def test_an_endpoint_that_answers_the_height_but_misses_a_read_is_named():
+    class Flaky(_Named):
+        def latest_index(self, block=None): raise ConnectionError("reset")
+    q = QuorumBase([_Named("https://a"), Flaky("https://flaky"), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not flaky (ConnectionError)")
+
+
+def test_an_endpoint_with_no_rpc_is_named_by_its_place():
+    class Bare(_Honest):
+        def latest_index(self, block=None): raise ConnectionError("reset")
+    q = QuorumBase([_Named("https://a"), Bare(), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not endpoint 2 (ConnectionError)")
+
+
+def test_both_wrappers_carry_their_rpc():
+    from aikiri_ledger.cli import _DropOnTransportFailure, _Unreachable
+    assert _Unreachable("https://x", OSError("down")).rpc == "https://x"
+    assert _DropOnTransportFailure("https://y", object()).rpc == "https://y"
+
+
+@pytest.mark.parametrize("age, says", [
+    (timedelta(hours=6), None),                        # the window itself still waits
+    (timedelta(hours=6, seconds=1), "6 hours"),
+    (timedelta(days=2, hours=3), "51 hours"),          # past a day: total hours, not the remainder
+])
+def test_the_anchor_window_and_its_hours(ledger, sk, mac, trust, age, says):
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    state, report = verify_all(ledger, trust, base=Behind(), now=written + age)
+    if says is None:
+        assert state == State.VALID_LOCALLY
+        (line,) = [r for r in report if r.startswith("block 1:") and "Base" in r]
+        assert "verify fails if it is still not anchored 6 hours after it was written" in line, line
+    else:
+        assert state == State.INVALID
+        assert f"block 1: still not anchored on Base {says} after it was written" in report
+
+
+def test_the_quorum_names_an_endpoint_by_host_only():
+    """A keyed RPC URL (https://host/v2/<key>) would otherwise print its key on a pass."""
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://base.example.com/v2/SECRETKEY"),
+                    _Named("https://c")])
+    q.latest_index()
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read; not base.example.com (ConnectionError)"
+
+
+def test_the_quorum_does_not_say_all_answered_as_if_they_agreed():
+    class Other(_Named):
+        def latest_index(self, block=None): return 1
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), Other("https://c")])
+    with pytest.raises(QuorumError):
+        q.latest_index()
+    assert "disagreed" in q.summary(), q.summary()
+
+
+def test_a_disagreement_is_noted_when_an_endpoint_also_missed():
+    class Other(_Named):
+        def latest_index(self, block=None): return 1
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), Other("https://c")])
+    with pytest.raises(QuorumError):
+        q.latest_index()
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read (and they disagreed); not dead (ConnectionError)"
+
+
+@pytest.mark.parametrize("rpc", ["https://u:SECRETKEY@base.example.com:8545/x",
+                                 "https://base.example.com/?apikey=SECRETKEY"])
+def test_the_host_drops_a_key_in_the_userinfo_or_query(rpc):
+    q = QuorumBase([_Named("https://a"), _DeadNamed(rpc), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not base.example.com (ConnectionError)"), q.summary()
+
+
+def test_a_malformed_rpc_is_named_by_its_place_and_the_report_survives(ledger, trust):
+    from aikiri_ledger.cli import _Unreachable
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _Unreachable("http://[bad/v2/SECRETKEY", ValueError("bad")),
+                    _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.BASE_VERIFIED, report
+    assert "Base: 2 of 3 endpoints answered every read; not endpoint 2 (EndpointUnusable: ValueError)" in report, report
+
+
+@pytest.mark.parametrize("rpc, said", [
+    ("https://base.example.com/v2/SECRETKEY", "rpc {rpc} unusable: x"),               # our wrapper
+    ("https://base.example.com/v2/SECRETKEY", "Max retries exceeded with url: /v2/SECRETKEY"),
+    ("https://base.example.com/?apikey=SECRETKEY", "with url: /?apikey=SECRETKEY"),
+    ("https://u:SECRETKEY@Base.Example.com/x", "for url: https://u:SECRETKEY@base.example.com/x"),
+    ("http://[bad/v2/SECRETKEY", "Invalid URL {rpc!r}"),  # unparseable: never sent, printed whole
+])
+def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, said):
+    """The summary named hosts only while the error text a line above it carried
+    each URL, as our wrappers, urllib3 and requests each print it."""
+    from aikiri_ledger.cli import _DropOnTransportFailure, _Unreachable
+    class Dropped:
+        def __getattr__(self, name):
+            def fail(*a, **k):
+                raise ConnectionError("rpc https://k2.example.com/v2/OTHERKEY dropped for this run")
+            return fail
+    q = QuorumBase([_Named("https://a"), _Unreachable(rpc, OSError(said.format(rpc=rpc))),
+                    _DropOnTransportFailure("https://k2.example.com/v2/OTHERKEY", Dropped())])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.INVALID, report
+    assert not [r for r in report if "SECRETKEY" in r or "OTHERKEY" in r], report
+    assert any("k2.example.com" in r and "could not read" in r for r in report), report
+
+
+def test_a_failed_read_says_its_endpoint_and_the_kind_of_error_only():
+    """A library's message carries the URL as it printed it, re-encoded in more ways
+    than a scrub kept up with; the quorum says the error's types and status instead."""
+    from types import SimpleNamespace
+    import requests
+    from urllib3.exceptions import MaxRetryError, NewConnectionError
+    key = "https://h1.example.com/v2/a b'SECRETKEY"
+    class NotFound(_Named):
+        def genesis_hash(self):
+            raise requests.HTTPError("404 for url: https://h1.example.com/v2/a%20b'SECRETKEY",
+                                     response=SimpleNamespace(status_code=404))
+    class Refused(_Named):
+        def genesis_hash(self):
+            raise requests.ConnectionError(MaxRetryError(None, "/v2/SECRETKEY",
+                                                         NewConnectionError(None, "SECRETKEY refused")))
+    class Odd:
+        def genesis_hash(self):
+            raise ValueError("SECRETKEY")
+    q = QuorumBase([NotFound(key), Refused("https://u:SECRETKEY@h2.example.com/x"), Odd()])
+    with pytest.raises(QuorumError) as e:
+        q.genesis_hash()
+    assert str(e.value) == ("0 of 3 endpoints answered; 2 needed. h1.example.com: HTTPError / HTTP 404; "
+                            "h2.example.com: ConnectionError / MaxRetryError / NewConnectionError; "
+                            "endpoint 3: ValueError"), e.value
+
+
+def test_a_rate_limit_that_outlasts_the_retries_says_its_status():
+    """Retries spent on 429s ended as RetryError, which carries no response, so the
+    rate limit this PR exists for read the same as a run of 503s. urllib3's own
+    words carry the status (`too many 429 error responses`); only its digits are kept."""
+    from types import SimpleNamespace
+    from requests.exceptions import RetryError
+    from urllib3.exceptions import MaxRetryError, ResponseError
+    from aikiri_ledger.errors import describe
+    spent = lambda code: RetryError(MaxRetryError(None, "/v2/SECRETKEY",
+                                                  ResponseError(ResponseError.SPECIFIC_ERROR.format(status_code=code))))
+    assert describe(spent(429)) == "RetryError / MaxRetryError / ResponseError / HTTP 429"
+    assert describe(spent(503)) == "RetryError / MaxRetryError / ResponseError / HTTP 503"
+    assert describe(RetryError(MaxRetryError(None, "/", ResponseError("too many 429 error responses; EVIL")))) \
+        == "RetryError / MaxRetryError / ResponseError"
+    assert describe(ValueError("too many 429 error responses")) == "ValueError"  # only urllib3's words count
+    for odd in ("too many 4290 error responses", "too many 42 error responses"):  # urllib3 gives three digits
+        assert describe(RetryError(MaxRetryError(None, "/", ResponseError(odd)))) == "RetryError / MaxRetryError / ResponseError"
+    import requests
+    late = requests.HTTPError(ResponseError("too many 429 error responses"), response=SimpleNamespace(status_code=500))
+    assert describe(late) == "HTTPError / ResponseError / HTTP 429"  # the spent status, not the last response's
+
+
+def test_a_dropped_endpoint_says_why_without_its_url():
+    from requests.exceptions import RetryError
+    from urllib3.exceptions import MaxRetryError, ResponseError
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    class Limited:
+        def finalized_block(self):
+            raise RetryError(MaxRetryError(None, "/v2/SECRETKEY", ResponseError("too many 429 error responses")))
+    r = _DropOnTransportFailure("https://h.example.com/v2/SECRETKEY", Limited())
+    with pytest.raises(RetryError):
+        r.finalized_block()
+    with pytest.raises(EndpointDropped) as e:
+        r.finalized_block()
+    assert str(e.value) == "RetryError / MaxRetryError / ResponseError / HTTP 429"
+
+
+def test_describe_names_each_wrapped_type_once_and_no_deeper_than_four():
+    from aikiri_ledger.errors import describe
+    nested = ValueError(KeyError(OSError(TypeError(IndexError(LookupError())))))
+    assert describe(nested) == "ValueError / KeyError / OSError / TypeError"
+    assert describe(ConnectionError(ConnectionError(OSError()))) == "ConnectionError / OSError"
+
+
+def test_a_wrong_chain_is_a_systemexit_that_names_it():
+    """One endpoint still exits with its reason; in a quorum the type alone says it."""
+    import threading
+    from aikiri_ledger.cli import _w3
+    from aikiri_ledger.errors import WrongChain
+    server, _ = _scripted_rpc()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(WrongChain) as e:
+            _w3(f"http://127.0.0.1:{server.server_port}", 1, retrying=True)
+        assert isinstance(e.value, SystemExit) and "expected 1; refusing" in str(e.value)
+    finally:
+        server.shutdown()
+
+
+def test_a_keyed_endpoint_on_a_real_server_prints_no_key():
+    """Through the real web3, requests and urllib3: each endpoint answers 404."""
+    import threading
+    from aikiri_ledger.cli import _base_reader
+    servers = [_scripted_rpc(*([404] * 4))[0] for _ in range(3)]
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        p = [s.server_port for s in servers]
+        urls = [f"http://127.0.0.1:{p[0]}/v2/a b'SECRETKEY", f"http://127.0.0.1:{p[1]}/x?apikey=SEC%2bRETKEY",
+                f"http://u:SECRETKEY@127.0.0.1:{p[2]}/x"]
+        trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                      code_keccak=None, genesis_hash=None, validator=None)
+        q = _base_reader({}, trust, urls, need_signer=False)
+        with pytest.raises(QuorumError) as e:
+            q.genesis_hash()
+        assert "SEC" not in str(e.value), e.value
+        assert str(e.value).count("127.0.0.1: EndpointUnusable: HTTPError / HTTP 404") == 3, e.value
+    finally:
+        for s in servers:
+            s.shutdown()
+
+
+def test_a_password_the_encoder_refused_is_not_printed():
+    """repr() of a UnicodeEncodeError carries the string it could not encode."""
+    class Refusing(_Named):
+        def latest_index(self, block=None):
+            raise UnicodeEncodeError("latin-1", "u:SECRETпароль", 9, 15, "ordinal not in range(256)")
+    q = QuorumBase([_Named("https://a"), Refusing("https://u:SECRETпароль@b.example.com"),
+                    _DeadNamed("https://c")])
+    with pytest.raises(QuorumError) as e:
+        q.latest_index()
+    assert "SECRET" not in str(e.value) and "b.example.com: UnicodeEncodeError" in str(e.value), e.value
+
+
+def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
+    q = QuorumBase([_DeadNamed("https://dead"), _Named("https://b"), _Named("https://c")])
+    assert q.address == _Honest.address
+
+
+def test_the_anchor_lines_say_final_for_a_quorum_and_anchored_for_one_endpoint(ledger, sk, mac, trust):
+    """A just-anchored block read like a failed anchor; and only a quorum reads at the
+    finalized height, so only a quorum's lines may say "final"."""
+    trust.code_keccak = None
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), _Named("https://c")])
+    _, report = verify_all(ledger, trust, base=q, now=written + timedelta(hours=1))
+    assert ("block 1: written, not yet final on Base (finalized latestIndex 0); verify fails if it "
+            "is still not final 6 hours after it was written") in report, report
+    _, report = verify_all(ledger, trust, base=QuorumBase([_Named("https://a"), _Named("https://b"),
+                                                            _Named("https://c")]),
+                           now=written + timedelta(hours=7))
+    assert "block 1: still not final on Base 7 hours after it was written" in report, report
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
+    assert ("block 1: written, not yet anchored on Base (latestIndex 0); verify fails if it "
+            "is still not anchored 6 hours after it was written") in report, report
+
+
+def test_a_missed_endpoint_is_named_by_its_first_failure_in_order():
+    class Twice(_Named):
+        def finalized_block(self): raise ConnectionError("refused")
+        def latest_index(self, block=None): raise ValueError("later")
+    q = QuorumBase([_Named("https://a"), Twice("https://b"), _DeadNamed("https://c"), _Named("https://d"),
+                    _Named("https://e")])
+    q.latest_index()
+    assert q.summary().endswith("not b (ConnectionError), c (ConnectionError)"), q.summary()
+
+
+def test_a_systemexit_other_than_a_wrong_chain_still_stops_the_build(monkeypatch, trust):
+    from aikiri_ledger import cli
+    _readers(monkeypatch)
+    def w3(url, chain_id, retrying=False):
+        raise SystemExit("stop")
+    monkeypatch.setattr(cli, "_w3", w3)
+    trust.chain_id, trust.contract = 8453, "0x" + "11" * 20
+    with pytest.raises(SystemExit, match="stop"):
+        cli._base_reader({}, trust, ["https://a", "https://b", "https://c"], need_signer=False)
+
+
+def test_the_waiting_line_says_the_window_in_whole_hours_past_a_day(ledger, sk, mac, trust, monkeypatch):
+    from aikiri_ledger import verify as V
+    monkeypatch.setattr(V, "_ANCHOR_WINDOW", timedelta(days=1, hours=2))
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
+    assert any("verify fails if it is still not anchored 26 hours after it was written" in r for r in report), report
+
+
+@pytest.mark.parametrize("hours, state", [(1, State.VALID_LOCALLY), (7, State.INVALID)])
+def test_a_block_still_not_anchored_hours_after_it_was_written_fails(ledger, sk, mac, trust, hours, state):
+    """Nightly is the run that checks the newest block's anchor once it is final; one
+    still missing long after can no longer pass as "still settling"."""
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    got, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=hours))
+    assert got == state, report
+    if state == State.INVALID:
+        assert any("block 1: still not anchored on Base 7 hours after it was written" in r for r in report)
+
+
+def test_the_runners_install_the_urllib3_the_retry_needs():
+    """retry_after_max needs urllib3 2.6.3; the runners install the lock, not the .in."""
+    import re
+    assert "urllib3>=2.6.3" in Path("requirements.in").read_text()
+    pinned = re.search(r"^urllib3==(\d+)\.(\d+)\.(\d+)", Path("requirements.lock").read_text(), re.M)
+    assert tuple(map(int, pinned.groups())) >= (2, 6, 3), pinned[0]
 
 
 def test_a_quorum_still_checks_the_deployed_code_pin(ledger, sk, mac, trust):
@@ -1769,6 +2148,660 @@ def test_nightly_proposes_proofs_instead_of_pushing_to_main():
         "the PR must be scoped to ledger/proofs, not free to touch anything else"
     assert "branch: nightly/bitcoin-proofs" in text, \
         "reuse one branch across nights rather than opening a new PR each time"
+
+
+# --------------------------------------------------- RPC rate-limit retry ----
+
+def _flaky_server(fail_n: int):
+    """An RPC that 429s for the first `fail_n` requests, then answers."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    hits = []
+
+    class Flaky(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(1)
+            if len(hits) <= fail_n:
+                self.send_response(429)
+                self.send_header("Retry-After", "0")
+                self.end_headers()
+                return
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            req = json.loads(body)
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(resp.encode())
+
+        def log_message(self, *a):
+            pass  # the test output does not need the HTTP access log
+
+    server = HTTPServer(("127.0.0.1", 0), Flaky)
+    return server, hits
+
+
+def test_the_rpc_session_survives_a_rate_limit_longer_than_web3s_own_retry():
+    """Block 2's first real run: every write step succeeded, and the trailing
+    `verify` step died on a 429 from mainnet.base.org. web3.py already retries
+    a request a handful of times on its own (measured: 5 attempts, ~2.4s, then
+    it gives up) ~ which is why one isolated 429 was never the failure. What
+    actually happened was a *sustained* rate limit, outlasting that built-in
+    budget, exactly like her retry from a fresh Mac session hit again minutes
+    later. This needs its own retry budget past that point."""
+    import threading
+    from aikiri_ledger.cli import _w3
+
+    server, hits = _flaky_server(fail_n=6)  # past web3's own ~4-failure ceiling
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453, retrying=True)
+        assert w3.eth.chain_id == 8453
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+    assert len(hits) >= 7, f"gave up too early: only {len(hits)} attempts"
+
+
+def test_a_witness_that_cannot_answer_matches_is_a_failure_not_a_crash(ledger, sk, mac, trust):
+    """The exact crash from block 2's first real run: base.matches() raised
+    straight out of verify_all with no try/except, while the neighbouring
+    Base reads (genesis_hash, owner, latest_index) already degraded to a
+    reported failure; record was caught but swallowed, fixed separately.
+    A witness that cannot answer is data the report is for, not a reason to
+    die before printing one."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+
+    class Deaf(_Honest):
+        def matches(self, b, block=None):
+            raise ConnectionError("rate limited")
+
+    state, report = verify_all(ledger, trust, base=Deaf())
+    assert state == State.INVALID
+    assert any("block 1" in r.lower() and ("match" in r.lower() or "could not" in r.lower())
+              for r in report), report
+
+
+def test_verify_reads_base_through_more_than_one_endpoint():
+    """A single public RPC can be rate-limited for minutes at a time ~ block
+    2's first real run hit exactly that, and it was still in effect when
+    Chii retried from her own Mac afterward. No retry budget bounded to a
+    CI job's runtime reliably outlasts that. QuorumBase already tolerates
+    one dead reader out of three; the workflows just never gave it more
+    than one endpoint to be a quorum of."""
+    import re
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        for line in text.splitlines():
+            if "aikiri-ledger" in line and " verify " in line:
+                urls = re.findall(r"--rpc\s+(\S+)", line)
+                assert len(set(urls)) >= 3, \
+                    f"{name}: verify reads Base through {len(urls)} endpoint(s), not a quorum: {line!r}"
+
+
+def test_verify_reads_base_only_over_https():
+    import re
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        urls = re.findall(r"--rpc\s+(\S+)", text)
+        assert urls and all(u.startswith("https://") for u in urls), (name, urls)
+
+
+def test_the_quorum_reads_at_the_height_a_majority_reached_not_the_highest_claimed():
+    """One endpoint claiming a far higher finalized height must not pull the
+    reads to a height the others have not reached."""
+    class R:
+        def __init__(self, finalized):
+            self.f = finalized
+        def finalized_block(self): return self.f
+    assert QuorumBase([R(100), R(100), R(10**9)]).common_block() == 100
+    assert QuorumBase([R(90), R(100), R(10**9)]).common_block() == 100
+
+
+def test_a_record_is_read_at_the_height_it_is_asked_for():
+    """record() was read at each node's head: a lagging node then held a
+    zero record for an anchored block, and an honest ledger read INVALID."""
+    seen = []
+
+    class Call:
+        def call(self, **kw):
+            seen.append(kw)
+            return (b"\x00" * 32, 0, "0x" + "00" * 20)
+
+    class Functions:
+        def blocks(self, index):
+            return Call()
+
+    bw = object.__new__(BaseWitness)
+    bw.contract = type("C", (), {"functions": Functions()})()
+    bw.record(3, block_identifier=100)
+    assert seen == [{"block_identifier": 100}]
+
+
+def _readers(monkeypatch, *, chain_ok=True):
+    """_base_reader with every endpoint stubbed: [(url, retrying)] as asked."""
+    from aikiri_ledger import cli
+    asked = []
+    def w3(url, chain_id, retrying=False):
+        asked.append((url, retrying))
+        if not chain_ok and chain_id is not None:  # only a check that is asked for can refuse
+            from aikiri_ledger.errors import WrongChain
+            raise WrongChain(f"rpc {url} is chainId 1, expected {chain_id}; refusing")
+        return object()
+    monkeypatch.setattr(cli, "_w3", w3)
+    monkeypatch.setattr(cli, "compile_contract", lambda: {"abi": []})
+    monkeypatch.setattr(cli, "BaseWitness", lambda w3, contract, abi, **k: ("witness", k))
+    monkeypatch.setattr(cli, "_base_key", lambda: "0x" + "11" * 32)
+    return asked
+
+
+def test_the_signing_path_keeps_web3s_own_retry(monkeypatch, trust):
+    from aikiri_ledger import cli
+    asked = _readers(monkeypatch)
+    trust.contract = "0x" + "22" * 20
+    got = cli._base_reader({}, trust, ["https://a", "https://b", "https://c"], need_signer=True)
+    assert asked == [("https://a", False)] and got[0] == "witness"
+
+
+def test_a_single_endpoint_is_one_reader_and_a_wrong_chain_refuses(monkeypatch, trust):
+    from aikiri_ledger import cli
+    trust.contract = "0x" + "22" * 20
+    asked = _readers(monkeypatch)
+    got = cli._base_reader({}, trust, ["https://a"], need_signer=False)
+    assert asked == [("https://a", True)] and got[0] == "witness"  # not a QuorumBase
+    _readers(monkeypatch, chain_ok=False)
+    with pytest.raises(SystemExit, match="expected 8453; refusing"):
+        cli._base_reader({}, trust, ["https://a"], need_signer=False)
+
+
+def test_the_read_retry_is_bounded_as_stated():
+    from aikiri_ledger.cli import _retrying_session
+    retry = _retrying_session().get_adapter("https://x").max_retries
+    assert set(retry.status_forcelist) == {429, *range(500, 600)}
+    assert (retry.total, retry.status, retry.connect, retry.read, retry.other) == (8, 8, 1, 1, 1)
+    assert retry.respect_retry_after_header
+
+
+def test_the_drop_budget_is_as_stated():
+    import inspect
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    params = inspect.signature(_DropOnTransportFailure.__init__).parameters
+    assert (params["budget"].default, params["slow"].default) == (120.0, 5.0)
+
+
+def test_a_body_that_stalls_after_the_headers_drops_an_endpoint():
+    """requests raises ConnectionError(ReadTimeoutError) itself when the body stalls,
+    with no MaxRetryError around it, so the timeout was missed and the endpoint kept."""
+    from requests.exceptions import ConnectionError as RequestsConnectionError
+    from urllib3.exceptions import ReadTimeoutError
+    from aikiri_ledger.cli import _spent
+    assert _spent(RequestsConnectionError(ReadTimeoutError(None, "/", "Read timed out.")))
+
+
+def test_a_connect_timeout_drops_an_endpoint():
+    from requests.exceptions import ConnectTimeout
+    from aikiri_ledger.cli import _DropOnTransportFailure
+
+    class Silent:
+        def finalized_block(self):
+            raise ConnectTimeout("connect timed out")
+
+    r = _DropOnTransportFailure("https://silent", Silent())
+    with pytest.raises(ConnectTimeout):
+        r.finalized_block()
+    with pytest.raises(EndpointDropped):
+        r.finalized_block()
+
+
+def _stub_rpc(answer):
+    """An RPC whose every reply is `answer(req)`: a JSON-RPC result or error."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Stub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], **answer(req)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(resp.encode())
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_one_endpoint_that_cannot_answer_does_not_stop_the_quorum_being_built():
+    """The quorum tolerated one dead reader only once it existed, and building
+    it asked every endpoint for its chainId first, unguarded ~ so one dead or
+    lying endpoint out of three still crashed verify before QuorumBase could
+    discount it. It stays in the count and votes against, never for."""
+    from aikiri_ledger.cli import _base_reader
+    good = [_stub_rpc(lambda r: {"result": "0x2105"}) for _ in range(2)]
+    dead = _stub_rpc(lambda r: {"error": {"code": -32005, "message": "rate limited"}})
+    liar = _stub_rpc(lambda r: {"result": "0x1"})
+    try:
+        for bad in (dead, liar):
+            urls = [f"http://127.0.0.1:{s.server_port}" for s in (good[0], bad, good[1])]
+            trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                          code_keccak=None, genesis_hash=None, validator=None)
+            q = _base_reader({}, trust, urls, need_signer=False)
+            assert isinstance(q, QuorumBase)
+            assert len(q.readers) == 3 and q.quorum == 2
+            with pytest.raises(EndpointUnusable, match="WrongChain" if bad is liar else "Web3RPCError"):
+                q.readers[1].latest_index(0)
+    finally:
+        for s in (*good, dead, liar):
+            s.shutdown()
+
+
+def test_a_server_cannot_park_verify_on_retry_after():
+    """Retry-After is honoured, but urllib3's own cap is 6 hours, and the
+    readers are asked one after another: one endpoint could hold the job,
+    and the ledger-write lock with it, until GitHub kills it."""
+    from aikiri_ledger.cli import _retrying_session
+    retry = _retrying_session().get_adapter("https://x").max_retries
+    assert retry.retry_after_max <= 10
+    # a hung read is web3's 30s once, never retried: test_a_read_that_times_out_is_still_not_retried
+    for name in ("block.yml", "nightly.yml"):
+        text = (Path(".github/workflows") / name).read_text()
+        step = text[text.index("- name: verify"):]
+        assert "timeout-minutes: 20" in step.split("run:")[0], name  # the figures in the docs assume 20
+
+
+def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, mac, trust):
+    """The quorum raising on record() used to be swallowed, which skipped the
+    owner and anchoredAt checks for that block without a line in the report.
+    With three third-party endpoints, any one of them disagreeing could turn
+    INVALID into BASE VERIFIED. A record that cannot be read is a failure."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.owner, trust.code_keccak = "0x" + "44" * 20, None
+
+    class By(_Honest):
+        def __init__(self, by):
+            super().__init__()
+            self._by = by
+
+        def record(self, i, block=None): return {"blockHash": None, "anchoredAt": 0, "by": self._by}
+
+    truthful = "0x" + "33" * 20
+    state, report = verify_all(ledger, trust, base=QuorumBase([By(truthful)] * 3))
+    assert state == State.INVALID, report  # control: the evidence is visible
+
+    state, report = verify_all(ledger, trust,
+                               base=QuorumBase([By(truthful), By(truthful), By(trust.owner)]))
+    assert state == State.INVALID, report
+    assert any("record" in r.lower() for r in report), report
+
+
+def test_an_endpoint_that_exhausts_its_retries_is_not_asked_again(monkeypatch):
+    """An endpoint can pass the chainId check and then 429 every read. Each
+    read then costs the whole retry budget (80s with Retry-After: 10), and
+    the quorum asks its readers one after another, several reads per block ~
+    so one such endpoint outlasted the step's timeout at 4 blocks. Once it
+    has run out of retries it is dropped for the rest of the run."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib3.util.retry import Retry
+    from aikiri_ledger.cli import _base_reader
+    monkeypatch.setattr(Retry, "get_backoff_time", lambda self: 0)
+    hits = []
+
+    class ChainIdThenLimited(BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if req["method"] != "eth_chainId":
+                hits.append(1)
+                self.send_response(429)
+                self.end_headers()
+                return
+            body = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    bad = HTTPServer(("127.0.0.1", 0), ChainIdThenLimited)
+    threading.Thread(target=bad.serve_forever, daemon=True).start()
+    good = [_stub_rpc(lambda r: {"result": "0x2105"}) for _ in range(2)]
+    try:
+        urls = [f"http://127.0.0.1:{s.server_port}" for s in (good[0], bad, good[1])]
+        trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                      code_keccak=None, genesis_hash=None, validator=None)
+        q = _base_reader({}, trust, urls, need_signer=False)
+        with pytest.raises(Exception):
+            q.readers[1].finalized_block()
+        first = len(hits)
+        assert first == 9, first
+        with pytest.raises(EndpointDropped):
+            q.readers[1].finalized_block()
+        assert len(hits) == first, "a dropped endpoint was asked again"
+    finally:
+        for s in (*good, bad):
+            s.shutdown()
+
+
+def test_one_endpoint_reporting_a_stale_height_cannot_hide_a_mismatch(ledger, sk, mac, trust):
+    """The quorum read Base at the lowest finalized height any endpoint
+    reported, so one endpoint claiming an old height pulled every read back
+    before the latest anchor: "Base holds a different hash" (INVALID) became
+    "written but not anchored" (VALID LOCALLY). It now reads at the height a
+    quorum of endpoints has reached."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+
+    class AnchoredAt100(_Honest):
+        """Block 1 was anchored at height 100, with a hash that is not ours."""
+        def latest_index(self, block=None): return 1 if block >= 100 else 0
+        def matches(self, b, block=None): return b.index == 0
+
+    honest = [AnchoredAt100(finalized=100) for _ in range(2)]
+    state, report = verify_all(ledger, trust, base=QuorumBase([*honest, AnchoredAt100()]))
+    assert state == State.INVALID, report  # control
+
+    stale = AnchoredAt100(finalized=50)
+    state, report = verify_all(ledger, trust, base=QuorumBase([honest[0], stale, honest[1]]))
+    assert state == State.INVALID, report
+    assert any("different hash" in r for r in report), report
+
+
+def test_a_single_connection_reset_does_not_drop_an_endpoint():
+    """Only exhausted retries, a timeout, or slow reads over budget drop an
+    endpoint for the run; a one-off reset fails that read alone, or one blip on a healthy endpoint
+    plus one rate-limited endpoint would lose the quorum."""
+    from requests.exceptions import ConnectionError as Reset, RetryError
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    calls = []
+
+    class Flaky:
+        def finalized_block(self):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Reset("connection reset by peer")
+            if len(calls) == 3:
+                raise RetryError("too many 429 error responses")
+            return 100
+
+    r = _DropOnTransportFailure("https://flaky", Flaky())
+    with pytest.raises(Reset):
+        r.finalized_block()
+    assert r.finalized_block() == 100
+    with pytest.raises(RetryError):
+        r.finalized_block()
+    with pytest.raises(EndpointDropped):
+        r.finalized_block()
+    assert len(calls) == 3
+
+    # A hung read reaches us as ConnectionError(MaxRetryError(ReadTimeoutError)).
+    from urllib3.exceptions import MaxRetryError, ReadTimeoutError
+
+    class Hung:
+        def finalized_block(self):
+            raise Reset(MaxRetryError(None, "/", ReadTimeoutError(None, "/", "read timed out")))
+
+    h = _DropOnTransportFailure("https://hung", Hung())
+    with pytest.raises(Reset):
+        h.finalized_block()
+    with pytest.raises(EndpointDropped):
+        h.finalized_block()
+
+
+def test_a_refused_connection_does_not_drop_an_endpoint():
+    """urllib3's NewConnectionError subclasses ConnectTimeoutError, so a
+    refusal read as a timeout and dropped the endpoint for the run. A
+    refusal is instant and costs nothing to try again; only a real timeout
+    or spent retries should drop it."""
+    import socket
+    from web3 import Web3
+    from aikiri_ledger.cli import _DropOnTransportFailure, _retrying_session
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]  # closed once the block exits: connections are refused
+    w3 = Web3(Web3.HTTPProvider(f"http://127.0.0.1:{port}", session=_retrying_session()))
+    r = _DropOnTransportFailure("refused", w3.eth)
+    for _ in range(2):
+        with pytest.raises(Exception) as e:
+            r.get_block_number()
+        assert "dropped" not in str(e.value), e.value
+
+
+def test_an_endpoint_that_answers_slowly_every_time_is_dropped_once_over_budget():
+    """A read that succeeds on its last retry never spends its retries, so an
+    endpoint answering every call after ~80s of 429s was never dropped and,
+    asked several reads per block, outlasted the step's timeout at 4 blocks.
+    Each endpoint gets a time budget per run; once over it, it is dropped."""
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    now = [0.0]
+    calls = []
+
+    class Slow:
+        def finalized_block(self):
+            calls.append(1)
+            now[0] += 80.0
+            return 100
+
+    r = _DropOnTransportFailure("https://slow", Slow(), budget=120.0, clock=lambda: now[0])
+    assert r.finalized_block() == 100   # 80s spent, under budget
+    assert r.finalized_block() == 100   # 160s spent: answered, then dropped
+    with pytest.raises(EndpointDropped) as e:
+        r.finalized_block()
+    assert str(e.value) == "over its 120s budget (160s)" and len(calls) == 2
+
+
+def test_healthy_endpoints_never_exhaust_the_budget_however_long_the_chain():
+    """The budget counted every read, and a full verify reads each endpoint
+    ~2 times per block, so a long enough ledger dropped all three healthy
+    endpoints and failed every run. Only slow reads count against it."""
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    now = [0.0]
+
+    class Healthy:
+        def finalized_block(self):
+            now[0] += 0.3
+            return 100
+
+    r = _DropOnTransportFailure("https://healthy", Healthy(), budget=120.0, clock=lambda: now[0])
+    for _ in range(3000):  # ~1500 blocks' worth of reads, 900s in all
+        assert r.finalized_block() == 100
+
+
+def test_the_quorum_reads_every_value_at_one_height_per_run(ledger, sk, mac, trust):
+    """common_block was recomputed on every read, so an endpoint that failed
+    after its first answer moved the height between reads: latestIndex at
+    100 saw block 1, matches at 90 did not, and an honest anchor made at 95
+    read as "Base holds a different hash". The height is now fixed per run."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+
+    class AnchoredAt95(_Honest):
+        def latest_index(self, block=None): return 1 if block >= 95 else 0
+        def matches(self, b, block=None): return b.index == 0 or block >= 95
+
+    class FailsAfterFirst(AnchoredAt95):
+        def __init__(self):
+            super().__init__(finalized=120)
+            self.asked = 0
+
+        def finalized_block(self):
+            self.asked += 1
+            if self.asked > 1:
+                raise ConnectionError("gone")
+            return 120
+
+    q = QuorumBase([FailsAfterFirst(), AnchoredAt95(finalized=100), AnchoredAt95(finalized=90)])
+    state, report = verify_all(ledger, trust, base=q)
+    assert not any("different hash" in r for r in report), report
+
+
+def test_a_lagging_endpoint_cannot_fail_verify_through_record(ledger, sk, mac, trust):
+    """record() was read at each node's own head while the other reads were
+    pinned. A node whose head had not reached the latest anchor answered it
+    with an all-zero record, the quorum saw disagreement, and an honest
+    ledger read INVALID. record() is now read at the run's height too."""
+    ledger.append_from_request(make_request(ledger, sk, mac), sk,
+                               now=datetime(2026, 9, 3, tzinfo=MANILA))
+    trust.code_keccak = None
+    zero = {"blockHash": "00" * 32, "anchoredAt": 0, "by": "0x" + "00" * 20}
+    real = {"blockHash": None, "anchoredAt": 2 ** 40, "by": None}
+
+    class Node(_Honest):
+        def __init__(self, finalized, head):
+            super().__init__(finalized=finalized)
+            self._head = head
+
+        def _at(self, block):
+            h = self._head if block is None else block
+            if h > self._head:
+                raise ConnectionError("block not found")
+            return h
+
+        def latest_index(self, block=None): return 1 if self._at(block) >= 95 else 0
+        def matches(self, b, block=None): return b.index == 0 or self._at(block) >= 95
+        def record(self, i, block=None):
+            return real if i == 0 or self._at(block) >= 95 else zero
+
+    q = QuorumBase([Node(100, 1000), Node(100, 1000), Node(90, 92)])
+    state, report = verify_all(ledger, trust, base=q)
+    assert not any("disagree" in r for r in report), report
+
+
+def _scripted_rpc(*script):
+    """An RPC answering eth_chainId 8453, after first doing each of `script` in
+    turn, one per request: an HTTP status to send, "reset" (close without an
+    answer) or a number of seconds to stall."""
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    hits = []
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            hits.append(1)
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            step = script[len(hits) - 1] if len(hits) <= len(script) else None
+            if step == "reset":
+                self.close_connection = True
+                return
+            if isinstance(step, float):
+                time.sleep(step)
+            elif isinstance(step, int):
+                self.send_response(step)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            req = json.loads(body)
+            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": "0x2105"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp)))
+            self.end_headers()
+            self.wfile.write(resp)
+
+        def log_message(self, *a):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
+    server.daemon_threads = True
+    return server, hits
+
+
+@pytest.mark.parametrize("blip", [500, 502, 503, 504, 520, 522, 524, "reset"])
+def test_a_one_off_server_error_or_reset_is_retried_as_web3_did(blip):
+    """main's read path (web3's own retry) got past a single 5xx (Cloudflare's 52x
+    included) or reset;
+    the session that replaced it must too, or one blip fails a check main
+    passed."""
+    import threading
+    from aikiri_ledger.cli import _w3
+    server, hits = _scripted_rpc(blip)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        w3 = _w3(f"http://127.0.0.1:{server.server_port}", chain_id=8453, retrying=True)
+        assert w3.eth.chain_id == 8453
+    finally:
+        server.shutdown()
+    assert len(hits) == 3  # the blip, then _w3's chainId check and this one
+
+
+def test_a_read_that_times_out_is_still_not_retried():
+    """A stalled read costs its whole timeout each time; retrying it is how
+    one host held the job for minutes. Only a reset is retried."""
+    import threading
+    from web3 import Web3
+    from aikiri_ledger.cli import _retrying_session
+    server, hits = _scripted_rpc(2.0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        w3 = Web3(Web3.HTTPProvider(f"http://127.0.0.1:{server.server_port}",
+                                    session=_retrying_session(), request_kwargs={"timeout": 0.5},
+                                    exception_retry_configuration=None))
+        with pytest.raises(Exception):
+            w3.eth.chain_id
+    finally:
+        server.shutdown()
+    assert len(hits) == 1
+
+
+def test_the_retrying_read_path_does_not_stack_web3s_own_retry():
+    """web3 retries requests.Timeout five times itself, so a host that
+    silently dropped connections cost ten 30s attempts per call: our
+    session's two connect tries, each retried by web3. The session is the
+    one retry layer on the read path."""
+    from aikiri_ledger.cli import _w3
+    w3 = _w3("http://127.0.0.1:1", None, retrying=True)  # no chainId check: no request made
+    assert w3.provider.exception_retry_configuration is None
+    assert _w3("http://127.0.0.1:1", None).provider.exception_retry_configuration is not None
+
+
+def test_an_endpoint_cannot_redirect_verify_elsewhere():
+    """requests follows redirects, so an endpoint answering 307 sent verify's
+    POST on to any address it named, the runner's own network included.
+    The read path follows none."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from aikiri_ledger.cli import _w3
+    sunk = []
+
+    class Sink(BaseHTTPRequestHandler):
+        def do_POST(self):
+            sunk.append(1)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    sink = HTTPServer(("127.0.0.1", 0), Sink)
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{sink.server_port}/")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    bad = HTTPServer(("127.0.0.1", 0), Redirect)
+    for s in (sink, bad):
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(Exception):
+            _w3(f"http://127.0.0.1:{bad.server_port}", 8453, retrying=True)
+        assert sunk == [], "the POST was forwarded to the address the endpoint named"
+    finally:
+        for s in (sink, bad):
+            s.shutdown()
 
 
 # --------------------------------------------------- Bitcoin proof upkeep ----
