@@ -38,7 +38,7 @@ from .approval import ApprovalKey, verify_approval
 from .canonical import canonical_bytes, loads_strict
 from .chain import (Ledger, VALIDATOR_KEY_ENV, key_from_env, load_key, new_key, save_key,
                     sha256_file)
-from .errors import SchemaError, TrustError
+from .errors import EndpointDropped, EndpointUnusable, SchemaError, TrustError, WrongChain, describe
 from .request import Request, new_nonce, parse_roots
 from . import softkey
 from .trust import Trust
@@ -161,7 +161,7 @@ def _w3(rpc: str, chain_id: int | None, retrying: bool = False):
         provider = Web3.HTTPProvider(rpc)
     w3 = Web3(provider)
     if chain_id is not None and w3.eth.chain_id != chain_id:
-        raise SystemExit(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
+        raise WrongChain(f"rpc {rpc} is chainId {w3.eth.chain_id}, expected {chain_id}; refusing")
     return w3
 
 
@@ -174,11 +174,11 @@ class _Unreachable:
 
     def __init__(self, rpc: str, error: BaseException):
         self.rpc = rpc
-        self.reason = f"rpc {rpc} unusable: {error}"
+        self.reason = describe(error)
 
     def __getattr__(self, name):
         def fail(*a, **k):
-            raise ConnectionError(self.reason)
+            raise EndpointUnusable(self.reason)
         return fail
 
 
@@ -215,21 +215,20 @@ class _DropOnTransportFailure:
 
         def call(*a, **k):
             if self._dropped:
-                raise ConnectionError(self._dropped)
+                raise EndpointDropped(self._dropped)
             start = self._clock()
             try:
                 return attr(*a, **k)
             except Exception as e:  # noqa: BLE001 - re-raised; only the kind decides a drop
                 if _spent(e):
-                    self._dropped = f"rpc {self._rpc} dropped for this run: {e}"
+                    self._dropped = describe(e)
                 raise
             finally:
                 took = self._clock() - start
                 if took > self._slow:
                     self._spent_s += took
                 if not self._dropped and self._spent_s > self._budget:
-                    self._dropped = (f"rpc {self._rpc} dropped for this run: over its "
-                                     f"{self._budget:.0f}s budget ({self._spent_s:.0f}s)")
+                    self._dropped = f"over its {self._budget:.0f}s budget ({self._spent_s:.0f}s)"
         return call
 
 

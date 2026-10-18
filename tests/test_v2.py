@@ -16,7 +16,7 @@ from web3 import Web3, EthereumTesterProvider
 from aikiri_ledger.chain import Ledger, Block, new_key, MANILA
 from aikiri_ledger.canonical import (canonical_bytes, domain_hash, loads_strict, strict, hex64,
                                      BLOCK_DOMAIN_V2, APPROVAL_DOMAIN_V1)
-from aikiri_ledger.errors import SchemaError, TrustError
+from aikiri_ledger.errors import EndpointDropped, EndpointUnusable, SchemaError, TrustError
 from aikiri_ledger.approval import ApprovalKey, SoftwareApprover, approval_message, verify_approval
 from aikiri_ledger.request import Request
 from aikiri_ledger.trust import Trust
@@ -1782,71 +1782,53 @@ def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, said):
     assert any("k2.example.com" in r and "could not read" in r for r in report), report
 
 
-@pytest.mark.parametrize("free, keyed", [
-    ("https://rpc.ankr.com/base", "https://rpc.ankr.com/base/SECRETKEY"),  # one URL a prefix of the other
-    ("https://a.example.com/v2", "https://b.example.com/v2/SECRETKEY"),    # a shared path
-])
-def test_a_key_is_scrubbed_though_another_endpoints_url_overlaps_it(free, keyed):
-    """Scrubbed one endpoint at a time, the first one's cut left the second's URL
-    and path no longer matching, so its key stayed."""
-    from aikiri_ledger.witness import _scrub
-    path = keyed.split(".com", 1)[1]
-    text = f"rpc {free} unusable; rpc {keyed} unusable; url: {path}; url: {free.split('.com', 1)[1]}"
-    out = _scrub(text, [free, keyed])
-    assert "SECRETKEY" not in out, out
-    assert out.startswith(f"rpc {free.split('//')[1].split('/')[0]} unusable; rpc "), out
+def test_a_failed_read_says_its_endpoint_and_the_kind_of_error_only():
+    """A library's message carries the URL as it printed it, re-encoded in more ways
+    than a scrub kept up with; the quorum says the error's types and status instead."""
+    from types import SimpleNamespace
+    import requests
+    from urllib3.exceptions import MaxRetryError, NewConnectionError
+    key = "https://h1.example.com/v2/a b'SECRETKEY"
+    class NotFound(_Named):
+        def genesis_hash(self):
+            raise requests.HTTPError("404 for url: https://h1.example.com/v2/a%20b'SECRETKEY",
+                                     response=SimpleNamespace(status_code=404))
+    class Refused(_Named):
+        def genesis_hash(self):
+            raise requests.ConnectionError(MaxRetryError(None, "/v2/SECRETKEY",
+                                                         NewConnectionError(None, "SECRETKEY refused")))
+    class Odd:
+        def genesis_hash(self):
+            raise ValueError("SECRETKEY")
+    q = QuorumBase([NotFound(key), Refused("https://u:SECRETKEY@h2.example.com/x"), Odd()])
+    with pytest.raises(QuorumError) as e:
+        q.genesis_hash()
+    assert str(e.value) == ("0 of 3 endpoints answered; 2 needed. h1.example.com: HTTPError / HTTP 404; "
+                            "h2.example.com: ConnectionError / MaxRetryError / NewConnectionError; "
+                            "endpoint 3: ValueError"), e.value
 
 
-@pytest.mark.parametrize("rpcs, text, out", [
-    (["http://[bad/v2/SECRETKEY"], "Invalid URL 'http://[bad/v2/SECRETKEY'", "Invalid URL 'endpoint 1'"),
-    (["https://h.example.com/v2/SECRETKEY"], "with url: /v2/SECRETKEY (x)", "with url: /*** (x)"),
-    (["https://h.example.com/v2/SECRETKEY"], "POST /v2/SECRETKEY failed", "POST /*** failed"),
-    (["https://h.example.com/"], "for url: https://h.example.com/ at a/b", "for url: h.example.com at a/b"),
-    (["", "https://h.example.com"], "rpc https://h.example.com down", "rpc h.example.com down"),
-    (["https://u:p@ss@h.example.com/x"], "for url: https://u:p@ss@H.example.com/x", "for url: h.example.com"),
-    (["https://H.example.com/v2#SECRETKEY"], "for url: https://h.example.com/v2#SECRETKEY", "for url: h.example.com"),
-])
-def test_what_the_scrub_leaves(rpcs, text, out):
-    """Each part of the scrub, by what it prints: the name by place, the path's
-    stand-in, a bare "/" left alone, an empty rpc skipped, a password holding "@",
-    and a fragment kept when requests lowercased the host."""
-    from aikiri_ledger.witness import _scrub
-    assert _scrub(text, rpcs) == out
-
-
-@pytest.mark.parametrize("rpc, text", [
-    ("http://h.example.com/v2/SEC RET", "Not Found for url: http://h.example.com/v2/SEC%20RET"),
-    ("http://h.example.com/v2/ab%2bSECRET", "host='h.example.com': Max retries exceeded with url: /v2/ab%2BSECRET (Caused by x)"),
-    ("http://h.example.com/x?apikey=SEC RET", "Not Found for url: http://h.example.com/x?apikey=SEC%20RET"),
-    ("http://u:SE%7ECRET@h.example.com/x", "Not Found for url: http://u:SE~CRET@h.example.com/x"),
-    ("http://h.example.com/a/../v2/SECRET", "Not Found for url: http://h.example.com/v2/SECRET"),
-])
-def test_a_key_is_scrubbed_in_the_form_requests_printed_it(rpc, text):
-    """requests and urllib3 print the URL as they sent it, re-encoded and
-    normalized, so matching only the string as configured left keys in."""
-    from aikiri_ledger.witness import _scrub
-    out = _scrub(text, [rpc])
-    assert "RET" not in out and "h.example.com" in out, out
-
-
-@pytest.mark.parametrize("rpcs, text", [
-    (["http://127.0.0.1:9/base", "http://127.0.0.1:9/base/SEC RET"],
-     "Not Found for url: http://127.0.0.1:9/base/SEC%20RET"),
-    (["https://h.example.com/base", "https://h.example.com/base/ab%2bSECRET"],
-     "Not Found for url: https://h.example.com/base/ab%2BSECRET"),
-    (["https://h.example.com", "https://h.example.com/SEC RET"], "url: https://h.example.com/SEC%20RET"),
-    (["https://h.example.com/base", "https://h.example.com/base/a/../SECRET"],
-     "url: https://h.example.com/base/SECRET"),
-    (["https://h.example.com/base?k=SEC RET", "https://h.example.com/base"],
-     "url: https://h.example.com/base?k=SEC%20RET"),
-])
-def test_a_re_encoded_key_is_scrubbed_though_another_endpoint_is_its_prefix(rpcs, text):
-    """The free endpoint's URL matched the front of the keyed one as printed,
-    took its scheme with it, and the shape pass no longer saw a URL."""
-    from aikiri_ledger.witness import _scrub
-    for order in (rpcs, rpcs[::-1]):
-        out = _scrub(text, order)
-        assert "RET" not in out and "://" not in out, out
+def test_a_keyed_endpoint_on_a_real_server_prints_no_key():
+    """Through the real web3, requests and urllib3: each endpoint answers 404."""
+    import threading
+    from aikiri_ledger.cli import _base_reader
+    servers = [_scripted_rpc(*([404] * 4))[0] for _ in range(3)]
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        p = [s.server_port for s in servers]
+        urls = [f"http://127.0.0.1:{p[0]}/v2/a b'SECRETKEY", f"http://127.0.0.1:{p[1]}/x?apikey=SEC%2bRETKEY",
+                f"http://u:SECRETKEY@127.0.0.1:{p[2]}/x"]
+        trust = Trust(chain_id=8453, contract="0x" + "11" * 20, owner=None,
+                      code_keccak=None, genesis_hash=None, validator=None)
+        q = _base_reader({}, trust, urls, need_signer=False)
+        with pytest.raises(QuorumError) as e:
+            q.genesis_hash()
+        assert "SEC" not in str(e.value), e.value
+        assert str(e.value).count("127.0.0.1: EndpointUnusable: HTTPError / HTTP 404") == 3, e.value
+    finally:
+        for s in servers:
+            s.shutdown()
 
 
 def test_a_password_the_encoder_refused_is_not_printed():
@@ -1858,7 +1840,7 @@ def test_a_password_the_encoder_refused_is_not_printed():
                     _DeadNamed("https://c")])
     with pytest.raises(QuorumError) as e:
         q.latest_index()
-    assert "SECRET" not in str(e.value) and "UnicodeEncodeError" in str(e.value), e.value
+    assert "SECRET" not in str(e.value) and "b.example.com: UnicodeEncodeError" in str(e.value), e.value
 
 
 def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
@@ -2251,7 +2233,7 @@ def test_a_connect_timeout_drops_an_endpoint():
     r = _DropOnTransportFailure("https://silent", Silent())
     with pytest.raises(ConnectTimeout):
         r.finalized_block()
-    with pytest.raises(ConnectionError, match="dropped"):
+    with pytest.raises(EndpointDropped):
         r.finalized_block()
 
 
@@ -2294,7 +2276,7 @@ def test_one_endpoint_that_cannot_answer_does_not_stop_the_quorum_being_built():
             q = _base_reader({}, trust, urls, need_signer=False)
             assert isinstance(q, QuorumBase)
             assert len(q.readers) == 3 and q.quorum == 2
-            with pytest.raises(Exception, match=urls[1]):
+            with pytest.raises(EndpointUnusable, match="WrongChain" if bad is liar else "Web3RPCError"):
                 q.readers[1].latest_index(0)
     finally:
         for s in (*good, dead, liar):
@@ -2383,7 +2365,7 @@ def test_an_endpoint_that_exhausts_its_retries_is_not_asked_again(monkeypatch):
             q.readers[1].finalized_block()
         first = len(hits)
         assert first == 9, first
-        with pytest.raises(Exception, match=urls[1]):
+        with pytest.raises(EndpointDropped):
             q.readers[1].finalized_block()
         assert len(hits) == first, "a dropped endpoint was asked again"
     finally:
@@ -2439,7 +2421,7 @@ def test_a_single_connection_reset_does_not_drop_an_endpoint():
     assert r.finalized_block() == 100
     with pytest.raises(RetryError):
         r.finalized_block()
-    with pytest.raises(ConnectionError, match="dropped"):
+    with pytest.raises(EndpointDropped):
         r.finalized_block()
     assert len(calls) == 3
 
@@ -2453,7 +2435,7 @@ def test_a_single_connection_reset_does_not_drop_an_endpoint():
     h = _DropOnTransportFailure("https://hung", Hung())
     with pytest.raises(Reset):
         h.finalized_block()
-    with pytest.raises(ConnectionError, match="dropped"):
+    with pytest.raises(EndpointDropped):
         h.finalized_block()
 
 

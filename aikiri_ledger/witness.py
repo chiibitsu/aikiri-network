@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from web3 import Web3
 
 from .chain import Ledger, Block
-from .errors import QuorumError
+from .errors import QuorumError, describe
 
 CONTRACT_SRC = Path(__file__).resolve().parent.parent / "contracts" / "AikiriLedger.sol"
 
@@ -715,37 +715,6 @@ def _host(rpc) -> str | None:
         return None
 
 
-def _scrub(text: str, rpcs) -> str:
-    """Error text with every endpoint's URL cut to its host, so a key in its
-    path, query or userinfo stays out of the report."""
-    cuts = {}
-    for i, rpc in enumerate(rpcs):
-        if not rpc:
-            continue
-        cuts[rpc] = _host(rpc) or f"endpoint {i + 1}"
-        try:
-            u = urlsplit(rpc)
-        except ValueError:  # never sent, so only ever printed whole
-            continue
-        sent = u.path + (f"?{u.query}" if u.query else "")  # also printed alone
-        if sent not in ("", "/"):
-            cuts.setdefault(sent, "/***")
-    if cuts:
-        # One pass, longest first: cut one at a time, an endpoint's URL that another's
-        # starts with (https://host/base, https://host/base/<key>) left the key behind.
-        pattern = "|".join(re.escape(c) for c in sorted(cuts, key=len, reverse=True))
-        text = re.sub(pattern, lambda m: cuts[m.group(0)], text)
-    # Then by shape, for what was printed re-encoded or normalized (SEC%20RET for
-    # "SEC RET", a/../b as b), which no configured string matches: any URL left
-    # down to its host, any path urllib3 printed down to /***.
-    text = _URL.sub(lambda m: _host(m.group(0)) or "an endpoint", text)
-    return _SENT.sub(r"\1/***", text)
-
-
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
-_SENT = re.compile(r"(url: )/[^\s'\"<>]*")
-
-
 class QuorumBase:
     """Several independent readers of the same contract.
 
@@ -772,13 +741,14 @@ class QuorumBase:
             try:
                 answers.append(fn(r))
             except Exception as e:  # noqa: BLE001 - an endpoint that cannot answer does not vote
-                # Not repr(): a UnicodeEncodeError's repr carries the string it refused.
-                errors.append(f"{type(e).__name__}: {e}")
+                # By its host and describe(), never the error's own text: that
+                # carries the endpoint's URL, and a keyed URL its key.
+                name = _host(getattr(r, "rpc", None)) or f"endpoint {i + 1}"
+                errors.append(f"{name}: {describe(e)}")
                 self._missed.add(i)
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
-                              f"{self.quorum} needed. "
-                              + _scrub("; ".join(errors), [getattr(r, "rpc", None) for r in self.readers]))
+                              f"{self.quorum} needed. {'; '.join(errors)}")
         distinct = {repr(a) for a in answers}
         if len(distinct) > 1:
             self._disagreed = True
