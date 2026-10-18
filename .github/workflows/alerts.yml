@@ -2,7 +2,8 @@ name: alerts
 # Telegram messages to Chii about this repository's runs on main: when a block run is
 # requested (it then waits for her approval of the ledger environment, or queues
 # behind another ledger run first), and when a run of block, nightly, tests, deploy or
-# genesis fails. block.yml itself is untouched, so an alert can never hold a block or
+# genesis fails or is cancelled (GitHub drops a pending run from the ledger queue when
+# a newer one arrives, so a block that said it was waiting can end that way). block.yml itself is untouched, so an alert can never hold a block or
 # change how its run ends.
 # A message carries only fixed words, the workflow's name and result, and the run's
 # link: never a branch name, a commit message or anything else someone else could write.
@@ -49,14 +50,18 @@ jobs:
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=${TEXT}" \
               --data-urlencode "disable_web_page_preview=true"; then
-            echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            if [ -s "$reply" ]; then
+              echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            else
+              echo "No reply from Telegram (curl's error is above)."
+            fi
             exit 1
           fi
   failed:
     if: >-
       github.event_name == 'workflow_run'
       && github.event.action == 'completed'
-      && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+      && contains(fromJSON('["failure", "timed_out", "startup_failure", "cancelled"]'), github.event.workflow_run.conclusion)
       && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
@@ -80,7 +85,11 @@ jobs:
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=${TEXT}" \
               --data-urlencode "disable_web_page_preview=true"; then
-            echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            if [ -s "$reply" ]; then
+              echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            else
+              echo "No reply from Telegram (curl's error is above)."
+            fi
             exit 1
           fi
   test:
@@ -101,7 +110,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEXT: "aikiri-network: alerts are on. You will hear here when a block waits for your approval or a run on main fails."
+          TEXT: "aikiri-network: alerts are on. You will hear here when a block waits for your approval or a run on main fails or is cancelled."
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
@@ -113,6 +122,10 @@ jobs:
               --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
               --data-urlencode "text=${TEXT}" \
               --data-urlencode "disable_web_page_preview=true"; then
-            echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            if [ -s "$reply" ]; then
+              echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
+            else
+              echo "No reply from Telegram (curl's error is above)."
+            fi
             exit 1
           fi

@@ -31,7 +31,14 @@ See §8.
 deployment branches `main` only. Used by `alerts.yml`'s Telegram messages. A
 reviewer would hold every alert until approved. If an alert ran before you created
 it, GitHub made it already with no rules: set the `main` limit before adding the
-secrets.
+secrets. The two values:
+- `TELEGRAM_BOT_TOKEN`: message @BotFather in Telegram, send `/newbot`, follow it;
+  it answers with the token. Never paste it anywhere but this secret.
+- `TELEGRAM_CHAT_ID`: send your new bot any message first (a bot cannot write to
+  someone who never wrote to it: Telegram says "chat not found"), then open
+  `https://api.telegram.org/bot<token>/getUpdates`; the number after
+  `"chat":{"id":` is it.
+Then Actions → alerts → Run workflow sends a test message.
 
 ## 2. Move the secrets
 
