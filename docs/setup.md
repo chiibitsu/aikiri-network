@@ -33,7 +33,8 @@ reviewer would hold every alert until approved. If an alert ran before you creat
 it, GitHub made it already with no rules: set the `main` limit before adding the
 secrets. The two values:
 - `TELEGRAM_BOT_TOKEN`: message @BotFather in Telegram, send `/newbot`, follow it;
-  it answers with the token. Never paste it anywhere but this secret.
+  it answers with the token. Paste it only into this secret and the address below
+  (then clear that page from your browser history).
 - `TELEGRAM_CHAT_ID`: send your new bot any message first (a bot cannot write to
   someone who never wrote to it: Telegram says "chat not found"), then open
   `https://api.telegram.org/bot<token>/getUpdates`; the number after

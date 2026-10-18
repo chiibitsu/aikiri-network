@@ -3,8 +3,9 @@ name: alerts
 # requested (it then waits for her approval of the ledger environment, or queues
 # behind another ledger run first), and when a run of block, nightly, tests, deploy or
 # genesis fails or is cancelled (GitHub drops a pending run from the ledger queue when
-# a newer one arrives, so a block that said it was waiting can end that way). block.yml itself is untouched, so an alert can never hold a block or
-# change how its run ends.
+# a newer one arrives, so a block that said it was waiting can end that way).
+# block.yml itself is untouched, so an alert can never hold a block or change how
+# its run ends.
 # A message carries only fixed words, the workflow's name and result, and the run's
 # link: never a branch name, a commit message or anything else someone else could write.
 # The bot token and chat id (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are secrets of the
@@ -53,7 +54,7 @@ jobs:
             if [ -s "$reply" ]; then
               echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
             else
-              echo "No reply from Telegram (curl's error is above)."
+              echo "Telegram sent no reason (curl's error is above)."
             fi
             exit 1
           fi
@@ -88,7 +89,7 @@ jobs:
             if [ -s "$reply" ]; then
               echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
             else
-              echo "No reply from Telegram (curl's error is above)."
+              echo "Telegram sent no reason (curl's error is above)."
             fi
             exit 1
           fi
@@ -125,7 +126,7 @@ jobs:
             if [ -s "$reply" ]; then
               echo "Telegram's reply: $(head -c 300 "$reply")"  # its reason, e.g. "chat not found"
             else
-              echo "No reply from Telegram (curl's error is above)."
+              echo "Telegram sent no reason (curl's error is above)."
             fi
             exit 1
           fi

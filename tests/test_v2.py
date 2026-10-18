@@ -2866,7 +2866,7 @@ def test_an_alert_telegram_never_answered_says_so_and_fails(tmp_path):
     step = _step(*_ALERT_STEPS[1])
     code, _, out = _send(step["run"], tmp_path, refuse="",
                          TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42", TEXT="x")
-    assert code != 0 and "No reply from Telegram" in out and "Telegram's reply" not in out, out
+    assert code != 0 and "Telegram sent no reason" in out and "Telegram's reply" not in out, out
 
 
 def test_every_workflow_parses_and_alerts_listen_where_they_say():
