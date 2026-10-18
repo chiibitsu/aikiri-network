@@ -1808,6 +1808,58 @@ def test_a_failed_read_says_its_endpoint_and_the_kind_of_error_only():
                             "endpoint 3: ValueError"), e.value
 
 
+def test_a_rate_limit_that_outlasts_the_retries_says_its_status():
+    """Retries spent on 429s ended as RetryError, which carries no response, so the
+    rate limit this PR exists for read the same as a run of 503s. urllib3's own
+    words carry the status (`too many 429 error responses`); only its digits are kept."""
+    from requests.exceptions import RetryError
+    from urllib3.exceptions import MaxRetryError, ResponseError
+    from aikiri_ledger.errors import describe
+    spent = lambda code: RetryError(MaxRetryError(None, "/v2/SECRETKEY",
+                                                  ResponseError(ResponseError.SPECIFIC_ERROR.format(status_code=code))))
+    assert describe(spent(429)) == "RetryError / MaxRetryError / ResponseError / HTTP 429"
+    assert describe(spent(503)) == "RetryError / MaxRetryError / ResponseError / HTTP 503"
+    assert describe(RetryError(MaxRetryError(None, "/", ResponseError("too many 429 error responses; EVIL")))) \
+        == "RetryError / MaxRetryError / ResponseError"
+
+
+def test_a_dropped_endpoint_says_why_without_its_url():
+    from requests.exceptions import RetryError
+    from urllib3.exceptions import MaxRetryError, ResponseError
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    class Limited:
+        def finalized_block(self):
+            raise RetryError(MaxRetryError(None, "/v2/SECRETKEY", ResponseError("too many 429 error responses")))
+    r = _DropOnTransportFailure("https://h.example.com/v2/SECRETKEY", Limited())
+    with pytest.raises(RetryError):
+        r.finalized_block()
+    with pytest.raises(EndpointDropped) as e:
+        r.finalized_block()
+    assert str(e.value) == "RetryError / MaxRetryError / ResponseError / HTTP 429"
+
+
+def test_describe_names_each_wrapped_type_once_and_no_deeper_than_four():
+    from aikiri_ledger.errors import describe
+    nested = ValueError(KeyError(OSError(TypeError(IndexError(LookupError())))))
+    assert describe(nested) == "ValueError / KeyError / OSError / TypeError"
+    assert describe(ConnectionError(ConnectionError(OSError()))) == "ConnectionError / OSError"
+
+
+def test_a_wrong_chain_is_a_systemexit_that_names_it():
+    """One endpoint still exits with its reason; in a quorum the type alone says it."""
+    import threading
+    from aikiri_ledger.cli import _w3
+    from aikiri_ledger.errors import WrongChain
+    server, _ = _scripted_rpc()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(WrongChain) as e:
+            _w3(f"http://127.0.0.1:{server.server_port}", 1, retrying=True)
+        assert isinstance(e.value, SystemExit) and "expected 1; refusing" in str(e.value)
+    finally:
+        server.shutdown()
+
+
 def test_a_keyed_endpoint_on_a_real_server_prints_no_key():
     """Through the real web3, requests and urllib3: each endpoint answers 404."""
     import threading
@@ -2476,9 +2528,9 @@ def test_an_endpoint_that_answers_slowly_every_time_is_dropped_once_over_budget(
     r = _DropOnTransportFailure("https://slow", Slow(), budget=120.0, clock=lambda: now[0])
     assert r.finalized_block() == 100   # 80s spent, under budget
     assert r.finalized_block() == 100   # 160s spent: answered, then dropped
-    with pytest.raises(ConnectionError, match="budget"):
+    with pytest.raises(EndpointDropped) as e:
         r.finalized_block()
-    assert len(calls) == 2
+    assert str(e.value) == "over its 120s budget (160s)" and len(calls) == 2
 
 
 def test_healthy_endpoints_never_exhaust_the_budget_however_long_the_chain():
