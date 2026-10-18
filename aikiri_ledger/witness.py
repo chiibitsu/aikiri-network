@@ -261,8 +261,11 @@ class BitcoinWitness:
         self.ledger = ledger
         self.public = public   # ask mempool.space and blockstream.info when no node answers
         self._headers = {}     # height -> header, or why it could not be had, for this run
+        self._sources = {}     # height -> "node" | "public": where that header came from
         self._node_state = None  # not tried yet, the node, or why it cannot answer
+        self._node_proxy = None  # the node once reached, kept for its tip after a failure
         self._deadline = None  # set by the first Bitcoin lookup of this run
+        self._confirmed = {}   # block index -> (Bitcoin height, raw header or None, "saved" | "node" | "public")
 
     @staticmethod
     def available() -> bool:
@@ -417,7 +420,8 @@ class BitcoinWitness:
 
     @staticmethod
     def _node():
-        """The Bitcoin node `ots` would use: the one $HOME/.bitcoin/bitcoin.conf names."""
+        """The Bitcoin node `ots` would use: the one bitcoin.conf names (python-bitcoinlib
+        reads ~/Library/Application Support/Bitcoin/ on a Mac, ~/.bitcoin/ on Linux)."""
         import bitcoin
         import bitcoin.rpc
         bitcoin.SelectParams("mainnet")
@@ -477,6 +481,25 @@ class BitcoinWitness:
                 return "pending", "not yet in a Bitcoin block"
             return "failed", "no attestation that leads to Bitcoin"
 
+        # A saved header (see save_header) is taken only if it carries this proof and
+        # Bitcoin's proof of work; any other is ignored, and the block looked up. It is
+        # named by what it proves itself, its hash and the time it was mined, never by
+        # the height saved beside it: a header does not carry its height, so a genuine
+        # later header saved under an earlier one would otherwise backdate the proof.
+        saved = self._saved_headers(block)
+        for height, msg in attested:
+            header = _from_saved(saved.get(height))
+            if header is None:
+                continue
+            try:
+                mined = BitcoinBlockHeaderAttestation(height).verify_against_blockheader(msg, header)
+            except VerificationError:
+                continue
+            self._confirmed[block.index] = (height, header.raw, "saved")
+            block_hash = hashlib.sha256(hashlib.sha256(header.raw).digest()).digest()[::-1].hex()
+            when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(mined))
+            return "complete", f"in the Bitcoin block {block_hash}, mined {when}, by its saved header"
+
         # One attestation Bitcoin confirms is enough. One it contradicts fails the
         # proof, whatever else could not be looked up; only when neither happens is
         # the proof unchecked. Either way nothing short of a confirmed block is complete.
@@ -493,10 +516,142 @@ class BitcoinWitness:
             except VerificationError:
                 contradicted.append(height)
                 continue
+            raw = getattr(header, "raw", None)
+            if raw is None and hasattr(header, "serialize"):  # python-bitcoinlib's, from the node
+                raw = header.serialize()
+            self._confirmed[block.index] = (height, raw, self._sources[height])
             return "complete", f"in Bitcoin block {height}"
         if contradicted:
             return "failed", f"Bitcoin block {contradicted[0]} does not carry it"
         return "unchecked", unanswered
+
+    def save_header(self, block: Block) -> str:
+        """Saves the header of the Bitcoin block that confirms this proof beside it, as
+        <index>.btc-header, so later runs need no lookup: "saved", "already saved", or
+        why not. Only once _SAVE_DEPTH blocks bury it (the block itself counted), by
+        the same source's chain tip: a buried header never changes, a shallow one can
+        still be replaced."""
+        result, why = self.verify(block)
+        if result == "unchecked":  # complete as a proof, but its block not to be had
+            return f"not saved: {why}"
+        if result != "complete":
+            return f"not saved: the proof is {result}"
+        height, raw, source = self._confirmed[block.index]
+        if source == "saved":
+            return "already saved"
+        if raw is None or len(raw) != 80:
+            return "not saved: no header to save"
+        if _from_saved(raw) is None:  # verify would never take it back from the file
+            return "not saved: the header has less proof of work than Bitcoin's main chain"
+        try:
+            tip = self._tip(source)
+        except _OutOfTime as e:  # its text is ours
+            return f"not saved: the chain's tip could not be had ({e})"
+        except Exception as e:  # the tip not to be had
+            return f"not saved: the chain's tip could not be had ({_kind(e) if source == 'public' else _plain(str(e))})"
+        if tip - height + 1 < _SAVE_DEPTH:
+            n = max(tip - height + 1, 0)
+            return (f"not saved: Bitcoin block {height} has {n} confirmation{'' if n == 1 else 's'}, "
+                    f"{_SAVE_DEPTH} needed")
+        import tempfile
+        p = self.ledger.proof_path(block.index, "btc-header")
+        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=p.name + ".", suffix=".tmp")
+        try:
+            umask = os.umask(0)
+            os.umask(umask)
+            with os.fdopen(fd, "w") as f:
+                # by the open file, not its name: readable like the proofs; mkstemp makes 0600
+                os.fchmod(f.fileno(), 0o666 & ~umask)
+                f.write(f"{height} {raw.hex()}\n")
+            os.replace(tmp, p)  # replaces a link there, never writes through it
+        except BaseException:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+            raise
+        return "saved"
+
+    def _tip(self, source: str) -> int:
+        """The height of the chain's tip, as the source that confirmed the block sees it:
+        the node, or the lower of the two public sources' tips."""
+        if source == "node":
+            return int(self._within(self._node_proxy.getblockcount))
+        tips = []
+        for base in _PUBLIC_SOURCES:
+            text = self._within(_fetch, f"{base}/blocks/tip/height")
+            if not re.fullmatch(r"\d{1,8}", text):
+                raise _BadReply("not a block height")
+            tips.append(int(text))
+        return min(tips)
+
+    def check_saved(self, block: Block, named: dict | None = None) -> list[tuple[bool, str]]:
+        """Each header saved beside the block's proof, looked up by its height from both
+        public sources: [(passed, what was found)], [] if there is no .btc-header. A
+        header either source does not name at that height fails, and so does one a source
+        could not be asked about: this is the check that a saved header is the real
+        one, and a check that did not happen is not a pass. A file verify would not
+        read in full fails too, so nothing in it goes unchecked. One reached only by a
+        name in another form or through a linked folder is not checked, since verify
+        never reads it (a link at its own path still fails as above). `named` keeps
+        what each source named at each height across calls, or why it could not, so a
+        height is asked once a run."""
+        named = {} if named is None else named
+        p = self.ledger.proof_path(block.index, "btc-header")
+        if not os.path.lexists(p) or not _stored_exactly(self.ledger.root, p) and not p.is_symlink():
+            return []  # as verify: an alias of the name is not this block's file, and never read
+        unread = [(False, "its .btc-header is not a saved header file verify reads in full")]
+        try:
+            data = None if p.is_symlink() else _read_regular(p, _SAVED_MAX + 1)
+        except OSError:
+            return unread
+        if data is None or len(data) > _SAVED_MAX:
+            return unread
+        lines = [line for line in data.decode("ascii", "replace").splitlines() if line]
+        found = [re.fullmatch(r"(\d{1,8}) ([0-9a-f]{160})", line) for line in lines]
+        if not found or not all(found):
+            return unread
+        out = []
+        for m in found:
+            height, raw = int(m[1]), bytes.fromhex(m[2])
+            said = f"the saved header for Bitcoin block {height}"
+            if _from_saved(raw) is None:
+                out.append((False, f"{said} lacks Bitcoin's proof of work"))
+                continue
+            own = hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1]
+            verdict = (True, f"{said} is the one both public sources name")
+            for base in _PUBLIC_SOURCES:
+                host = base.split("/")[2]
+                if (base, height) not in named:  # a failure too: asked again, it costs the budget again
+                    try:
+                        named[base, height] = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
+                    except Exception as e:  # noqa: BLE001 - not asked is not checked, and not a pass
+                        named[base, height] = str(e) if isinstance(e, _Unanswered) else f"{host}: {_kind(e)}"
+                if isinstance(named[base, height], str):
+                    verdict = (False, f"{said} was not checked ({named[base, height]})")
+                    break
+                if named[base, height] != own:
+                    verdict = (False, f"{said} is not the block {host} names at that height")
+                    break
+            out.append(verdict)
+        return out
+
+    def _saved_headers(self, block: Block) -> dict:
+        """{Bitcoin height: raw header} from the block's .btc-header, if that is a small
+        regular file; a link, anything larger, or a line that is not one is ignored."""
+        p = self.ledger.proof_path(block.index, "btc-header")
+        try:
+            if not os.path.lexists(p) or not _stored_exactly(self.ledger.root, p):
+                return {}
+            data = _read_regular(p, _SAVED_MAX + 1)
+        except OSError:
+            return {}
+        if data is None or len(data) > _SAVED_MAX:
+            return {}
+        out = {}
+        for line in data.decode("ascii", "replace").splitlines():
+            m = re.fullmatch(r"(\d{1,8}) ([0-9a-f]{160})", line)
+            if m:
+                out[int(m[1])] = bytes.fromhex(m[2])
+        return out
 
     def _header(self, height: int):
         """Bitcoin block `height`'s header, looked up once per run; _Unanswered if not to be had."""
@@ -514,21 +669,26 @@ class BitcoinWitness:
         """From the node while it answers; else from both public sources, if they are on."""
         if self._node_state is None:
             try:
-                self._node_state = self._node()
+                self._node_state = self._node_proxy = self._node()
             except Exception as e:
                 self._node_state = f"no Bitcoin node answered: {_plain(str(e))}"
         if not isinstance(self._node_state, str):
             node = self._node_state
             try:
-                return self._within(lambda: node.getblockheader(node.getblockhash(height)))
+                header = self._within(lambda: node.getblockheader(node.getblockhash(height)))
             except _OutOfTime:
                 raise
             except Exception as e:
                 # Behind that block (IndexError), warming up, refused: not asked again this run.
                 self._node_state = f"the Bitcoin node could not answer: {_plain(str(e))}"
+            else:
+                self._sources[height] = "node"
+                return header
         if not self.public:
             raise _Unanswered(self._node_state)
-        return self._from_public(height)
+        header = self._from_public(height)
+        self._sources[height] = "public"
+        return header
 
     def _from_public(self, height: int):
         """The header both public sources give, if it hashes to the block they name and
@@ -566,7 +726,7 @@ class BitcoinWitness:
             t.start()
             t.join(left)
         if not box:
-            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per verify run")
+            raise _OutOfTime(f"out of time: Bitcoin lookups get {_LOOKUP_BUDGET} s per run")
         if "error" in box:
             raise box["error"]
         return box["value"]
@@ -635,7 +795,17 @@ def _worked(raw: bytes, block_hash: bytes):
         raise _Unanswered("a header with less proof of work than Bitcoin's main chain")
     if int.from_bytes(h, "little") > target:
         raise _Unanswered("a header whose hash does not meet its own proof of work")
-    return SimpleNamespace(hashMerkleRoot=raw[36:68], nTime=int.from_bytes(raw[68:72], "little"))
+    return SimpleNamespace(hashMerkleRoot=raw[36:68], nTime=int.from_bytes(raw[68:72], "little"), raw=raw)
+
+
+def _from_saved(raw: bytes | None):
+    """A saved header, if it carries at least mainnet-scale proof of work; else None."""
+    if raw is None:
+        return None
+    try:
+        return _worked(raw, hashlib.sha256(hashlib.sha256(raw).digest()).digest()[::-1])
+    except _Unanswered:
+        return None
 
 
 _OTS_MAX = 64 << 10     # bytes; a proof is a few KB (4 calendars x 10,000 at most), and reading costs size squared
@@ -644,10 +814,29 @@ _BITCOIN_BLOCKS_MAX = 8  # a proof names one per calendar that completed it; ots
 _PUBLIC_SOURCES = ("https://mempool.space/api", "https://blockstream.info/api")
 _LOOKUP_BUDGET = 60     # seconds for every Bitcoin lookup in one verify run, node and public
 _REPLY_MAX = 1024       # bytes; a block hash is 64 hex characters, a header 160
+_SAVED_MAX = 4096       # bytes of a saved .btc-header: save_header writes one line of about 170 bytes
+_SAVE_DEPTH = 6         # confirmations before a header is saved: the block and five on top
 # Difficulty 5e13: half Bitcoin's average over blocks 856,760 to 886,157 (from Bitcoin
 # Core 28 and 29's nMinimumChainWork). A header with this much work costs about half a
-# block's mining to make; one with less is not taken from a public source.
+# block's mining to make; one with less is not taken from a public source or a saved file.
 _MAX_TARGET = (0xffff << 208) // (5 * 10**13)
+
+
+def _stored_exactly(root: Path, p: Path) -> bool:
+    """True if every name from `root` down to `p` is stored on disk exactly as asked
+    and none is a link. A Mac's disk opens ledger/proofs/000003.btc-header for
+    Ledger/Proofs/000003.BTC-header, or through a linked folder, and no check on Linux
+    can list every such alias; so a saved header is read only by its exact names."""
+    # Absolute first, without following links: `.` and `..` have no name to look for.
+    root, p = Path(os.path.abspath(root)), Path(os.path.abspath(p))
+    for q in [root, *(root / Path(*p.relative_to(root).parts[:i + 1])
+                      for i in range(len(p.relative_to(root).parts)))]:
+        try:
+            if q.is_symlink() or q.name not in os.listdir(q.parent):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _read_regular(p: Path, limit: int) -> bytes | None:

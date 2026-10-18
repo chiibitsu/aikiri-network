@@ -22,9 +22,9 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs, stamps any block with no `.ots` yet (block 0 was
-anchored at deploy but never stamped), proposes them as a pull request, and
-reports.
+only upgrades Bitcoin proofs, saves the Bitcoin header of each complete one once it
+is six blocks deep, stamps any block with no `.ots` yet (block 0 was anchored at
+deploy but never stamped), proposes them as a pull request, and reports.
 See §8.
 
 ## 2. Move the secrets
@@ -61,8 +61,9 @@ cannot be rewritten and the branch cannot be deleted. CI still runs on every
 push and still reports red or green; it is simply not a gate.
 
 If the check names are ever wanted as a gate — when a second person arrives and
-pull requests become real — the names are the matrix job names, six of them:
-`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`. There is no
+pull requests become real — the names are the six matrix job names,
+`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`, and
+`saved-headers`, the check that saved Bitcoin headers are real (§8). There is no
 check named `test` or `tests`; requiring one would block `main` forever.
 
 ## 4. What the workflows already enforce
@@ -196,12 +197,40 @@ Merge it when it appears; a later night upgrades it like any other.
 The nightly runner reads the repository's own `trust.json`, so it never reports
 more than `VALID LOCALLY`. Like the block workflow's own verify step, it has no
 Bitcoin node, so verify takes the header of each Bitcoin block a complete proof names
-from mempool.space and blockstream.info: both must give the same header, and it must
+from its saved header (below) or else from mempool.space and blockstream.info: both must give the same header, and it must
 hash to that block and carry Bitcoin's proof of work. A proof Bitcoin contradicts makes the night INVALID. When no header can be
 had (the sources disagree, one is down, or the 60 seconds all Bitcoin lookups share
 run out) the proof is reported as not checked rather than failed, as is every proof
-where python-opentimestamps is not installed. `verify --no-public-bitcoin` asks only
-the node. Verify asks no calendar; a proof not yet in a Bitcoin block is pending until
-nightly's upgrade moves it along.
+where python-opentimestamps is not installed. `verify --no-public-bitcoin` asks no
+public source: only saved headers and the node. Verify asks no calendar; a proof not
+yet in a Bitcoin block is pending until nightly's upgrade moves it along. Once a proof
+is complete and its Bitcoin block has six confirmations (the block and five on top, by
+the confirming source's own chain tip), the same upgrade saves that block's header as
+`<index>.btc-header` beside the proof, and the nightly PR carries it with the proofs.
+A block that deep is, in practice, not replaced, so its header does not change, and each block is
+looked up once rather than every night; until then, upgrade says how many
+confirmations it has. A saved header is read before the node or the public sources.
+Verify still checks it itself (it must carry the proof and Bitcoin's proof of work) and
+ignores one that does not; a saved header can confirm a proof, never fail one. A
+header does not carry its own height, so verify names a block confirmed this way by
+what the header proves: its block hash and the time it was mined ("in the Bitcoin
+block 0000…, mined 2026-…"). Paste that hash into any Bitcoin explorer to see the
+block and its height. A saved header reaches `main` only through a PR you merge, and
+one that passes costs about half a Bitcoin block's mining to make. So CI's
+`saved-headers` check (`aikiri-ledger check-headers`) looks every saved header up by
+its height from both public sources: red if either names another block there, or if
+either cannot be asked (not checked is not a pass). It runs on every PR and push to
+`main`. Nightly's own header PRs are opened by its token, so GitHub runs no CI on them
+before you merge; their headers are the ones both public sources gave, and the check
+runs on `main` once merged. A red `saved-headers` on a PR means do not merge it
+(re-run it first if it says "not checked": a source was down). No `saved-headers`
+run at all (a commit message with `[skip ci]` skips CI) means run
+`aikiri-ledger check-headers` on the branch yourself. Red on `main` after a merge
+reads the same way: "not checked" means re-run; "is not the block", "lacks Bitcoin's
+proof of work" or "not a saved header file" on `block N` means remove
+`ledger/proofs/<N, six digits>.btc-header` in a PR. Verify, and the check, read a saved
+header only where every name on the way (`ledger`, `proofs`, the file) is stored
+exactly so and none is a link: a Mac's disk opens the file for `Ledger/Proofs/…BTC-header`
+too, and no check on Linux could list every such alias, so an alias is never read.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
-Bitcoin block header from a node or from both public sources.
+Bitcoin block header: saved beside the proof, from a node, or from both public sources.

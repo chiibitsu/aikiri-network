@@ -10,9 +10,12 @@
   block                     write the block a sealed request approves
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
-  upgrade                   fetch what the calendars have for pending Bitcoin proofs
+  upgrade                   fetch what the calendars have for pending Bitcoin proofs, and
+                            save the Bitcoin header of each confirmed one beside it
   stamp                     stamp on Bitcoin every block with no .ots yet; a good
                             .ots.bak is put back instead, a bad one blocks it
+  check-headers             look up every saved Bitcoin header by its height from both
+                            public sources; red if one is not the block they name
   proof-status <index>      what the block's Bitcoin proof file is, in one line
                             (its digest only: `verify` is what checks a proof)
   verify                    report one of four states
@@ -44,7 +47,7 @@ from . import softkey
 from .trust import Trust
 from .verify import State, verify_all
 from .witness import (BASE_KEY_ENV, BaseWitness, BitcoinWitness, OtsError, QuorumBase, base_key_from_env,
-                      compile_contract, find_deployment, receipt_cost, wait_for_code)
+                      _plain, compile_contract, find_deployment, receipt_cost, wait_for_code)
 
 DEFAULT_KEYFILE = os.path.expanduser("~/.aikiri/chii.key")
 DEFAULT_BASE_ENV = os.path.expanduser("~/.aikiri/base.env")
@@ -168,6 +171,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("witness").add_argument("index", type=int)
     sub.add_parser("reconcile")
     sub.add_parser("upgrade")
+    sub.add_parser("check-headers", help="look up every saved Bitcoin header by its height "
+                                         "from mempool.space and blockstream.info")
     sub.add_parser("stamp")
     sub.add_parser("proof-status").add_argument("index", type=int)
 
@@ -176,7 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--offline", action="store_true", help="skip the witnesses entirely")
     v.add_argument("--require", choices=sorted(REQUIRE), default="full")
     v.add_argument("--no-public-bitcoin", action="store_true",
-                   help="never ask mempool.space or blockstream.info for Bitcoin headers")
+                   help="never ask mempool.space or blockstream.info for Bitcoin headers "
+                        "(saved headers and the node are still read)")
 
     d = sub.add_parser("deploy"); d.add_argument("--rpc", required=True)
     d.add_argument("--chain-id", type=int, default=8453)
@@ -382,7 +388,36 @@ def main(argv=None):
                                                 "pending": "still pending"}.get(done, done))
             except (OtsError, OSError) as e:  # ots not running, or the folder not writable
                 print(f"block {blk.index}: could not check or upgrade the proof file ({e})")
+        # A complete proof's Bitcoin header is saved beside it, so verify needs no lookup.
+        for blk in L.blocks():
+            if not os.path.lexists(L.proof_path(blk.index, "hash.ots")):
+                continue
+            try:
+                said = bw.save_header(blk)
+                if said == "saved":
+                    print(f"block {blk.index}: Bitcoin header saved beside its proof")
+                elif said.startswith("not saved") and not said.startswith("not saved: the proof is"):
+                    print(f"block {blk.index}: Bitcoin header {said}")
+            except OSError as e:  # the folder not writable
+                print(f"block {blk.index}: could not save its Bitcoin header ({_plain(str(e))})")
         return 0
+
+    if a.cmd == "check-headers":
+        # CI's check that a saved header is the real one: verify takes any that carries
+        # the proof and Bitcoin's work, and faking one costs about half a block's mining.
+        blocks = list(L.blocks())
+        if not blocks:
+            print(f"no ledger at {L.root}")
+            return 1
+        checked, passed, named = 0, True, {}
+        for blk in blocks:
+            for ok, said in BitcoinWitness(L).check_saved(blk, named):  # each block its own 60 s
+                checked += 1
+                passed = passed and ok
+                print(f"block {blk.index}: {said}")
+        if not checked:
+            print("no saved Bitcoin headers")
+        return 0 if passed else 1
 
     if a.cmd == "proof-status":
         # block.yml's commit message reads this: main's history is never rewritten,
