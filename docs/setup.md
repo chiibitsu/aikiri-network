@@ -61,8 +61,9 @@ cannot be rewritten and the branch cannot be deleted. CI still runs on every
 push and still reports red or green; it is simply not a gate.
 
 If the check names are ever wanted as a gate — when a second person arrives and
-pull requests become real — the names are the matrix job names, six of them:
-`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`. There is no
+pull requests become real — the names are the six matrix job names,
+`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`, and
+`saved-headers`, the check that saved Bitcoin headers are real (§8). There is no
 check named `test` or `tests`; requiring one would block `main` forever.
 
 ## 4. What the workflows already enforce
@@ -221,6 +222,10 @@ its height from both public sources: red if either names another block there, or
 either cannot be asked (not checked is not a pass). It runs on every PR and push to
 `main`. Nightly's own header PRs are opened by its token, so GitHub runs no CI on them
 before you merge; their headers are the ones both public sources gave, and the check
-runs on `main` once merged. A red `saved-headers` on a PR means do not merge it.
+runs on `main` once merged. A red `saved-headers` on a PR means do not merge it
+(re-run it first if it says "not checked": a source was down). No `saved-headers`
+run at all (a commit message with `[skip ci]` skips CI) means run
+`aikiri-ledger check-headers` on the branch yourself. Red on `main` after a merge
+means a saved header there is not the real block: remove that `.btc-header` in a PR.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin block header: saved beside the proof, from a node, or from both public sources.

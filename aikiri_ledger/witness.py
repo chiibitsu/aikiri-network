@@ -583,13 +583,15 @@ class BitcoinWitness:
             tips.append(int(text))
         return min(tips)
 
-    def check_saved(self, block: Block) -> list[tuple[bool, str]]:
+    def check_saved(self, block: Block, named: dict | None = None) -> list[tuple[bool, str]]:
         """Each header saved beside the block's proof, looked up by its height from both
-        public sources: [(passed, what was found)], [] if there is no .btc-header. One
-        either source does not name at that height fails, and so does one a source
+        public sources: [(passed, what was found)], [] if there is no .btc-header. A
+        header either source does not name at that height fails, and so does one a source
         could not be asked about: this is the check that a saved header is the real
         one, and a check that did not happen is not a pass. A file verify would not
-        read in full fails too, so nothing in it goes unchecked."""
+        read in full fails too, so nothing in it goes unchecked. `named` keeps what each
+        source named at each height across calls, so a height is asked once a run."""
+        named = {} if named is None else named
         p = self.ledger.proof_path(block.index, "btc-header")
         if not os.path.lexists(p):
             return []
@@ -616,12 +618,13 @@ class BitcoinWitness:
             for base in _PUBLIC_SOURCES:
                 host = base.split("/")[2]
                 try:
-                    named = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
+                    if (base, height) not in named:
+                        named[base, height] = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
                 except Exception as e:  # noqa: BLE001 - not asked is not checked, and not a pass
                     why = str(e) if isinstance(e, _Unanswered) else f"{host}: {_kind(e)}"  # ours: out of time
                     verdict = (False, f"{said} was not checked ({why})")
                     break
-                if named != own:
+                if named[base, height] != own:
                     verdict = (False, f"{said} is not the block {host} names at that height")
                     break
             out.append(verdict)

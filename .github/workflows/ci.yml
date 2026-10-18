@@ -35,7 +35,8 @@ jobs:
     # verify takes a saved Bitcoin header that carries the proof and Bitcoin's work;
     # faking one costs about half a block's mining, and it reaches main only through
     # a PR. This looks each one up by its height from both public sources, so a faked
-    # one is red before the merge. A source that cannot answer is red too: not checked.
+    # one is red on its PR (nightly's own PRs get no CI; red then shows on main once
+    # merged). A source that cannot answer is red too: not checked.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -14,6 +14,8 @@
                             save the Bitcoin header of each confirmed one beside it
   stamp                     stamp on Bitcoin every block with no .ots yet; a good
                             .ots.bak is put back instead, a bad one blocks it
+  check-headers             look up every saved Bitcoin header by its height from both
+                            public sources; red if one is not the block they name
   proof-status <index>      what the block's Bitcoin proof file is, in one line
                             (its digest only: `verify` is what checks a proof)
   verify                    report one of four states
@@ -33,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 from .approval import ApprovalKey, verify_approval
@@ -403,12 +406,23 @@ def main(argv=None):
     if a.cmd == "check-headers":
         # CI's check that a saved header is the real one: verify takes any that carries
         # the proof and Bitcoin's work, and faking one costs about half a block's mining.
-        checked, passed = 0, True
+        if not L.root.is_dir():
+            print(f"no ledger at {L.root}")
+            return 1
+        checked, passed, named, owned = 0, True, {}, set()
         for blk in L.blocks():
-            for ok, said in BitcoinWitness(L).check_saved(blk):  # each block its own 60 s
+            owned.add(L.proof_path(blk.index, "btc-header").name)
+            for ok, said in BitcoinWitness(L).check_saved(blk, named):  # each block its own 60 s
                 checked += 1
                 passed = passed and ok
                 print(f"block {blk.index}: {said}")
+        # Only a block's own name is checked above, but a Mac's disk ignores case:
+        # there 000003.BTC-header is block 3's .btc-header, and verify reads it.
+        strays = [n for n in (os.listdir(L.proofs_dir) if L.proofs_dir.is_dir() else [])
+                  if unicodedata.normalize("NFKC", n).casefold().endswith(".btc-header") and n not in owned]
+        for name in sorted(strays):
+            checked, passed = checked + 1, False
+            print(f"{name}: not the .btc-header of a block in this ledger, by its exact name")
         if not checked:
             print("no saved Bitcoin headers")
         return 0 if passed else 1
