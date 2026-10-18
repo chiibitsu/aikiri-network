@@ -1054,6 +1054,84 @@ def test_a_saved_header_file_that_is_not_one_is_ignored(ledger, monkeypatch, eas
     assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
 
 
+# A saved header that passes verify costs about half a block's mining to fake, and
+# reaches main only through a PR Chii merges. CI looks each one up by its height
+# from both public sources, so a faked one turns the check red before the merge.
+
+def _headers_check(ledger, monkeypatch, public):
+    from aikiri_ledger import cli
+    from aikiri_ledger import witness as W
+    monkeypatch.setattr(W, "_fetch", public)
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: (_ for _ in ()).throw(_NO_NODE))
+    return cli.main(["--ledger", str(ledger.root), "check-headers"])
+
+
+def test_a_saved_header_both_public_sources_name_passes(ledger, monkeypatch, easy_work, capsys):
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, (800_000, raw))
+    same = {800_000: (raw, block_hash)}
+    assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 0
+    assert "block 0: the saved header for Bitcoin block 800000 is the one both public sources name" \
+        in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("which", ["mempool.space", "blockstream.info"])
+def test_a_saved_header_a_public_source_does_not_name_fails(ledger, monkeypatch, easy_work, capsys, which):
+    raw, block_hash = _mined(b"\x01" * 32)
+    other = _mined(b"\x02" * 32)
+    _save(ledger, 0, (800_000, raw))
+    answers = {"mempool.space": {800_000: (raw, block_hash)}, "blockstream.info": {800_000: (raw, block_hash)}}
+    answers[which] = {800_000: other}
+    assert _headers_check(ledger, monkeypatch, _Public(**answers)) == 1
+    out = capsys.readouterr().out
+    assert f"block 0: the saved header for Bitcoin block 800000 is not the block {which} names " \
+           "at that height" in out, out
+
+
+def test_a_saved_header_a_public_source_cannot_answer_for_fails_as_not_checked(ledger, monkeypatch, easy_work, capsys):
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, (800_000, raw))
+    public = _Public(**{"mempool.space": {800_000: (raw, block_hash)}, "blockstream.info": OSError("down")})
+    assert _headers_check(ledger, monkeypatch, public) == 1
+    assert "block 0: the saved header for Bitcoin block 800000 was not checked (blockstream.info: OSError)" \
+        in capsys.readouterr().out
+
+
+def test_a_saved_header_without_the_work_fails_the_check(ledger, monkeypatch, capsys):
+    raw, block_hash = _mined(b"\x01" * 32)  # regtest work, not counted without easy_work
+    _save(ledger, 0, (800_000, raw))
+    same = {800_000: (raw, block_hash)}
+    assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 1
+    assert "block 0: the saved header for Bitcoin block 800000 lacks Bitcoin's proof of work" \
+        in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["link", "huge", "junk"])
+def test_a_header_file_verify_would_ignore_fails_the_check(ledger, monkeypatch, easy_work, capsys, kind):
+    raw, block_hash = _mined(b"\x01" * 32)
+    if kind == "link":
+        ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+        (ledger.proofs_dir / "elsewhere").write_text(f"800000 {raw.hex()}\n")
+        ledger.proof_path(0, "btc-header").symlink_to(ledger.proofs_dir / "elsewhere")
+    elif kind == "huge":
+        _save(ledger, 0, text=f"800000 {raw.hex()}\n" * 100)
+    else:
+        _save(ledger, 0, text=f"800000 {raw.hex()}\nnot a header\n")
+    same = {800_000: (raw, block_hash)}
+    assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 1
+    assert "block 0: its .btc-header is not a saved header file verify reads in full" in capsys.readouterr().out
+
+
+def test_no_saved_header_passes_the_check(ledger, monkeypatch, capsys):
+    assert _headers_check(ledger, monkeypatch, _Public()) == 0
+    assert "no saved Bitcoin headers" in capsys.readouterr().out
+
+
+def test_ci_checks_every_saved_header():
+    text = Path(".github/workflows/ci.yml").read_text()
+    assert "aikiri-ledger check-headers" in text
+
+
 def test_a_confirmed_header_is_saved_beside_the_proof(ledger, monkeypatch, easy_work):
     from aikiri_ledger import witness as W
     data = _proof_of_block_0(ledger, _btc(800_000))
