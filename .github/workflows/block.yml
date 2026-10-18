@@ -17,33 +17,6 @@ permissions:
   contents: write
 concurrency: ledger-write
 jobs:
-  ask:
-    # Starts with the run, beside `block`, which waits for Chii to approve the ledger
-    # environment: tells her on Telegram that a block is waiting for her. (A run queued
-    # behind another on ledger-write starts, and asks, when that one finishes.) `block`
-    # does not wait on this job, and a Telegram error does not fail it, so an alert
-    # never holds a block or turns its run red.
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    continue-on-error: true  # the job's own failure too: a timeout, a lost runner
-    permissions: {}
-    steps:
-      - name: tell Chii a block is waiting for her approval
-        continue-on-error: true
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEXT: "aikiri-network: a block is waiting for your approval. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-        run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
-            exit 0
-          fi
-          curl -sS --fail --max-time 20 -o /dev/null -w "Telegram answered HTTP %{http_code}\n" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=${TEXT}" \
-            --data-urlencode "disable_web_page_preview=true"
   block:
     runs-on: ubuntu-latest
     environment: ledger

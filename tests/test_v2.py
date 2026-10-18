@@ -2797,33 +2797,40 @@ def _step(name, step_name):
     return {"env": env, "run": run}
 
 
-def _send(script, tmp_path, **env):
-    """Run an alert step's script with a stand-in curl; (exit code, curl's args or None)."""
+def _send(script, tmp_path, refuse=None, **env):
+    """Run an alert step's script with a stand-in curl; (exit code, curl's args or None,
+    output). With `refuse`, the stand-in writes it as Telegram's reply and fails as
+    curl --fail-with-body does on an HTTP error."""
     import os, subprocess
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "curl.args"
     curl = bin_dir / "curl"
-    curl.write_text(f'#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > "{log}"\n')
+    body = f'for a in "$@"; do printf "%s\\n" "$a"; done > "{log}"\n'
+    if refuse:
+        body += ('out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
+                 f"printf '%s' '{refuse}' > \"$out\"; exit 22\n")
+    curl.write_text("#!/bin/sh\n" + body)
     curl.chmod(0o755)
     full = {"PATH": f"{bin_dir}:{os.environ['PATH']}", **env}
     r = subprocess.run(["bash", "-eo", "pipefail", "-c", script], env=full, capture_output=True, text=True)
-    return r.returncode, (log.read_text().splitlines() if log.exists() else None)
+    return r.returncode, (log.read_text().splitlines() if log.exists() else None), r.stdout + r.stderr
 
 
 _ALERT_STEPS = [("alerts.yml", "tell Chii on Telegram"), ("alerts.yml", "send a test message"),
-                ("block.yml", "tell Chii a block is waiting for her approval")]
+                ("alerts.yml", "tell Chii a block is waiting for her approval")]
 
 
-def test_alerts_watch_every_ledger_workflow_and_only_failures():
+def test_alerts_watch_every_ledger_workflow_on_main():
     import re
     text = _wf("alerts.yml")
     names = {re.search(r"^name: (\S+)", f.read_text(), re.M)[1]
              for f in Path(".github/workflows").glob("*.yml")} - {"alerts"}
     watched = re.search(r"workflows: \[([^\]]*)\]", text)[1]
     assert {w.strip() for w in watched.split(",")} == names
-    assert "types: [completed]" in text and re.search(r"^permissions: \{\}$", text, re.M)
-    # which runs alert is test_only_a_real_ledger_failure_on_main_alerts, by evaluating the if
+    assert "types: [requested, completed]" in text and "branches: [main]" in text
+    assert re.search(r"^permissions: \{\}$", text, re.M)
+    # which runs alert is decided by each job's `if`, evaluated in the tests below
 
 
 def test_an_alert_carries_only_its_own_words_and_the_run_link():
@@ -2833,19 +2840,24 @@ def test_an_alert_carries_only_its_own_words_and_the_run_link():
         step = _step(name, step_name)
         assert step["run"] and "${{" not in step["run"], (name, step_name)
         assert set(step["env"]) == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TEXT"}, step["env"]
-        for untrusted in ("head_branch", "head_commit", "display_title", "actor", "title", "event.pull"):
-            assert untrusted not in step["env"]["TEXT"], (name, untrusted)
 
 
 def test_an_alert_is_sent_to_the_chat_with_its_text(tmp_path):
     step = _step(*_ALERT_STEPS[0])
-    code, args = _send(step["run"], tmp_path, TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42",
-                       TEXT="aikiri-network: nightly failure. https://github.com/x/y/actions/runs/1")
+    code, args, _ = _send(step["run"], tmp_path, TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42",
+                          TEXT="aikiri-network: nightly failure. https://github.com/x/y/actions/runs/1")
     assert code == 0
     assert "https://api.telegram.org/bot123:abc/sendMessage" in args
     assert "chat_id=42" in args
     assert "text=aikiri-network: nightly failure. https://github.com/x/y/actions/runs/1" in args
-    assert "--fail" in args and "--max-time" in args
+    assert "--fail-with-body" in args and "--max-time" in args
+
+
+def test_a_refused_alert_says_telegrams_reason_and_fails(tmp_path):
+    step = _step(*_ALERT_STEPS[1])
+    code, _, out = _send(step["run"], tmp_path, refuse='{"ok":false,"description":"Bad Request: chat not found"}',
+                         TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42", TEXT="x")
+    assert code != 0 and "chat not found" in out and "123:abc" not in out
 
 
 @pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
@@ -2853,20 +2865,15 @@ def test_no_alert_is_sent_and_nothing_fails_until_the_secrets_are_set(tmp_path, 
     step = _step(*_ALERT_STEPS[2])
     env = {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42", "TEXT": "x"}
     env[missing] = ""
-    code, args = _send(step["run"], tmp_path, **env)
+    code, args, _ = _send(step["run"], tmp_path, **env)
     assert code == 0 and args is None
 
 
-def test_a_block_waiting_for_approval_is_announced_without_holding_the_block():
+def test_block_yml_is_untouched_by_the_alerts():
+    """An alert job inside block.yml could fail its run or hold a block; the waiting
+    message comes from alerts.yml on the run being requested instead."""
     text = _wf("block.yml")
-    keys = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
-    ask = keys[keys.index("  ask:\n"):keys.index("  block:\n")]
-    block = keys[keys.index("  block:\n"):]
-    assert "environment:" not in ask and "permissions: {}" in ask
-    assert "environment: ledger" in block.split("steps:")[0]
-    assert "needs:" not in block.split("steps:")[0]  # an alert never holds a block
-    t = _step(*_ALERT_STEPS[2])["env"]["TEXT"]
-    assert "waiting for your approval" in t and "github.run_id" in t
+    assert "TELEGRAM" not in text and "  ask:" not in text
 
 
 def test_every_alert_script_is_the_same():
@@ -2875,8 +2882,9 @@ def test_every_alert_script_is_the_same():
 
 
 def _alert_condition(job):
-    """The `if:` of an alerts.yml job, as a function of (event_name, run fields): GitHub's
-    expression syntax narrowed to what the file uses (&&, ||, ==, !=, contains/fromJSON)."""
+    """The `if:` of an alerts.yml job, as a function of (event_name, action, run fields):
+    GitHub's expression syntax narrowed to what the file uses (&&, ||, ==, !=,
+    contains/fromJSON)."""
     import re
     from types import SimpleNamespace as NS
     text = _wf("alerts.yml")
@@ -2896,10 +2904,10 @@ def _alert_condition(job):
     py = re.sub(r"contains\(fromJSON\('(\[[^\]]*\])'\), ([\w.]+)\)", r"(\2 in \1)", cond)
     py = py.replace("&&", " and ").replace("||", " or ")
 
-    def holds(event_name, **run):
+    def holds(event_name, action=None, **run):
         repo = run.pop("repo", "chiibitsu/aikiri-network")
         wr = NS(head_repository=NS(full_name=run.pop("head_repo", repo)), **run)
-        github = NS(event_name=event_name, repository=repo, event=NS(workflow_run=wr))
+        github = NS(event_name=event_name, repository=repo, event=NS(action=action, workflow_run=wr))
         return eval(py, {"github": github})  # noqa: S307 - the repo's own workflow file
     return holds
 
@@ -2925,22 +2933,45 @@ def _run(name, conclusion="failure", event="push", head_branch="main", **kw):
     (_run("block", head_branch="claude/x"), False),            # a branch's own workflow named block
 ])
 def test_only_a_real_ledger_failure_on_main_alerts(run, alerts):
-    assert bool(_alert_condition("failed")("workflow_run", **run)) is alerts
+    assert bool(_alert_condition("failed")("workflow_run", action="completed", **run)) is alerts
+    assert not _alert_condition("failed")("workflow_run", action="requested", **run)
+
+
+@pytest.mark.parametrize("run, asks", [
+    (_run("block", conclusion=None), True),                     # a request file pushed to main
+    (_run("block", conclusion=None, event="workflow_dispatch"), True),
+    (_run("nightly", conclusion=None, event="schedule"), False),
+    (_run("block", conclusion=None, head_branch="claude/x"), False),  # never waits: ledger is main-only
+    (_run("block", conclusion=None, event="pull_request"), False),
+    (_run("block", conclusion=None, head_repo="someone/fork"), False),
+])
+def test_only_a_block_run_on_main_says_it_is_waiting(run, asks):
+    assert bool(_alert_condition("waiting")("workflow_run", action="requested", **run)) is asks
+    assert not _alert_condition("waiting")("workflow_run", action="completed", **run)
 
 
 def test_the_test_message_is_sent_only_by_hand():
     holds = _alert_condition("test")
-    assert holds("workflow_dispatch") and not holds("workflow_run", **_run("block"))
+    assert holds("workflow_dispatch") and not holds("workflow_run", action="completed", **_run("block"))
     assert not _alert_condition("failed")("workflow_dispatch", **_run("block"))
+    assert not _alert_condition("waiting")("workflow_dispatch", **_run("block"))
 
 
-def test_a_failed_alert_never_turns_a_block_run_red():
-    """A Telegram error on `ask` would fail its job, so the block run, though the block
-    landed, and alerts.yml would then report "block failure"."""
-    keys = [l.split("#")[0].rstrip() for l in _wf("block.yml").splitlines()]
-    ask = keys[keys.index("  ask:"):keys.index("  block:")]
-    assert "    continue-on-error: true" in ask            # the job: a timeout, a lost runner
-    assert "        continue-on-error: true" in ask        # the step: a Telegram error
+def test_an_alert_text_is_built_only_from_known_fields():
+    import re
+    allowed = {"github.event.workflow_run.name", "github.event.workflow_run.conclusion",
+               "github.event.workflow_run.html_url"}
+    for name, step_name in _ALERT_STEPS:
+        used = set(re.findall(r"\$\{\{\s*([^}]+?)\s*\}\}", _step(name, step_name)["env"]["TEXT"]))
+        assert used <= allowed, (name, used - allowed)
+
+
+def test_every_alert_job_stops_within_two_minutes():
+    import re
+    text = _wf("alerts.yml")
+    for job, nxt in (("waiting", "  failed:\n"), ("failed", "  test:\n"), ("test", None)):
+        part = text[text.index(f"  {job}:\n"):(text.index(nxt) if nxt else None)]
+        assert re.search(r"^    timeout-minutes: 2$", part, re.M), job
 
 
 @pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
@@ -2950,22 +2981,3 @@ def test_the_manual_test_fails_when_a_secret_is_not_set(tmp_path, missing):
     assert _send(step["run"], tmp_path, **env)[0] == 0
     env[missing] = ""
     assert _send(step["run"], tmp_path, **env)[0] != 0
-
-
-def test_an_alert_text_is_built_only_from_known_fields():
-    import re
-    allowed = {"github.event.workflow_run.name", "github.event.workflow_run.conclusion",
-               "github.event.workflow_run.html_url", "github.server_url", "github.repository",
-               "github.run_id"}
-    for name, step_name in _ALERT_STEPS:
-        used = set(re.findall(r"\$\{\{\s*([^}]+?)\s*\}\}", _step(name, step_name)["env"]["TEXT"]))
-        assert used <= allowed, (name, used - allowed)
-
-
-def test_every_alert_job_stops_within_two_minutes():
-    import re
-    for name, job, nxt in (("alerts.yml", "failed", "  test:\n"), ("alerts.yml", "test", None),
-                           ("block.yml", "ask", "  block:\n")):
-        text = _wf(name)
-        part = text[text.index(f"  {job}:\n"):(text.index(nxt) if nxt else None)]
-        assert re.search(r"^    timeout-minutes: 2$", part, re.M), (name, job)
