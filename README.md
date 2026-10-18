@@ -97,6 +97,7 @@ solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-stati
   the state, checking the newest block on Base once it is final. Writes no blocks, and proposes any new proof as a pull request rather
   than pushing it.
 - `deploy.yml`, `genesis.yml` ~ ran once each; both refuse to run again.
+- `alerts.yml` ~ Telegram messages about this repository's runs on `main` (never a fork's or a branch's): when a block run is requested, and so waits for your approval, and when a run of block, nightly, tests, deploy or genesis fails or is cancelled. `block.yml` itself is not touched. Needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as secrets of an `alerts` environment (Settings → Environments), limited to `main`, with no required reviewer; without them nothing is sent. Run it by hand (Actions → alerts → Run workflow) to send a test message; that run is red until both secrets are set, and says Telegram's reason if Telegram refuses.
 
 Every action is SHA-pinned, dependencies are hash-pinned, and the keys live in a GitHub environment with a required reviewer. Setup is in `docs/setup.md`.
 

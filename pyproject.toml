@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "web3[tester]"]
+dev = ["pytest", "pyyaml", "web3[tester]"]  # pyyaml: tests parse the workflows
 bitcoin = ["opentimestamps-client", "opentimestamps>=0.4.5", "python-bitcoinlib>=0.12.2"]  # verify imports the last two
 
 [project.scripts]
