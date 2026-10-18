@@ -2877,3 +2877,90 @@ def test_a_block_waiting_for_approval_is_announced_without_holding_the_block():
 def test_every_alert_script_is_the_same():
     scripts = [_step(n, s)["run"] for n, s in _ALERT_STEPS]
     assert scripts[0] == scripts[1] == scripts[2]
+
+
+def _alert_condition(job):
+    """The `if:` of an alerts.yml job, as a function of (event_name, run fields): GitHub's
+    expression syntax narrowed to what the file uses (&&, ||, ==, !=, contains/fromJSON)."""
+    import re
+    from types import SimpleNamespace as NS
+    text = _wf("alerts.yml")
+    body = text[text.index(f"  {job}:\n"):]
+    lines = body.splitlines()[1:]
+    i = next(n for n, l in enumerate(lines) if l.strip().startswith("if:"))
+    first = lines[i].strip()[len("if:"):].strip()
+    if first == ">-":
+        cond = []
+        for l in lines[i + 1:]:
+            if not l.startswith(" " * 6):
+                break
+            cond.append(l.strip())
+        cond = " ".join(cond)
+    else:
+        cond = first
+    py = re.sub(r"contains\(fromJSON\('(\[[^\]]*\])'\), ([\w.]+)\)", r"(\2 in \1)", cond)
+    py = py.replace("&&", " and ").replace("||", " or ")
+
+    def holds(event_name, **run):
+        repo = run.pop("repo", "chiibitsu/aikiri-network")
+        wr = NS(head_repository=NS(full_name=run.pop("head_repo", repo)), **run)
+        github = NS(event_name=event_name, repository=repo, event=NS(workflow_run=wr))
+        return eval(py, {"github": github})  # noqa: S307 - the repo's own workflow file
+    return holds
+
+
+def _run(name, conclusion="failure", event="push", head_branch="main", **kw):
+    return dict(name=name, conclusion=conclusion, event=event, head_branch=head_branch, **kw)
+
+
+@pytest.mark.parametrize("run, alerts", [
+    (_run("block"), True),
+    (_run("nightly", event="schedule"), True),
+    (_run("nightly", event="workflow_dispatch"), True),
+    (_run("deploy", conclusion="timed_out"), True),
+    (_run("tests"), True),                                    # a push to main
+    (_run("genesis", conclusion="startup_failure"), True),
+    (_run("block", conclusion="success"), False),
+    (_run("nightly", conclusion="cancelled"), False),
+    (_run("tests", head_branch="claude/x"), False),            # a feature branch
+    (_run("tests", event="pull_request"), False),
+    (_run("block", event="pull_request"), False),              # a fork PR's workflow named block
+    (_run("block", event="pull_request", head_repo="someone/fork"), False),
+    (_run("block", head_repo="someone/fork"), False),
+    (_run("block", head_branch="claude/x"), False),            # a branch's own workflow named block
+])
+def test_only_a_real_ledger_failure_on_main_alerts(run, alerts):
+    assert bool(_alert_condition("failed")("workflow_run", **run)) is alerts
+
+
+def test_the_test_message_is_sent_only_by_hand():
+    holds = _alert_condition("test")
+    assert holds("workflow_dispatch") and not holds("workflow_run", **_run("block"))
+    assert not _alert_condition("failed")("workflow_dispatch", **_run("block"))
+
+
+def test_a_failed_alert_never_turns_a_block_run_red():
+    """A Telegram error on `ask` would fail its job, so the block run, though the block
+    landed, and alerts.yml would then report "block failure"."""
+    text = _wf("block.yml")
+    ask = text[text.index("  ask:\n"):text.index("  block:\n")]
+    assert "continue-on-error: true" in ask
+
+
+def test_an_alert_text_is_built_only_from_known_fields():
+    import re
+    allowed = {"github.event.workflow_run.name", "github.event.workflow_run.conclusion",
+               "github.event.workflow_run.html_url", "github.server_url", "github.repository",
+               "github.run_id"}
+    for name, step_name in _ALERT_STEPS:
+        used = set(re.findall(r"\$\{\{\s*([^}]+?)\s*\}\}", _step(name, step_name)["env"]["TEXT"]))
+        assert used <= allowed, (name, used - allowed)
+
+
+def test_every_alert_job_stops_within_two_minutes():
+    import re
+    for name, job, nxt in (("alerts.yml", "failed", "  test:\n"), ("alerts.yml", "test", None),
+                           ("block.yml", "ask", "  block:\n")):
+        text = _wf(name)
+        part = text[text.index(f"  {job}:\n"):(text.index(nxt) if nxt else None)]
+        assert re.search(r"^    timeout-minutes: 2$", part, re.M), (name, job)
