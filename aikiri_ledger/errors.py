@@ -1,5 +1,7 @@
 """Failures that must never be swallowed."""
 
+import re
+
 
 class SchemaError(ValueError):
     """A document did not match its closed schema. Reject, never coerce."""
@@ -29,12 +31,12 @@ class EndpointDropped(ConnectionError):
 
 def describe(e: BaseException) -> str:
     """What failed, in words no endpoint can put a key into: the error's type and
-    what it wraps, by type name, and the HTTP status. Never a library's message,
+    what it wraps, by type name, and the HTTP status (from the response, or the digits
+    of urllib3's fixed words when retries ran out on one). Never a library's message,
     which carries the URL as the library printed it, re-encoded in more ways than
     a scrub can match (a key in a keyed RPC URL is part of that URL)."""
     if isinstance(e, (EndpointUnusable, EndpointDropped)):
         return f"{type(e).__name__}: {e}"
-    import re
     names, x = [], e
     status = getattr(getattr(e, "response", None), "status_code", None)
     while isinstance(x, BaseException) and len(names) < 4:

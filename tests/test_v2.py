@@ -1812,6 +1812,7 @@ def test_a_rate_limit_that_outlasts_the_retries_says_its_status():
     """Retries spent on 429s ended as RetryError, which carries no response, so the
     rate limit this PR exists for read the same as a run of 503s. urllib3's own
     words carry the status (`too many 429 error responses`); only its digits are kept."""
+    from types import SimpleNamespace
     from requests.exceptions import RetryError
     from urllib3.exceptions import MaxRetryError, ResponseError
     from aikiri_ledger.errors import describe
@@ -1822,6 +1823,11 @@ def test_a_rate_limit_that_outlasts_the_retries_says_its_status():
     assert describe(RetryError(MaxRetryError(None, "/", ResponseError("too many 429 error responses; EVIL")))) \
         == "RetryError / MaxRetryError / ResponseError"
     assert describe(ValueError("too many 429 error responses")) == "ValueError"  # only urllib3's words count
+    for odd in ("too many 4290 error responses", "too many 42 error responses"):  # urllib3 gives three digits
+        assert describe(RetryError(MaxRetryError(None, "/", ResponseError(odd)))) == "RetryError / MaxRetryError / ResponseError"
+    import requests
+    late = requests.HTTPError(ResponseError("too many 429 error responses"), response=SimpleNamespace(status_code=500))
+    assert describe(late) == "HTTPError / ResponseError / HTTP 429"  # the spent status, not the last response's
 
 
 def test_a_dropped_endpoint_says_why_without_its_url():
