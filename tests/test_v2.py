@@ -1907,6 +1907,17 @@ def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead(
     assert q.address == _Honest.address
 
 
+def test_the_waiting_line_says_the_window_in_whole_hours_past_a_day(ledger, sk, mac, trust, monkeypatch):
+    from aikiri_ledger import verify as V
+    monkeypatch.setattr(V, "_ANCHOR_WINDOW", timedelta(days=1, hours=2))
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
+    assert any("verify fails if it is still missing 26 hours after it was written" in r for r in report), report
+
+
 @pytest.mark.parametrize("hours, state", [(1, State.VALID_LOCALLY), (7, State.INVALID)])
 def test_a_block_still_not_anchored_hours_after_it_was_written_fails(ledger, sk, mac, trust, hours, state):
     """Nightly is the run that checks the newest block's anchor once it is final; one
