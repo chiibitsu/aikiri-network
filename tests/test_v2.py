@@ -1241,6 +1241,22 @@ def test_a_header_reached_by_a_name_in_another_form_is_not_read(ledger, monkeypa
     assert W.BitcoinWitness(ledger).check_saved(ledger.read(0)) == []
 
 
+@pytest.mark.parametrize("given, cwd", [(".", "ledger"), ("..", "ledger/proofs"), ("x/../ledger", ".")])
+def test_a_saved_header_is_read_however_the_ledger_folder_is_given(ledger, monkeypatch, easy_work, given, cwd):
+    """`.` has no name of its own to look for in a listing, so read as given every
+    saved header was ignored and the check passed over a fake one."""
+    from aikiri_ledger import witness as W
+    from aikiri_ledger.chain import Ledger
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    (ledger.root.parent / "x").mkdir()
+    monkeypatch.chdir(ledger.root.parent / cwd)
+    _lookups(monkeypatch)
+    L = Ledger(Path(given))
+    assert W.BitcoinWitness(L).verify(L.read(0))[0] == "complete"
+    assert W.BitcoinWitness(L).check_saved(L.read(0)) != []
+
+
 @pytest.mark.parametrize("link", ["proofs", "ledger"])
 def test_a_header_reached_through_a_linked_folder_is_not_read(ledger, monkeypatch, easy_work, link):
     from aikiri_ledger import witness as W
