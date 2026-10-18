@@ -718,23 +718,28 @@ def _host(rpc) -> str | None:
 def _scrub(text: str, rpcs) -> str:
     """Error text with every endpoint's URL cut to its host, so a key in its
     path, query or userinfo stays out of the report."""
+    cuts = {}
     for i, rpc in enumerate(rpcs):
         if not rpc:
             continue
-        name = _host(rpc) or f"endpoint {i + 1}"
-        text = text.replace(rpc, name)
+        cuts[rpc] = _host(rpc) or f"endpoint {i + 1}"
         try:
             u = urlsplit(rpc)
         except ValueError:  # never sent, so only ever printed whole
             continue
-        sent = u.path + (f"?{u.query}" if u.query else "")
-        userinfo = u.netloc.rpartition("@")[0]
         # Also apart from the URL: urllib3 prints the path and query alone, and
         # requests the URL as it sent it (the host lowercased, say).
-        for part, by in ((f"{userinfo}@", ""), (sent, "/***")):
-            if part not in ("@", "", "/"):
-                text = text.replace(part, by)
-    return text
+        userinfo = u.netloc.rpartition("@")[0]
+        sent = u.path + (f"?{u.query}" if u.query else "")
+        for part, by in ((f"{userinfo}@", ""), (sent, "/***"), (f"#{u.fragment}", "")):
+            if part not in ("@", "", "/", "#"):
+                cuts.setdefault(part, by)
+    if not cuts:
+        return text
+    # One pass, longest first: cut one at a time, an endpoint's URL that another's
+    # starts with (https://host/base, https://host/base/<key>) left the key behind.
+    pattern = "|".join(re.escape(c) for c in sorted(cuts, key=len, reverse=True))
+    return re.sub(pattern, lambda m: cuts[m.group(0)], text)
 
 
 class QuorumBase:

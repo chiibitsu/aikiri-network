@@ -1782,6 +1782,37 @@ def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, said):
     assert any("k2.example.com" in r and "could not read" in r for r in report), report
 
 
+@pytest.mark.parametrize("free, keyed", [
+    ("https://rpc.ankr.com/base", "https://rpc.ankr.com/base/SECRETKEY"),  # one URL a prefix of the other
+    ("https://a.example.com/v2", "https://b.example.com/v2/SECRETKEY"),    # a shared path
+])
+def test_a_key_is_scrubbed_though_another_endpoints_url_overlaps_it(free, keyed):
+    """Scrubbed one endpoint at a time, the first one's cut left the second's URL
+    and path no longer matching, so its key stayed."""
+    from aikiri_ledger.witness import _scrub
+    path = keyed.split(".com", 1)[1]
+    text = f"rpc {free} unusable; rpc {keyed} unusable; url: {path}; url: {free.split('.com', 1)[1]}"
+    out = _scrub(text, [free, keyed])
+    assert "SECRETKEY" not in out, out
+    assert out.startswith(f"rpc {free.split('//')[1].split('/')[0]} unusable; rpc "), out
+
+
+@pytest.mark.parametrize("rpcs, text, out", [
+    (["http://[bad/v2/SECRETKEY"], "Invalid URL 'http://[bad/v2/SECRETKEY'", "Invalid URL 'endpoint 1'"),
+    (["https://h.example.com/v2/SECRETKEY"], "with url: /v2/SECRETKEY (x)", "with url: /*** (x)"),
+    (["https://h.example.com/"], "for url: https://h.example.com/ at a/b", "for url: h.example.com at a/b"),
+    (["", "https://h.example.com"], "rpc https://h.example.com down", "rpc h.example.com down"),
+    (["https://u:p@ss@h.example.com/x"], "for url: https://u:p@ss@H.example.com/x", "for url: https://H.example.com/***"),
+    (["https://H.example.com/v2#SECRETKEY"], "for url: https://h.example.com/v2#SECRETKEY", "for url: https://h.example.com/***"),
+])
+def test_what_the_scrub_leaves(rpcs, text, out):
+    """Each part of the scrub, by what it prints: the name by place, the path's
+    stand-in, a bare "/" left alone, an empty rpc skipped, a password holding "@",
+    and a fragment kept when requests lowercased the host."""
+    from aikiri_ledger.witness import _scrub
+    assert _scrub(text, rpcs) == out
+
+
 def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
     q = QuorumBase([_DeadNamed("https://dead"), _Named("https://b"), _Named("https://c")])
     assert q.address == _Honest.address
