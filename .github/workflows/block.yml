@@ -18,14 +18,17 @@ permissions:
 concurrency: ledger-write
 jobs:
   ask:
-    # Starts at once, beside `block`, which waits for Chii to approve the ledger
-    # environment: tells her on Telegram that a block is waiting for her. `block`
-    # does not wait on this job, so an alert that fails never holds a block.
+    # Starts with the run, beside `block`, which waits for Chii to approve the ledger
+    # environment: tells her on Telegram that a block is waiting for her. (A run queued
+    # behind another on ledger-write starts, and asks, when that one finishes.) `block`
+    # does not wait on this job, and a Telegram error does not fail it, so an alert
+    # never holds a block or turns its run red.
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
     steps:
       - name: tell Chii a block is waiting for her approval
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

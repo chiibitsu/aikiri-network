@@ -2823,12 +2823,7 @@ def test_alerts_watch_every_ledger_workflow_and_only_failures():
     watched = re.search(r"workflows: \[([^\]]*)\]", text)[1]
     assert {w.strip() for w in watched.split(",")} == names
     assert "types: [completed]" in text and re.search(r"^permissions: \{\}$", text, re.M)
-    cond = text[text.index("  failed:"):text.index("    runs-on:")]
-    for result in ("failure", "timed_out", "startup_failure"):
-        assert f'"{result}"' in cond
-    assert "success" not in cond and "cancelled" not in cond
-    # tests also runs on claude/** branches and pull requests: only main's push counts
-    assert "head_branch == 'main'" in cond and "event == 'push'" in cond
+    # which runs alert is test_only_a_real_ledger_failure_on_main_alerts, by evaluating the if
 
 
 def test_an_alert_carries_only_its_own_words_and_the_run_link():

@@ -1,5 +1,5 @@
 name: alerts
-# A Telegram message to Chii when a ledger run fails. A block run waiting for her
+# A Telegram message to Chii when a ledger run on main fails. A block run waiting for her
 # approval is announced by block.yml itself, from its `ask` job, the moment it starts.
 # The message carries only the workflow's name, its result and the run's link: never
 # a branch name, a commit message or anything else someone else could write. The bot
@@ -13,12 +13,14 @@ on:
 permissions: {}
 jobs:
   failed:
-    # tests also runs on claude/** branches and pull requests: only main's counts.
+    # Only this repository's own runs on main: workflow_run matches by name, so a fork's
+    # pull request, or any branch, could otherwise add a failing workflow named `block`.
     if: >-
       github.event_name == 'workflow_run'
       && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
-      && (github.event.workflow_run.name != 'tests'
-          || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'))
+      && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
