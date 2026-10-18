@@ -34,11 +34,16 @@ def describe(e: BaseException) -> str:
     a scrub can match (a key in a keyed RPC URL is part of that URL)."""
     if isinstance(e, (EndpointUnusable, EndpointDropped)):
         return f"{type(e).__name__}: {e}"
+    import re
     names, x = [], e
+    status = getattr(getattr(e, "response", None), "status_code", None)
     while isinstance(x, BaseException) and len(names) < 4:
         names.append(type(x).__name__)
+        # Retries spent on a status leave no response, only urllib3's own fixed words
+        # around the number ("too many 429 error responses"); the number is all we keep.
+        if type(x).__name__ == "ResponseError" and (m := re.fullmatch(r"too many (\d{3}) error responses", str(x))):
+            status = int(m[1])
         x = x.args[0] if x.args and isinstance(x.args[0], BaseException) else getattr(x, "reason", None)
-    status = getattr(getattr(e, "response", None), "status_code", None)
     if isinstance(status, int):
         names.append(f"HTTP {status}")
     return " / ".join(dict.fromkeys(names))

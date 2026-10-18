@@ -1821,6 +1821,7 @@ def test_a_rate_limit_that_outlasts_the_retries_says_its_status():
     assert describe(spent(503)) == "RetryError / MaxRetryError / ResponseError / HTTP 503"
     assert describe(RetryError(MaxRetryError(None, "/", ResponseError("too many 429 error responses; EVIL")))) \
         == "RetryError / MaxRetryError / ResponseError"
+    assert describe(ValueError("too many 429 error responses")) == "ValueError"  # only urllib3's words count
 
 
 def test_a_dropped_endpoint_says_why_without_its_url():
