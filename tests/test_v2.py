@@ -2980,6 +2980,16 @@ def test_every_alert_job_stops_within_two_minutes():
         assert re.search(r"^    timeout-minutes: 2$", part, re.M), job
 
 
+def test_every_alert_job_reads_its_secrets_from_the_alerts_environment():
+    """Repository secrets are readable by any workflow a writer pushes on any branch;
+    an environment limited to main hands them only to runs from main."""
+    import re
+    text = _wf("alerts.yml")
+    for job, nxt in (("waiting", "  failed:\n"), ("failed", "  test:\n"), ("test", None)):
+        part = text[text.index(f"  {job}:\n"):(text.index(nxt) if nxt else None)]
+        assert re.search(r"^    environment: alerts$", part, re.M), job
+
+
 @pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
 def test_the_manual_test_fails_when_a_secret_is_not_set(tmp_path, missing):
     step = _step("alerts.yml", "the secrets are set")
