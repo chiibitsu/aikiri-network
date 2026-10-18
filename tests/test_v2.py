@@ -1663,6 +1663,57 @@ def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):
     assert "Base: all 3 endpoints answered every read" in report, report
 
 
+def test_the_endpoint_summary_is_printed_on_a_failure_too(ledger, trust):
+    trust.code_keccak = None
+    class Lying(_Named):
+        def matches(self, b, block=None): return False
+    q = QuorumBase([Lying("https://a"), _DeadNamed("https://dead"), Lying("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.INVALID and report[-2] == "Base: 2 of 3 endpoints answered every read; not dead", report
+
+
+def test_an_endpoint_that_answers_the_height_but_misses_a_read_is_named():
+    class Flaky(_Named):
+        def latest_index(self, block=None): raise ConnectionError("reset")
+    q = QuorumBase([_Named("https://a"), Flaky("https://flaky"), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not flaky")
+
+
+def test_an_endpoint_with_no_rpc_is_named_by_its_place():
+    class Bare(_Honest):
+        def latest_index(self, block=None): raise ConnectionError("reset")
+    q = QuorumBase([_Named("https://a"), Bare(), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not endpoint 2")
+
+
+def test_both_wrappers_carry_their_rpc():
+    from aikiri_ledger.cli import _DropOnTransportFailure, _Unreachable
+    assert _Unreachable("https://x", OSError("down")).rpc == "https://x"
+    assert _DropOnTransportFailure("https://y", object()).rpc == "https://y"
+
+
+@pytest.mark.parametrize("age, says", [
+    (timedelta(hours=6), None),                        # the window itself still waits
+    (timedelta(hours=6, seconds=1), "6 hours"),
+    (timedelta(days=2, hours=3), "51 hours"),          # past a day: total hours, not the remainder
+])
+def test_the_anchor_window_and_its_hours(ledger, sk, mac, trust, age, says):
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    state, report = verify_all(ledger, trust, base=Behind(), now=written + age)
+    if says is None:
+        assert state == State.VALID_LOCALLY
+        (line,) = [r for r in report if r.startswith("block 1:") and "anchored" in r]
+        assert "verify fails if it is still missing 6 hours after it was written" in line, line
+    else:
+        assert state == State.INVALID
+        assert f"block 1: not anchored on Base {says} after it was written" in report
+
+
 def test_the_quorum_names_an_endpoint_by_host_only():
     """A keyed RPC URL (https://host/v2/<key>) would otherwise print its key on a pass."""
     q = QuorumBase([_Named("https://a"), _DeadNamed("https://base.example.com/v2/SECRETKEY"),
