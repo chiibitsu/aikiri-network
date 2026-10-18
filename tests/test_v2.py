@@ -1224,49 +1224,35 @@ def test_blank_lines_between_headers_are_read_as_verify_reads_them(ledger, monke
     assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 0
 
 
-@pytest.mark.parametrize("name", ["000000.BTC-header", "000000.btc-Header", "000007.btc-header", "0.btc-header"])
-def test_a_header_file_no_block_owns_by_its_exact_name_fails(ledger, monkeypatch, capsys, name):
-    """A case-insensitive disk (a Mac's, by default) reads 000000.BTC-header as block 0's
-    .btc-header, which the check, on Linux, would never have looked at."""
-    raw, _ = _mined(b"\x01" * 32)
-    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
-    (ledger.proofs_dir / name).write_text(f"800000 {raw.hex()}\n")
-    assert _headers_check(ledger, monkeypatch, _Public()) == 1
-    assert f"ledger/proofs/{name}: not the .btc-header of a block in this ledger, by its exact path" \
-        in capsys.readouterr().out
+@pytest.mark.parametrize("stored", [{"proofs": "Proofs"}, {"000000.btc-header": "000000.BTC-header"},
+                                    {"ledger": "Ledger"}, {"proofs": "proofſ"}])
+def test_a_header_reached_by_a_name_in_another_form_is_not_read(ledger, monkeypatch, easy_work, capsys, stored):
+    """A Mac's disk opens ledger/proofs/000000.btc-header for ledger/Proofs/000000.BTC-header.
+    A check on Linux cannot list every such alias, so verify, and the check, read a saved
+    header only where each name on the way is stored exactly as asked: here a listing of
+    each folder stands in for what a Mac's disk would say is stored."""
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    real = os.listdir
+    monkeypatch.setattr(W.os, "listdir", lambda d: [stored.get(n, n) for n in real(d)])
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
+    assert W.BitcoinWitness(ledger).check_saved(ledger.read(0)) == []
 
 
-@pytest.mark.parametrize("where", ["ledger/Proofs", "Ledger/proofs", "LEDGER/PROOFS", "elsewhere"])
-def test_a_header_file_in_a_folder_a_mac_would_merge_fails(ledger, monkeypatch, capsys, where):
-    """On a Mac's disk ledger/Proofs and Ledger/proofs are ledger/proofs; the check,
-    on Linux, listed only the exact folder."""
-    raw, _ = _mined(b"\x01" * 32)  # no real work: red whichever way it is read
-    folder = ledger.root.parent / where
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "000000.btc-header").write_text(f"800000 {raw.hex()}\n")
-    assert _headers_check(ledger, monkeypatch, _Public()) == 1
-    out = capsys.readouterr().out
-    if where != "elsewhere" and ledger.proof_path(0, "btc-header").exists():
-        # This disk ignores case, as a Mac's does: the file is block 0's own and is checked as one.
-        assert "block 0: the saved header for Bitcoin block 800000 lacks Bitcoin's proof of work" in out, out
-    else:
-        assert f"{where}/000000.btc-header: not the .btc-header of a block in this ledger, by its exact path" \
-            in out, out
-
-
-def test_a_hostile_file_name_is_printed_escaped(ledger, monkeypatch, capsys):
-    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
-    (ledger.proofs_dir / "\x1b[31mX\n::warning::y.btc-header").write_text("")
-    try:  # a name that is not UTF-8; a Mac's disk refuses to make one at all
-        os.close(os.open(os.fsencode(ledger.proofs_dir) + b"/bad\xff.btc-header", os.O_CREAT | os.O_WRONLY))
-        undecodable = True
-    except OSError:
-        undecodable = False
-    assert _headers_check(ledger, monkeypatch, _Public()) == 1
-    out = capsys.readouterr().out
-    assert "\x1b" not in out and "\n::warning" not in out, out
-    assert "ledger/proofs/\\x1b[31mX\\n::warning::y.btc-header: not the" in out, out
-    assert not undecodable or "ledger/proofs/bad\\udcff.btc-header: not the" in out, out
+@pytest.mark.parametrize("link", ["proofs", "ledger"])
+def test_a_header_reached_through_a_linked_folder_is_not_read(ledger, monkeypatch, easy_work, link):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    _save(ledger, 0, (800_000, _mined(_roots(data)[800_000])[0]))
+    real = ledger.root if link == "ledger" else ledger.proofs_dir
+    moved = real.with_name("." + real.name + "-elsewhere")
+    real.rename(moved)
+    real.symlink_to(moved.name)
+    _lookups(monkeypatch)
+    assert W.BitcoinWitness(ledger).verify(ledger.read(0))[0] == "unchecked"
+    assert W.BitcoinWitness(ledger).check_saved(ledger.read(0)) == []
 
 
 @pytest.mark.parametrize("make", [False, True])
