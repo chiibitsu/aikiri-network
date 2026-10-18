@@ -18,6 +18,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from web3 import Web3
 
@@ -705,6 +706,37 @@ def write_base_receipt(ledger: Ledger, block: Block, tx_hash: str, contract_addr
     return p
 
 
+def _host(rpc) -> str | None:
+    """An endpoint's host, the one part of its URL a report names: a key sits in
+    the path (https://host/v2/<key>), the query or the userinfo."""
+    try:
+        return urlsplit(rpc or "").hostname
+    except ValueError:  # malformed, e.g. an unclosed "[": named by its place instead
+        return None
+
+
+def _scrub(text: str, rpcs) -> str:
+    """Error text with every endpoint's URL cut to its host, so a key in its
+    path, query or userinfo stays out of the report."""
+    for i, rpc in enumerate(rpcs):
+        if not rpc:
+            continue
+        name = _host(rpc) or f"endpoint {i + 1}"
+        text = text.replace(rpc, name)
+        try:
+            u = urlsplit(rpc)
+        except ValueError:  # never sent, so only ever printed whole
+            continue
+        sent = u.path + (f"?{u.query}" if u.query else "")
+        userinfo = u.netloc.rpartition("@")[0]
+        # Also apart from the URL: urllib3 prints the path and query alone, and
+        # requests the URL as it sent it (the host lowercased, say).
+        for part, by in ((f"{userinfo}@", ""), (sent, "/***")):
+            if part not in ("@", "", "/"):
+                text = text.replace(part, by)
+    return text
+
+
 class QuorumBase:
     """Several independent readers of the same contract.
 
@@ -735,7 +767,8 @@ class QuorumBase:
                 self._missed.add(i)
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
-                              f"{self.quorum} needed. {'; '.join(errors)}")
+                              f"{self.quorum} needed. "
+                              + _scrub("; ".join(errors), [getattr(r, "rpc", None) for r in self.readers]))
         distinct = {repr(a) for a in answers}
         if len(distinct) > 1:
             self._disagreed = True
@@ -768,13 +801,11 @@ class QuorumBase:
     def summary(self) -> str:
         """Which endpoints answered every read, said on a pass too: a 2-of-3 pass
         otherwise reads like a 3-of-3 one, and one dead server goes unseen."""
-        from urllib.parse import urlsplit
         n = len(self.readers)
         but = " (and they disagreed)" if self._disagreed else ""
         if not self._missed:
             return f"Base: all {n} endpoints answered every read{but}"
-        # By host only: a keyed URL (https://host/v2/<key>) must not print its key.
-        names = [urlsplit(getattr(self.readers[i], "rpc", "") or "").hostname or f"endpoint {i + 1}"
+        names = [_host(getattr(self.readers[i], "rpc", None)) or f"endpoint {i + 1}"
                  for i in sorted(self._missed)]
         return (f"Base: {n - len(self._missed)} of {n} endpoints answered every read{but}; "
                 f"not {', '.join(names)}")

@@ -1758,24 +1758,23 @@ def test_a_malformed_rpc_is_named_by_its_place_and_the_report_survives(ledger, t
     assert "Base: 2 of 3 endpoints answered every read; not endpoint 2" in report, report
 
 
-@pytest.mark.parametrize("rpc, sent", [
-    ("https://base.example.com/v2/SECRETKEY", "/v2/SECRETKEY"),
-    ("https://u:SECRETKEY@base.example.com/x", "/x"),
-    ("https://base.example.com/?apikey=SECRETKEY", "/?apikey=SECRETKEY"),
-    ("http://[bad/v2/SECRETKEY", None),  # unparseable: never sent, so only ever printed whole
+@pytest.mark.parametrize("rpc, said", [
+    ("https://base.example.com/v2/SECRETKEY", "rpc {rpc} unusable: x"),               # our wrapper
+    ("https://base.example.com/v2/SECRETKEY", "Max retries exceeded with url: /v2/SECRETKEY"),
+    ("https://base.example.com/?apikey=SECRETKEY", "with url: /?apikey=SECRETKEY"),
+    ("https://u:SECRETKEY@Base.Example.com/x", "for url: https://u:SECRETKEY@base.example.com/x"),
+    ("http://[bad/v2/SECRETKEY", "Invalid URL {rpc!r}"),  # unparseable: never sent, printed whole
 ])
-def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, sent):
+def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, said):
     """The summary named hosts only while the error text a line above it carried
-    each URL whole, as our wrappers and requests both print it."""
+    each URL, as our wrappers, urllib3 and requests each print it."""
     from aikiri_ledger.cli import _DropOnTransportFailure, _Unreachable
     class Dropped:
         def __getattr__(self, name):
             def fail(*a, **k):
-                raise ConnectionError("Max retries exceeded with url: /v2/OTHERKEY "
-                                      "(for url: https://k2.example.com/v2/OTHERKEY)")
+                raise ConnectionError("rpc https://k2.example.com/v2/OTHERKEY dropped for this run")
             return fail
-    said = f"Max retries exceeded with url: {sent} (for url: {rpc})" if sent else f"Invalid URL {rpc!r}"
-    q = QuorumBase([_Named("https://a"), _Unreachable(rpc, OSError(said)),
+    q = QuorumBase([_Named("https://a"), _Unreachable(rpc, OSError(said.format(rpc=rpc))),
                     _DropOnTransportFailure("https://k2.example.com/v2/OTHERKEY", Dropped())])
     state, report = verify_all(ledger, trust, base=q)
     assert state == State.INVALID, report
