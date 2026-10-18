@@ -1130,12 +1130,24 @@ def test_no_saved_header_passes_the_check(ledger, monkeypatch, capsys):
 def test_ci_checks_every_saved_header():
     import re
     text = Path(".github/workflows/ci.yml").read_text()
-    assert re.search(r"^  pull_request:", text, re.M) or re.search(r"^  pull_request:$|^on:[\s\S]*pull_request", text)
+    on = text[text.index("\non:\n"):text.index("\njobs:\n")]
+    assert re.search(r"^  pull_request:", on, re.M) and re.search(r"^    branches: \[main, ", on, re.M), on
     job = text[text.index("\n  saved-headers:\n"):]
-    job = job[:m.start()] if (m := re.search(r"\n  \S", job[1:])) else job
+    job = job[:m.start() + 1] if (m := re.search(r"\n  \S", job[1:])) else job
     assert re.search(r"^      - run: aikiri-ledger check-headers$", job, re.M), job
-    assert not re.search(r"^    (if|continue-on-error):", job, re.M), job
+    assert not re.search(r"^\s+(if|continue-on-error):", job, re.M), job  # job or step
     assert 'pip install -e ".[bitcoin]"' in job
+
+
+def test_a_source_that_could_not_answer_for_a_height_is_not_asked_again(ledger, sk, mac, monkeypatch, easy_work):
+    """A down source cost each block sharing the height its whole budget again."""
+    _two_blocks(ledger, sk, mac)
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, (800_000, raw))
+    _save(ledger, 1, (800_000, raw))
+    public = _Public(**{"mempool.space": OSError("down"), "blockstream.info": {800_000: (raw, block_hash)}})
+    assert _headers_check(ledger, monkeypatch, public) == 1
+    assert public.asked == ["https://mempool.space/api/block-height/800000"], public.asked
 
 
 def _two_blocks(ledger, sk, mac):
@@ -1220,12 +1232,40 @@ def test_a_header_file_no_block_owns_by_its_exact_name_fails(ledger, monkeypatch
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     (ledger.proofs_dir / name).write_text(f"800000 {raw.hex()}\n")
     assert _headers_check(ledger, monkeypatch, _Public()) == 1
-    assert f"{name}: not the .btc-header of a block in this ledger, by its exact name" \
+    assert f"ledger/proofs/{name}: not the .btc-header of a block in this ledger, by its exact path" \
         in capsys.readouterr().out
 
 
-def test_no_ledger_fails_the_check(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("where", ["ledger/Proofs", "Ledger/proofs", "LEDGER/PROOFS", "elsewhere"])
+def test_a_header_file_in_a_folder_a_mac_would_merge_fails(ledger, monkeypatch, capsys, where):
+    """On a Mac's disk ledger/Proofs and Ledger/proofs are ledger/proofs; the check,
+    on Linux, listed only the exact folder."""
+    raw, _ = _mined(b"\x01" * 32)
+    folder = ledger.root.parent / where
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "000000.btc-header").write_text(f"800000 {raw.hex()}\n")
+    assert _headers_check(ledger, monkeypatch, _Public()) == 1
+    assert f"{where}/000000.btc-header: not the .btc-header of a block in this ledger, by its exact path" \
+        in capsys.readouterr().out
+
+
+def test_a_hostile_file_name_is_printed_escaped(ledger, monkeypatch, capsys):
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    (ledger.proofs_dir / "\x1b[31mX\n::warning::y.btc-header").write_text("")
+    os.close(os.open(os.fsencode(ledger.proofs_dir) + b"/bad\xff.btc-header", os.O_CREAT | os.O_WRONLY))
+    assert _headers_check(ledger, monkeypatch, _Public()) == 1
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\n::warning" not in out, out
+    assert "ledger/proofs/\\x1b[31mX\\n::warning::y.btc-header: not the" in out, out
+    assert "ledger/proofs/bad\\udcff.btc-header: not the" in out, out
+
+
+@pytest.mark.parametrize("make", [False, True])
+def test_no_ledger_fails_the_check(tmp_path, monkeypatch, capsys, make):
+    """A folder with no block 0 is no ledger, whether or not it exists."""
     from aikiri_ledger import cli
+    if make:
+        (tmp_path / "nowhere" / "proofs").mkdir(parents=True)
     assert cli.main(["--ledger", str(tmp_path / "nowhere"), "check-headers"]) == 1
     assert "no ledger at" in capsys.readouterr().out
 
