@@ -1186,7 +1186,7 @@ def test_a_tip_lookup_out_of_time_says_so_in_words(ledger, monkeypatch, easy_wor
     public = _Public(**{"mempool.space": block, "blockstream.info": block})
     def fetch(url):
         if url.endswith("/blocks/tip/height"):
-            raise W._OutOfTime("out of time: Bitcoin lookups get 60 s per verify run")
+            raise W._OutOfTime("out of time: Bitcoin lookups get 60 s per run")
         return public(url)
     _lookups(monkeypatch, fetch)
     said = W.BitcoinWitness(ledger).save_header(ledger.read(0))

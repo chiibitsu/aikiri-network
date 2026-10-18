@@ -41,7 +41,7 @@ jobs:
         run: aikiri-ledger upgrade || true
       - name: stamp any block with no Bitcoin proof file yet
         run: aikiri-ledger stamp || true
-      - name: propose any proof stamped or upgraded
+      - name: propose any proof stamped or upgraded, or header saved
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7.0.11
         with:
           add-paths: ledger/proofs

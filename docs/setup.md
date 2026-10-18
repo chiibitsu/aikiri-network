@@ -22,9 +22,9 @@ this runner may touch the keys at all. If one click per block turns out to be
 one too many, the reviewer requirement is the one to drop, not the approval.
 
 **`ledger-readonly`** — no secrets, no reviewers. Used by `nightly`, which now
-only upgrades Bitcoin proofs, stamps any block with no `.ots` yet (block 0 was
-anchored at deploy but never stamped), proposes them as a pull request, and
-reports.
+only upgrades Bitcoin proofs, saves the Bitcoin header of each complete one once it
+is six blocks deep, stamps any block with no `.ots` yet (block 0 was anchored at
+deploy but never stamped), proposes them as a pull request, and reports.
 See §8.
 
 ## 2. Move the secrets
@@ -210,8 +210,13 @@ A block that deep is, in practice, not replaced, so its header does not change, 
 looked up once rather than every night; until then, upgrade says how many
 confirmations it has. A saved header is read before the node or the public sources.
 Verify still checks it itself (it must carry the proof and Bitcoin's proof of work) and
-ignores one that does not; a saved header can confirm a proof, never fail one. It is
-trusted as the proofs are: it reaches `main` only through a PR you merge, and making
-one that passes costs about half a Bitcoin block's mining.
+ignores one that does not; a saved header can confirm a proof, never fail one. A
+header does not carry its own height, so verify names a block confirmed this way by
+what the header proves: its block hash and the time it was mined ("in the Bitcoin
+block 0000…, mined 2026-…"). Paste that hash into any Bitcoin explorer to see the
+block and its height. A saved header reaches `main` only through a PR you merge, and
+one that passes costs about half a Bitcoin block's mining to make. To check a header
+PR yourself before merging, check out its branch, delete `ledger/proofs/*.btc-header`,
+and run verify: every complete proof is then looked up from the public sources.
 `FULLY VERIFIED` needs a trust anchor from outside the repository, Base, and a
 Bitcoin block header: saved beside the proof, from a node, or from both public sources.
