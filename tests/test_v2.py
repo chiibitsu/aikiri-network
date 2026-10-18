@@ -1663,6 +1663,23 @@ def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):
     assert "Base: all 3 endpoints answered every read" in report, report
 
 
+def test_the_quorum_names_an_endpoint_by_host_only():
+    """A keyed RPC URL (https://host/v2/<key>) would otherwise print its key on a pass."""
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://base.example.com/v2/SECRETKEY"),
+                    _Named("https://c")])
+    q.latest_index()
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read; not base.example.com"
+
+
+def test_the_quorum_does_not_say_all_answered_as_if_they_agreed():
+    class Other(_Named):
+        def latest_index(self, block=None): return 1
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), Other("https://c")])
+    with pytest.raises(QuorumError):
+        q.latest_index()
+    assert "disagreed" in q.summary(), q.summary()
+
+
 def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
     q = QuorumBase([_DeadNamed("https://dead"), _Named("https://b"), _Named("https://c")])
     assert q.address == _Honest.address
