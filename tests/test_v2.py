@@ -1240,24 +1240,33 @@ def test_a_header_file_no_block_owns_by_its_exact_name_fails(ledger, monkeypatch
 def test_a_header_file_in_a_folder_a_mac_would_merge_fails(ledger, monkeypatch, capsys, where):
     """On a Mac's disk ledger/Proofs and Ledger/proofs are ledger/proofs; the check,
     on Linux, listed only the exact folder."""
-    raw, _ = _mined(b"\x01" * 32)
+    raw, _ = _mined(b"\x01" * 32)  # no real work: red whichever way it is read
     folder = ledger.root.parent / where
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "000000.btc-header").write_text(f"800000 {raw.hex()}\n")
     assert _headers_check(ledger, monkeypatch, _Public()) == 1
-    assert f"{where}/000000.btc-header: not the .btc-header of a block in this ledger, by its exact path" \
-        in capsys.readouterr().out
+    out = capsys.readouterr().out
+    if where != "elsewhere" and ledger.proof_path(0, "btc-header").exists():
+        # This disk ignores case, as a Mac's does: the file is block 0's own and is checked as one.
+        assert "block 0: the saved header for Bitcoin block 800000 lacks Bitcoin's proof of work" in out, out
+    else:
+        assert f"{where}/000000.btc-header: not the .btc-header of a block in this ledger, by its exact path" \
+            in out, out
 
 
 def test_a_hostile_file_name_is_printed_escaped(ledger, monkeypatch, capsys):
     ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
     (ledger.proofs_dir / "\x1b[31mX\n::warning::y.btc-header").write_text("")
-    os.close(os.open(os.fsencode(ledger.proofs_dir) + b"/bad\xff.btc-header", os.O_CREAT | os.O_WRONLY))
+    try:  # a name that is not UTF-8; a Mac's disk refuses to make one at all
+        os.close(os.open(os.fsencode(ledger.proofs_dir) + b"/bad\xff.btc-header", os.O_CREAT | os.O_WRONLY))
+        undecodable = True
+    except OSError:
+        undecodable = False
     assert _headers_check(ledger, monkeypatch, _Public()) == 1
     out = capsys.readouterr().out
     assert "\x1b" not in out and "\n::warning" not in out, out
     assert "ledger/proofs/\\x1b[31mX\\n::warning::y.btc-header: not the" in out, out
-    assert "ledger/proofs/bad\\udcff.btc-header: not the" in out, out
+    assert not undecodable or "ledger/proofs/bad\\udcff.btc-header: not the" in out, out
 
 
 @pytest.mark.parametrize("make", [False, True])
