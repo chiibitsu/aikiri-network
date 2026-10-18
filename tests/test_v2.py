@@ -1800,10 +1800,11 @@ def test_a_key_is_scrubbed_though_another_endpoints_url_overlaps_it(free, keyed)
 @pytest.mark.parametrize("rpcs, text, out", [
     (["http://[bad/v2/SECRETKEY"], "Invalid URL 'http://[bad/v2/SECRETKEY'", "Invalid URL 'endpoint 1'"),
     (["https://h.example.com/v2/SECRETKEY"], "with url: /v2/SECRETKEY (x)", "with url: /*** (x)"),
+    (["https://h.example.com/v2/SECRETKEY"], "POST /v2/SECRETKEY failed", "POST /*** failed"),
     (["https://h.example.com/"], "for url: https://h.example.com/ at a/b", "for url: h.example.com at a/b"),
     (["", "https://h.example.com"], "rpc https://h.example.com down", "rpc h.example.com down"),
-    (["https://u:p@ss@h.example.com/x"], "for url: https://u:p@ss@H.example.com/x", "for url: https://H.example.com/***"),
-    (["https://H.example.com/v2#SECRETKEY"], "for url: https://h.example.com/v2#SECRETKEY", "for url: https://h.example.com/***"),
+    (["https://u:p@ss@h.example.com/x"], "for url: https://u:p@ss@H.example.com/x", "for url: h.example.com"),
+    (["https://H.example.com/v2#SECRETKEY"], "for url: https://h.example.com/v2#SECRETKEY", "for url: h.example.com"),
 ])
 def test_what_the_scrub_leaves(rpcs, text, out):
     """Each part of the scrub, by what it prints: the name by place, the path's
@@ -1811,6 +1812,33 @@ def test_what_the_scrub_leaves(rpcs, text, out):
     and a fragment kept when requests lowercased the host."""
     from aikiri_ledger.witness import _scrub
     assert _scrub(text, rpcs) == out
+
+
+@pytest.mark.parametrize("rpc, text", [
+    ("http://h.example.com/v2/SEC RET", "Not Found for url: http://h.example.com/v2/SEC%20RET"),
+    ("http://h.example.com/v2/ab%2bSECRET", "host='h.example.com': Max retries exceeded with url: /v2/ab%2BSECRET (Caused by x)"),
+    ("http://h.example.com/x?apikey=SEC RET", "Not Found for url: http://h.example.com/x?apikey=SEC%20RET"),
+    ("http://u:SE%7ECRET@h.example.com/x", "Not Found for url: http://u:SE~CRET@h.example.com/x"),
+    ("http://h.example.com/a/../v2/SECRET", "Not Found for url: http://h.example.com/v2/SECRET"),
+])
+def test_a_key_is_scrubbed_in_the_form_requests_printed_it(rpc, text):
+    """requests and urllib3 print the URL as they sent it, re-encoded and
+    normalized, so matching only the string as configured left keys in."""
+    from aikiri_ledger.witness import _scrub
+    out = _scrub(text, [rpc])
+    assert "RET" not in out and "h.example.com" in out, out
+
+
+def test_a_password_the_encoder_refused_is_not_printed():
+    """repr() of a UnicodeEncodeError carries the string it could not encode."""
+    class Refusing(_Named):
+        def latest_index(self, block=None):
+            raise UnicodeEncodeError("latin-1", "u:SECRETпароль", 9, 15, "ordinal not in range(256)")
+    q = QuorumBase([_Named("https://a"), Refusing("https://u:SECRETпароль@b.example.com"),
+                    _DeadNamed("https://c")])
+    with pytest.raises(QuorumError) as e:
+        q.latest_index()
+    assert "SECRET" not in str(e.value) and "UnicodeEncodeError" in str(e.value), e.value
 
 
 def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():

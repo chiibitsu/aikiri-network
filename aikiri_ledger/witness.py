@@ -727,19 +727,23 @@ def _scrub(text: str, rpcs) -> str:
             u = urlsplit(rpc)
         except ValueError:  # never sent, so only ever printed whole
             continue
-        # Also apart from the URL: urllib3 prints the path and query alone, and
-        # requests the URL as it sent it (the host lowercased, say).
-        userinfo = u.netloc.rpartition("@")[0]
-        sent = u.path + (f"?{u.query}" if u.query else "")
-        for part, by in ((f"{userinfo}@", ""), (sent, "/***"), (f"#{u.fragment}", "")):
-            if part not in ("@", "", "/", "#"):
-                cuts.setdefault(part, by)
-    if not cuts:
-        return text
-    # One pass, longest first: cut one at a time, an endpoint's URL that another's
-    # starts with (https://host/base, https://host/base/<key>) left the key behind.
-    pattern = "|".join(re.escape(c) for c in sorted(cuts, key=len, reverse=True))
-    return re.sub(pattern, lambda m: cuts[m.group(0)], text)
+        sent = u.path + (f"?{u.query}" if u.query else "")  # also printed alone
+        if sent not in ("", "/"):
+            cuts.setdefault(sent, "/***")
+    if cuts:
+        # One pass, longest first: cut one at a time, an endpoint's URL that another's
+        # starts with (https://host/base, https://host/base/<key>) left the key behind.
+        pattern = "|".join(re.escape(c) for c in sorted(cuts, key=len, reverse=True))
+        text = re.sub(pattern, lambda m: cuts[m.group(0)], text)
+    # Then by shape, for what was printed re-encoded or normalized (SEC%20RET for
+    # "SEC RET", a/../b as b), which no configured string matches: any URL left
+    # down to its host, any path urllib3 printed down to /***.
+    text = _URL.sub(lambda m: _host(m.group(0)) or "an endpoint", text)
+    return _SENT.sub(r"\1/***", text)
+
+
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+_SENT = re.compile(r"(url: )/[^\s'\"<>]*")
 
 
 class QuorumBase:
@@ -768,7 +772,8 @@ class QuorumBase:
             try:
                 answers.append(fn(r))
             except Exception as e:  # noqa: BLE001 - an endpoint that cannot answer does not vote
-                errors.append(repr(e))
+                # Not repr(): a UnicodeEncodeError's repr carries the string it refused.
+                errors.append(f"{type(e).__name__}: {e}")
                 self._missed.add(i)
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
