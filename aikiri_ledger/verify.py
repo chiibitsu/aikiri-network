@@ -233,8 +233,8 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
                 report.append(f"block {i}: written but not anchored on Base as read "
-                              f"(latestIndex {latest}); an anchor made minutes ago may "
-                              f"not be final yet")
+                              f"(latestIndex {latest}): still settling if anchored in the "
+                              f"last few minutes, missing if older")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:
             report.append(f"Base: {min(latest, local_head) + 1} block(s) anchored and matching")

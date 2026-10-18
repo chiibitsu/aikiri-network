@@ -406,6 +406,7 @@ def test_failed_bitcoin_proof_is_a_failure_not_a_shrug(ledger, sk, mac, trust):
             return "failed", "Bad attestation"
     state, report = verify_all(ledger, trust, bitcoin=FailingBtc())
     assert state == State.INVALID and any("bitcoin" in r.lower() for r in report)
+    assert report[-1] == State.text(State.INVALID), report  # nightly's summary says the state
 
 
 @functools.lru_cache(maxsize=None)
@@ -1928,8 +1929,8 @@ def _readers(monkeypatch, *, chain_ok=True):
     asked = []
     def w3(url, chain_id, retrying=False):
         asked.append((url, retrying))
-        if not chain_ok:
-            raise SystemExit(f"rpc {url} is chainId 1, expected 8453; refusing")
+        if not chain_ok and chain_id is not None:  # only a check that is asked for can refuse
+            raise SystemExit(f"rpc {url} is chainId 1, expected {chain_id}; refusing")
         return object()
     monkeypatch.setattr(cli, "_w3", w3)
     monkeypatch.setattr(cli, "compile_contract", lambda: {"abi": []})
@@ -1953,7 +1954,7 @@ def test_a_single_endpoint_is_one_reader_and_a_wrong_chain_refuses(monkeypatch, 
     got = cli._base_reader({}, trust, ["https://a"], need_signer=False)
     assert asked == [("https://a", True)] and got[0] == "witness"  # not a QuorumBase
     _readers(monkeypatch, chain_ok=False)
-    with pytest.raises(SystemExit, match="refusing"):
+    with pytest.raises(SystemExit, match="expected 8453; refusing"):
         cli._base_reader({}, trust, ["https://a"], need_signer=False)
 
 
@@ -1963,6 +1964,13 @@ def test_the_read_retry_is_bounded_as_stated():
     assert set(retry.status_forcelist) == {429, 502, 503, 504}
     assert (retry.total, retry.status, retry.connect, retry.read) == (8, 8, 1, 1)
     assert retry.respect_retry_after_header
+
+
+def test_the_drop_budget_is_as_stated():
+    import inspect
+    from aikiri_ledger.cli import _DropOnTransportFailure
+    params = inspect.signature(_DropOnTransportFailure.__init__).parameters
+    assert (params["budget"].default, params["slow"].default) == (120.0, 5.0)
 
 
 def test_a_connect_timeout_drops_an_endpoint():
@@ -2037,7 +2045,7 @@ def test_a_server_cannot_park_verify_on_retry_after():
     for name in ("block.yml", "nightly.yml"):
         text = (Path(".github/workflows") / name).read_text()
         step = text[text.index("- name: verify"):]
-        assert "timeout-minutes:" in step.split("run:")[0], name
+        assert "timeout-minutes: 20" in step.split("run:")[0], name  # the figures in the docs assume 20
 
 
 def test_one_lying_endpoint_cannot_hide_the_per_block_record_checks(ledger, sk, mac, trust):
