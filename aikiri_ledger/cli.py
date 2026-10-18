@@ -406,23 +406,36 @@ def main(argv=None):
     if a.cmd == "check-headers":
         # CI's check that a saved header is the real one: verify takes any that carries
         # the proof and Bitcoin's work, and faking one costs about half a block's mining.
-        if not L.root.is_dir():
+        blocks = list(L.blocks())
+        if not blocks:
             print(f"no ledger at {L.root}")
             return 1
-        checked, passed, named, owned = 0, True, {}, set()
-        for blk in L.blocks():
-            owned.add(L.proof_path(blk.index, "btc-header").name)
+        checked, passed, named = 0, True, {}
+        for blk in blocks:
             for ok, said in BitcoinWitness(L).check_saved(blk, named):  # each block its own 60 s
                 checked += 1
                 passed = passed and ok
                 print(f"block {blk.index}: {said}")
-        # Only a block's own name is checked above, but a Mac's disk ignores case:
-        # there 000003.BTC-header is block 3's .btc-header, and verify reads it.
-        strays = [n for n in (os.listdir(L.proofs_dir) if L.proofs_dir.is_dir() else [])
-                  if unicodedata.normalize("NFKC", n).casefold().endswith(".btc-header") and n not in owned]
-        for name in sorted(strays):
+        # Each block's own file is checked above, by its exact path. A Mac's disk ignores
+        # case, so there ledger/Proofs/000003.BTC-header is that file and verify reads it:
+        # any name like one anywhere beside the ledger fails here. Named escaped, since a
+        # file name is the PR's to choose and this prints to the CI log.
+        base = L.root.absolute().parent
+        owned = {str(L.proof_path(blk.index, "btc-header").absolute()) for blk in blocks}
+        def shown(path):
+            return ascii(os.path.relpath(path, base))[1:-1]
+        unread, strays = [], []
+        for top, dirs, files in os.walk(base, onerror=unread.append):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]  # .git; no case of ledger starts with .
+            strays += [os.path.join(top, n) for n in dirs + files
+                       if unicodedata.normalize("NFKC", n).casefold().endswith(".btc-header")
+                       and os.path.join(top, n) not in owned]
+        for path in sorted(strays):
             checked, passed = checked + 1, False
-            print(f"{name}: not the .btc-header of a block in this ledger, by its exact name")
+            print(f"{shown(path)}: not the .btc-header of a block in this ledger, by its exact path")
+        for e in unread:
+            checked, passed = checked + 1, False
+            print(f"could not look in {shown(e.filename)} for header files ({type(e).__name__})")
         if not checked:
             print("no saved Bitcoin headers")
         return 0 if passed else 1

@@ -590,7 +590,8 @@ class BitcoinWitness:
         could not be asked about: this is the check that a saved header is the real
         one, and a check that did not happen is not a pass. A file verify would not
         read in full fails too, so nothing in it goes unchecked. `named` keeps what each
-        source named at each height across calls, so a height is asked once a run."""
+        source named at each height across calls, or why it could not, so a height is
+        asked once a run."""
         named = {} if named is None else named
         p = self.ledger.proof_path(block.index, "btc-header")
         if not os.path.lexists(p):
@@ -617,12 +618,13 @@ class BitcoinWitness:
             verdict = (True, f"{said} is the one both public sources name")
             for base in _PUBLIC_SOURCES:
                 host = base.split("/")[2]
-                try:
-                    if (base, height) not in named:
+                if (base, height) not in named:  # a failure too: asked again, it costs the budget again
+                    try:
                         named[base, height] = _hex(self._within(_fetch, f"{base}/block-height/{height}"), 32)
-                except Exception as e:  # noqa: BLE001 - not asked is not checked, and not a pass
-                    why = str(e) if isinstance(e, _Unanswered) else f"{host}: {_kind(e)}"  # ours: out of time
-                    verdict = (False, f"{said} was not checked ({why})")
+                    except Exception as e:  # noqa: BLE001 - not asked is not checked, and not a pass
+                        named[base, height] = str(e) if isinstance(e, _Unanswered) else f"{host}: {_kind(e)}"
+                if isinstance(named[base, height], str):
+                    verdict = (False, f"{said} was not checked ({named[base, height]})")
                     break
                 if named[base, height] != own:
                     verdict = (False, f"{said} is not the block {host} names at that height")
