@@ -1829,6 +1829,26 @@ def test_a_key_is_scrubbed_in_the_form_requests_printed_it(rpc, text):
     assert "RET" not in out and "h.example.com" in out, out
 
 
+@pytest.mark.parametrize("rpcs, text", [
+    (["http://127.0.0.1:9/base", "http://127.0.0.1:9/base/SEC RET"],
+     "Not Found for url: http://127.0.0.1:9/base/SEC%20RET"),
+    (["https://h.example.com/base", "https://h.example.com/base/ab%2bSECRET"],
+     "Not Found for url: https://h.example.com/base/ab%2BSECRET"),
+    (["https://h.example.com", "https://h.example.com/SEC RET"], "url: https://h.example.com/SEC%20RET"),
+    (["https://h.example.com/base", "https://h.example.com/base/a/../SECRET"],
+     "url: https://h.example.com/base/SECRET"),
+    (["https://h.example.com/base?k=SEC RET", "https://h.example.com/base"],
+     "url: https://h.example.com/base?k=SEC%20RET"),
+])
+def test_a_re_encoded_key_is_scrubbed_though_another_endpoint_is_its_prefix(rpcs, text):
+    """The free endpoint's URL matched the front of the keyed one as printed,
+    took its scheme with it, and the shape pass no longer saw a URL."""
+    from aikiri_ledger.witness import _scrub
+    for order in (rpcs, rpcs[::-1]):
+        out = _scrub(text, order)
+        assert "RET" not in out and "://" not in out, out
+
+
 def test_a_password_the_encoder_refused_is_not_printed():
     """repr() of a UnicodeEncodeError carries the string it could not encode."""
     class Refusing(_Named):
