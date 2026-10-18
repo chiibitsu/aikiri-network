@@ -2761,3 +2761,119 @@ def test_an_ots_killed_after_speaking_still_gives_its_exit_code(ledger, monkeypa
     _ots_paths(ledger, 0)[0].write_bytes(_proof(ledger, 0, "pending"))
     assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
     assert f"ots {cmd} " in (out := capsys.readouterr().out) and "exit -9: Checking calendar" in out
+
+
+# ------------------------------------------------------------ telegram alerts ----
+def _wf(name):
+    return (Path(".github/workflows") / name).read_text()
+
+
+def _step(name, step_name):
+    """{"env": {key: value}, "run": script} of the step named `step_name` (text, not YAML:
+    the runners install no YAML parser)."""
+    import textwrap
+    text = _wf(name)
+    body = text[text.index(f"- name: {step_name}\n"):]
+    lines = body.splitlines()[1:]
+    env, run, i = {}, None, 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() == "env:":
+            i += 1
+            while i < len(lines) and lines[i].startswith(" " * 10) and ":" in lines[i]:
+                k, v = lines[i].strip().split(":", 1)
+                env[k] = v.strip().strip('"')
+                i += 1
+            continue
+        if line.strip() == "run: |":
+            block = []
+            i += 1
+            while i < len(lines) and (lines[i].startswith(" " * 10) or not lines[i].strip()):
+                block.append(lines[i])
+                i += 1
+            run = textwrap.dedent("\n".join(block)).strip() + "\n"
+            break
+        i += 1
+    return {"env": env, "run": run}
+
+
+def _send(script, tmp_path, **env):
+    """Run an alert step's script with a stand-in curl; (exit code, curl's args or None)."""
+    import os, subprocess
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "curl.args"
+    curl = bin_dir / "curl"
+    curl.write_text(f'#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done > "{log}"\n')
+    curl.chmod(0o755)
+    full = {"PATH": f"{bin_dir}:{os.environ['PATH']}", **env}
+    r = subprocess.run(["bash", "-eo", "pipefail", "-c", script], env=full, capture_output=True, text=True)
+    return r.returncode, (log.read_text().splitlines() if log.exists() else None)
+
+
+_ALERT_STEPS = [("alerts.yml", "tell Chii on Telegram"), ("alerts.yml", "send a test message"),
+                ("block.yml", "tell Chii a block is waiting for her approval")]
+
+
+def test_alerts_watch_every_ledger_workflow_and_only_failures():
+    import re
+    text = _wf("alerts.yml")
+    names = {re.search(r"^name: (\S+)", f.read_text(), re.M)[1]
+             for f in Path(".github/workflows").glob("*.yml")} - {"alerts"}
+    watched = re.search(r"workflows: \[([^\]]*)\]", text)[1]
+    assert {w.strip() for w in watched.split(",")} == names
+    assert "types: [completed]" in text and re.search(r"^permissions: \{\}$", text, re.M)
+    cond = text[text.index("  failed:"):text.index("    runs-on:")]
+    for result in ("failure", "timed_out", "startup_failure"):
+        assert f'"{result}"' in cond
+    assert "success" not in cond and "cancelled" not in cond
+    # tests also runs on claude/** branches and pull requests: only main's push counts
+    assert "head_branch == 'main'" in cond and "event == 'push'" in cond
+
+
+def test_an_alert_carries_only_its_own_words_and_the_run_link():
+    """Nothing someone else can write (a branch name, a commit message) goes in the
+    message, and nothing from the event is interpolated into the script itself."""
+    for name, step_name in _ALERT_STEPS:
+        step = _step(name, step_name)
+        assert step["run"] and "${{" not in step["run"], (name, step_name)
+        assert set(step["env"]) == {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TEXT"}, step["env"]
+        for untrusted in ("head_branch", "head_commit", "display_title", "actor", "title", "event.pull"):
+            assert untrusted not in step["env"]["TEXT"], (name, untrusted)
+
+
+def test_an_alert_is_sent_to_the_chat_with_its_text(tmp_path):
+    step = _step(*_ALERT_STEPS[0])
+    code, args = _send(step["run"], tmp_path, TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42",
+                       TEXT="aikiri-network: nightly failure. https://github.com/x/y/actions/runs/1")
+    assert code == 0
+    assert "https://api.telegram.org/bot123:abc/sendMessage" in args
+    assert "chat_id=42" in args
+    assert "text=aikiri-network: nightly failure. https://github.com/x/y/actions/runs/1" in args
+    assert "--fail" in args and "--max-time" in args
+
+
+@pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
+def test_no_alert_is_sent_and_nothing_fails_until_the_secrets_are_set(tmp_path, missing):
+    step = _step(*_ALERT_STEPS[2])
+    env = {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42", "TEXT": "x"}
+    env[missing] = ""
+    code, args = _send(step["run"], tmp_path, **env)
+    assert code == 0 and args is None
+
+
+def test_a_block_waiting_for_approval_is_announced_without_holding_the_block():
+    text = _wf("block.yml")
+    keys = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+    ask = keys[keys.index("  ask:\n"):keys.index("  block:\n")]
+    block = keys[keys.index("  block:\n"):]
+    assert "environment:" not in ask and "permissions: {}" in ask
+    assert "environment: ledger" in block.split("steps:")[0]
+    assert "needs:" not in block.split("steps:")[0]  # an alert never holds a block
+    t = _step(*_ALERT_STEPS[2])["env"]["TEXT"]
+    assert "waiting for your approval" in t and "github.run_id" in t
+
+
+def test_every_alert_script_is_the_same():
+    scripts = [_step(n, s)["run"] for n, s in _ALERT_STEPS]
+    assert scripts[0] == scripts[1] == scripts[2]

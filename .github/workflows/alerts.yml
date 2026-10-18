@@ -1,0 +1,59 @@
+name: alerts
+# A Telegram message to Chii when a ledger run fails. A block run waiting for her
+# approval is announced by block.yml itself, from its `ask` job, the moment it starts.
+# The message carries only the workflow's name, its result and the run's link: never
+# a branch name, a commit message or anything else someone else could write. The bot
+# token and chat id are repository secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID); with
+# either unset, nothing is sent and the job still passes. A manual run sends a test.
+on:
+  workflow_run:
+    workflows: [block, nightly, tests, deploy, genesis]
+    types: [completed]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  failed:
+    # tests also runs on claude/** branches and pull requests: only main's counts.
+    if: >-
+      github.event_name == 'workflow_run'
+      && contains(fromJSON('["failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion)
+      && (github.event.workflow_run.name != 'tests'
+          || (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: tell Chii on Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: "aikiri-network: ${{ github.event.workflow_run.name }} ${{ github.event.workflow_run.conclusion }}. ${{ github.event.workflow_run.html_url }}"
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
+            exit 0
+          fi
+          curl -sS --fail --max-time 20 -o /dev/null -w "Telegram answered HTTP %{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true"
+  test:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: send a test message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEXT: "aikiri-network: alerts are on. You will hear here when a ledger run fails or a block waits for your approval."
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
+            exit 0
+          fi
+          curl -sS --fail --max-time 20 -o /dev/null -w "Telegram answered HTTP %{http_code}\n" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" \
+            --data-urlencode "disable_web_page_preview=true"
