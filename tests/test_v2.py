@@ -1203,8 +1203,9 @@ def test_a_header_that_could_not_be_looked_up_says_why_it_was_not_saved(ledger, 
 
 
 @pytest.mark.parametrize("tip, says", [(800_004, "has 5 confirmations, 6 needed"),
+                                        (800_000, "has 1 confirmation, 6 needed"),
                                         (799_000, "has 0 confirmations, 6 needed")])
-def test_upgrade_says_how_many_confirmations_a_shallow_block_has(ledger, monkeypatch, easy_work, tip, says):
+def test_save_header_says_how_many_confirmations_a_shallow_block_has(ledger, monkeypatch, easy_work, tip, says):
     from aikiri_ledger import witness as W
     data = _proof_of_block_0(ledger, _btc(800_000))
     block = {800_000: _mined(_roots(data)[800_000])}
@@ -1247,7 +1248,7 @@ def test_a_saved_header_is_read_with_the_public_sources_off(ledger, monkeypatch,
 
 
 def test_a_saved_header_is_read_before_a_node_that_answers(ledger, monkeypatch, easy_work):
-    # the "keep" ruling: a saved header that carries the proof decides; the node is not asked
+    # the "keep" ruling: a saved header that carries the proof decides, though a node answers
     from bitcoin.core import CBlockHeader
     from aikiri_ledger import witness as W
     data = _proof_of_block_0(ledger, _btc(800_000))
@@ -1266,6 +1267,96 @@ def test_a_saved_header_is_read_before_a_node_that_answers(ledger, monkeypatch, 
     asked.clear()
     result, why = bw.verify(ledger.read(0))
     assert (result, asked) == ("complete", []) and "saved header" in why
+
+
+_MINED_AT = "2023-11-14 22:13:20 UTC"  # _mined's nTime, 1_700_000_000
+
+
+def test_a_saved_header_is_reported_by_what_it_proves_not_the_height_beside_it(ledger, monkeypatch, easy_work):
+    # The height in a .btc-header is not in the header: a genuine later header saved
+    # under an earlier height, beside a proof relabelled to match, must not backdate.
+    from aikiri_ledger import witness as W
+    real = _ots_file(ledger.read(0).hash, _btc(800_000))
+    raw_late, hash_late = _mined(_roots(real)[800_000])
+    fake = _ots_file(ledger.read(0).hash, _btc(700_000))  # same path, earlier label
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    ledger.proof_path(0, "hash.ots").write_bytes(fake)
+    _save(ledger, 0, (700_000, raw_late))
+    _lookups(monkeypatch)
+    result, why = W.BitcoinWitness(ledger).verify(ledger.read(0))
+    assert "700000" not in why and hash_late in why and _MINED_AT in why, why
+
+
+def test_a_saved_header_names_its_block_by_hash_and_mined_time(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, block_hash = _mined(_roots(data)[800_000])
+    _save(ledger, 0, (800_000, raw))
+    _lookups(monkeypatch)
+    result, why = W.BitcoinWitness(ledger).verify(ledger.read(0))
+    assert result == "complete"
+    assert why == f"in the Bitcoin block {block_hash}, mined {_MINED_AT}, by its saved header"
+
+
+def test_the_nodes_tip_counts_against_the_runs_budget(ledger, monkeypatch, easy_work):
+    import time
+    from bitcoin.core import CBlockHeader
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    raw, _ = _mined(_roots(data)[800_000])
+    class Node:
+        def getblockhash(self, height): return b"\x00" * 32
+        def getblockheader(self, block_hash): return CBlockHeader.deserialize(raw)
+        def getblockcount(self): return 900_000
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Node())
+    bw = W.BitcoinWitness(ledger, public=False)
+    assert bw.verify(ledger.read(0))[0] == "complete"
+    bw._deadline = time.monotonic() - 1
+    assert "out of time" in bw.save_header(ledger.read(0))
+
+
+def test_a_public_header_is_buried_by_the_public_tip_though_a_node_was_reached(ledger, monkeypatch, easy_work):
+    # the node is behind the block, so the header came from the public sources: their tip decides
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    class Behind:
+        def getblockhash(self, height): raise IndexError("Block height out of range")
+        def getblockcount(self): return 799_990
+    monkeypatch.setattr(W.BitcoinWitness, "_node", lambda _self: Behind())
+    monkeypatch.setattr(W, "_fetch", _Public(**{"mempool.space": block, "blockstream.info": block}))
+    assert W.BitcoinWitness(ledger).save_header(ledger.read(0)) == "saved"
+
+
+def test_a_public_sources_own_words_stay_out_of_a_tip_error(ledger, monkeypatch, easy_work):
+    from aikiri_ledger import witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        if url.endswith("/blocks/tip/height"):
+            raise OSError("see https://evil.example/click for details")
+        return public(url)
+    _lookups(monkeypatch, fetch)
+    said = W.BitcoinWitness(ledger).save_header(ledger.read(0))
+    assert "evil.example" not in said and "(OSError)" in said, said
+
+
+def test_upgrade_prints_why_a_header_was_not_saved_whatever_the_reason(ledger, monkeypatch, capsys, easy_work):
+    from aikiri_ledger import cli, witness as W
+    data = _proof_of_block_0(ledger, _btc(800_000))
+    block = {800_000: _mined(_roots(data)[800_000])}
+    public = _Public(**{"mempool.space": block, "blockstream.info": block})
+    def fetch(url):
+        if url.endswith("/blocks/tip/height"):
+            raise OSError("down")
+        return public(url)
+    _lookups(monkeypatch, fetch)
+    monkeypatch.setattr(W.BitcoinWitness, "settle_backup", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "holds_proof", lambda self, b: True)
+    monkeypatch.setattr(W.BitcoinWitness, "upgrade", lambda self, b: "complete")
+    assert cli.main(["--ledger", str(ledger.root), "upgrade"]) == 0
+    assert "block 0: Bitcoin header not saved: the chain's tip could not be had" in capsys.readouterr().out
 
 
 def _saving(ledger, monkeypatch):
