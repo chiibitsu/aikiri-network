@@ -2876,6 +2876,12 @@ def test_block_yml_is_untouched_by_the_alerts():
     assert "TELEGRAM" not in text and "  ask:" not in text
 
 
+def test_the_waiting_message_says_a_block_needs_approval_and_links_the_run():
+    text = _step(*_ALERT_STEPS[2])["env"]["TEXT"]
+    assert text == ("aikiri-network: a block was requested and needs your approval (it may queue "
+                    "behind another ledger run first). ${{ github.event.workflow_run.html_url }}")
+
+
 def test_every_alert_script_is_the_same():
     scripts = [_step(n, s)["run"] for n, s in _ALERT_STEPS]
     assert scripts[0] == scripts[1] == scripts[2]

@@ -33,7 +33,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEXT: "aikiri-network: a block is waiting for your approval. ${{ github.event.workflow_run.html_url }}"
+          TEXT: "aikiri-network: a block was requested and needs your approval (it may queue behind another ledger run first). ${{ github.event.workflow_run.html_url }}"
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
