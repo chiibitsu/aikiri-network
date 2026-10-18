@@ -732,7 +732,7 @@ class QuorumBase:
         self.readers = list(readers)
         self.quorum = quorum or (len(self.readers) // 2 + 1)
         self._at = None  # the height every read of this run is made at
-        self._missed = set()  # readers that failed a read this run
+        self._missed = {}  # reader index: describe() of the first read it failed this run
         self._disagreed = False
 
     def _gather(self, fn):
@@ -745,7 +745,7 @@ class QuorumBase:
                 # carries the endpoint's URL, and a keyed URL its key.
                 name = _host(getattr(r, "rpc", None)) or f"endpoint {i + 1}"
                 errors.append(f"{name}: {describe(e)}")
-                self._missed.add(i)
+                self._missed.setdefault(i, describe(e))
         if len(answers) < self.quorum:
             raise QuorumError(f"{len(answers)} of {len(self.readers)} endpoints answered; "
                               f"{self.quorum} needed. {'; '.join(errors)}")
@@ -765,8 +765,8 @@ class QuorumBase:
         for i, r in enumerate(self.readers):
             try:
                 heights.append(int(r.finalized_block()))
-            except Exception:  # noqa: BLE001
-                self._missed.add(i)
+            except Exception as e:  # noqa: BLE001
+                self._missed.setdefault(i, describe(e))
         if len(heights) < self.quorum:
             raise QuorumError(f"{len(heights)} of {len(self.readers)} endpoints reported a "
                               f"finalized block; {self.quorum} needed. Reading at each node's "
@@ -785,8 +785,10 @@ class QuorumBase:
         but = " (and they disagreed)" if self._disagreed else ""
         if not self._missed:
             return f"Base: all {n} endpoints answered every read{but}"
-        names = [_host(getattr(self.readers[i], "rpc", None)) or f"endpoint {i + 1}"
-                 for i in sorted(self._missed)]
+        # Each with why, by type and status only: a one-off 429 is rerun, a server that
+        # cannot serve state at the finalized height is swapped, and only the why tells.
+        names = [f"{_host(getattr(self.readers[i], 'rpc', None)) or f'endpoint {i + 1}'} ({why})"
+                 for i, why in sorted(self._missed.items())]
         return (f"Base: {n - len(self._missed)} of {n} endpoints answered every read{but}; "
                 f"not {', '.join(names)}")
 

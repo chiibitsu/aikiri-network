@@ -1622,7 +1622,7 @@ def test_a_block_not_yet_anchored_says_what_base_holds(ledger, sk, mac, trust):
     class Behind(_Honest):
         def latest_index(self, block=None): return 0
     state, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(minutes=5))
-    (line,) = [r for r in report if r.startswith("block 1:") and "anchored" in r]
+    (line,) = [r for r in report if r.startswith("block 1:") and "Base" in r]
     assert state == State.VALID_LOCALLY and "latestIndex 0" in line and "quorum" not in line, line
 
 
@@ -1653,7 +1653,7 @@ def test_a_passing_quorum_names_an_endpoint_that_did_not_answer(ledger, trust):
     q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), _Named("https://c")])
     state, report = verify_all(ledger, trust, base=q)
     assert state == State.BASE_VERIFIED, report
-    assert "Base: 2 of 3 endpoints answered every read; not dead" in report, report
+    assert "Base: 2 of 3 endpoints answered every read; not dead (ConnectionError)" in report, report
 
 
 def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):
@@ -1669,7 +1669,7 @@ def test_the_endpoint_summary_is_printed_on_a_failure_too(ledger, trust):
         def matches(self, b, block=None): return False
     q = QuorumBase([Lying("https://a"), _DeadNamed("https://dead"), Lying("https://c")])
     state, report = verify_all(ledger, trust, base=q)
-    assert state == State.INVALID and report[-2] == "Base: 2 of 3 endpoints answered every read; not dead", report
+    assert state == State.INVALID and report[-2] == "Base: 2 of 3 endpoints answered every read; not dead (ConnectionError)", report
 
 
 def test_an_endpoint_that_answers_the_height_but_misses_a_read_is_named():
@@ -1677,7 +1677,7 @@ def test_an_endpoint_that_answers_the_height_but_misses_a_read_is_named():
         def latest_index(self, block=None): raise ConnectionError("reset")
     q = QuorumBase([_Named("https://a"), Flaky("https://flaky"), _Named("https://c")])
     q.latest_index()
-    assert q.summary().endswith("not flaky")
+    assert q.summary().endswith("not flaky (ConnectionError)")
 
 
 def test_an_endpoint_with_no_rpc_is_named_by_its_place():
@@ -1685,7 +1685,7 @@ def test_an_endpoint_with_no_rpc_is_named_by_its_place():
         def latest_index(self, block=None): raise ConnectionError("reset")
     q = QuorumBase([_Named("https://a"), Bare(), _Named("https://c")])
     q.latest_index()
-    assert q.summary().endswith("not endpoint 2")
+    assert q.summary().endswith("not endpoint 2 (ConnectionError)")
 
 
 def test_both_wrappers_carry_their_rpc():
@@ -1707,11 +1707,11 @@ def test_the_anchor_window_and_its_hours(ledger, sk, mac, trust, age, says):
     state, report = verify_all(ledger, trust, base=Behind(), now=written + age)
     if says is None:
         assert state == State.VALID_LOCALLY
-        (line,) = [r for r in report if r.startswith("block 1:") and "anchored" in r]
-        assert "verify fails if it is still missing 6 hours after it was written" in line, line
+        (line,) = [r for r in report if r.startswith("block 1:") and "Base" in r]
+        assert "verify fails if it is still not final 6 hours after it was written" in line, line
     else:
         assert state == State.INVALID
-        assert f"block 1: not anchored on Base {says} after it was written" in report
+        assert f"block 1: not anchored at Base's finalized height {says} after it was written" in report
 
 
 def test_the_quorum_names_an_endpoint_by_host_only():
@@ -1719,7 +1719,7 @@ def test_the_quorum_names_an_endpoint_by_host_only():
     q = QuorumBase([_Named("https://a"), _DeadNamed("https://base.example.com/v2/SECRETKEY"),
                     _Named("https://c")])
     q.latest_index()
-    assert q.summary() == "Base: 2 of 3 endpoints answered every read; not base.example.com"
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read; not base.example.com (ConnectionError)"
 
 
 def test_the_quorum_does_not_say_all_answered_as_if_they_agreed():
@@ -1737,7 +1737,7 @@ def test_a_disagreement_is_noted_when_an_endpoint_also_missed():
     q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), Other("https://c")])
     with pytest.raises(QuorumError):
         q.latest_index()
-    assert q.summary() == "Base: 2 of 3 endpoints answered every read (and they disagreed); not dead"
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read (and they disagreed); not dead (ConnectionError)"
 
 
 @pytest.mark.parametrize("rpc", ["https://u:SECRETKEY@base.example.com:8545/x",
@@ -1745,7 +1745,7 @@ def test_a_disagreement_is_noted_when_an_endpoint_also_missed():
 def test_the_host_drops_a_key_in_the_userinfo_or_query(rpc):
     q = QuorumBase([_Named("https://a"), _DeadNamed(rpc), _Named("https://c")])
     q.latest_index()
-    assert q.summary().endswith("not base.example.com"), q.summary()
+    assert q.summary().endswith("not base.example.com (ConnectionError)"), q.summary()
 
 
 def test_a_malformed_rpc_is_named_by_its_place_and_the_report_survives(ledger, trust):
@@ -1755,7 +1755,7 @@ def test_a_malformed_rpc_is_named_by_its_place_and_the_report_survives(ledger, t
                     _Named("https://c")])
     state, report = verify_all(ledger, trust, base=q)
     assert state == State.BASE_VERIFIED, report
-    assert "Base: 2 of 3 endpoints answered every read; not endpoint 2" in report, report
+    assert "Base: 2 of 3 endpoints answered every read; not endpoint 2 (EndpointUnusable: ValueError)" in report, report
 
 
 @pytest.mark.parametrize("rpc, said", [
@@ -1915,7 +1915,7 @@ def test_the_waiting_line_says_the_window_in_whole_hours_past_a_day(ledger, sk, 
     class Behind(_Honest):
         def latest_index(self, block=None): return 0
     _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
-    assert any("verify fails if it is still missing 26 hours after it was written" in r for r in report), report
+    assert any("verify fails if it is still not final 26 hours after it was written" in r for r in report), report
 
 
 @pytest.mark.parametrize("hours, state", [(1, State.VALID_LOCALLY), (7, State.INVALID)])
@@ -1929,11 +1929,15 @@ def test_a_block_still_not_anchored_hours_after_it_was_written_fails(ledger, sk,
     got, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=hours))
     assert got == state, report
     if state == State.INVALID:
-        assert any("block 1: not anchored on Base 7 hours after it was written" in r for r in report)
+        assert any("block 1: not anchored at Base's finalized height 7 hours after it was written" in r for r in report)
 
 
 def test_the_runners_install_the_urllib3_the_retry_needs():
+    """retry_after_max needs urllib3 2.6.3; the runners install the lock, not the .in."""
+    import re
     assert "urllib3>=2.6.3" in Path("requirements.in").read_text()
+    pinned = re.search(r"^urllib3==(\d+)\.(\d+)\.(\d+)", Path("requirements.lock").read_text(), re.M)
+    assert tuple(map(int, pinned.groups())) >= (2, 6, 3), pinned[0]
 
 
 def test_a_quorum_still_checks_the_deployed_code_pin(ledger, sk, mac, trust):

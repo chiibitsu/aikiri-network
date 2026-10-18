@@ -239,7 +239,7 @@ def verify_all(ledger, trust, base=None, bitcoin=None, now=None) -> tuple[State,
         for b in unanchored:
             age = now - b.when
             if age > _ANCHOR_WINDOW:
-                report.append(f"block {b.index}: not anchored on Base "
+                report.append(f"block {b.index}: not anchored at Base's finalized height "
                               f"{int(age.total_seconds() // 3600)} hours after it was written")
                 failures += 1
 
@@ -253,8 +253,8 @@ def verify_all(ledger, trust, base=None, bitcoin=None, now=None) -> tuple[State,
 
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
-                report.append(f"block {i}: written but not yet anchored on Base as read "
-                              f"(latestIndex {latest}); verify fails if it is still missing "
+                report.append(f"block {i}: written, not yet final on Base (finalized latestIndex "
+                              f"{latest}); verify fails if it is still not final "
                               f"{int(_ANCHOR_WINDOW.total_seconds() // 3600)} hours after it was written")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:
