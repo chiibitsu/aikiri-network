@@ -1731,6 +1731,58 @@ def test_the_quorum_does_not_say_all_answered_as_if_they_agreed():
     assert "disagreed" in q.summary(), q.summary()
 
 
+def test_a_disagreement_is_noted_when_an_endpoint_also_missed():
+    class Other(_Named):
+        def latest_index(self, block=None): return 1
+    q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), Other("https://c")])
+    with pytest.raises(QuorumError):
+        q.latest_index()
+    assert q.summary() == "Base: 2 of 3 endpoints answered every read (and they disagreed); not dead"
+
+
+@pytest.mark.parametrize("rpc", ["https://u:SECRETKEY@base.example.com:8545/x",
+                                 "https://base.example.com/?apikey=SECRETKEY"])
+def test_the_host_drops_a_key_in_the_userinfo_or_query(rpc):
+    q = QuorumBase([_Named("https://a"), _DeadNamed(rpc), _Named("https://c")])
+    q.latest_index()
+    assert q.summary().endswith("not base.example.com"), q.summary()
+
+
+def test_a_malformed_rpc_is_named_by_its_place_and_the_report_survives(ledger, trust):
+    from aikiri_ledger.cli import _Unreachable
+    trust.code_keccak = None
+    q = QuorumBase([_Named("https://a"), _Unreachable("http://[bad/v2/SECRETKEY", ValueError("bad")),
+                    _Named("https://c")])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.BASE_VERIFIED, report
+    assert "Base: 2 of 3 endpoints answered every read; not endpoint 2" in report, report
+
+
+@pytest.mark.parametrize("rpc, sent", [
+    ("https://base.example.com/v2/SECRETKEY", "/v2/SECRETKEY"),
+    ("https://u:SECRETKEY@base.example.com/x", "/x"),
+    ("https://base.example.com/?apikey=SECRETKEY", "/?apikey=SECRETKEY"),
+    ("http://[bad/v2/SECRETKEY", None),  # unparseable: never sent, so only ever printed whole
+])
+def test_a_failed_read_never_prints_an_endpoints_key(ledger, trust, rpc, sent):
+    """The summary named hosts only while the error text a line above it carried
+    each URL whole, as our wrappers and requests both print it."""
+    from aikiri_ledger.cli import _DropOnTransportFailure, _Unreachable
+    class Dropped:
+        def __getattr__(self, name):
+            def fail(*a, **k):
+                raise ConnectionError("Max retries exceeded with url: /v2/OTHERKEY "
+                                      "(for url: https://k2.example.com/v2/OTHERKEY)")
+            return fail
+    said = f"Max retries exceeded with url: {sent} (for url: {rpc})" if sent else f"Invalid URL {rpc!r}"
+    q = QuorumBase([_Named("https://a"), _Unreachable(rpc, OSError(said)),
+                    _DropOnTransportFailure("https://k2.example.com/v2/OTHERKEY", Dropped())])
+    state, report = verify_all(ledger, trust, base=q)
+    assert state == State.INVALID, report
+    assert not [r for r in report if "SECRETKEY" in r or "OTHERKEY" in r], report
+    assert any("k2.example.com" in r and "could not read" in r for r in report), report
+
+
 def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead():
     q = QuorumBase([_DeadNamed("https://dead"), _Named("https://b"), _Named("https://c")])
     assert q.address == _Honest.address
