@@ -236,10 +236,13 @@ def verify_all(ledger, trust, base=None, bitcoin=None, now=None) -> tuple[State,
         # hour; one still missing hours later did not land, and is a failure.
         unanchored = [b for b in blocks if latest is not None and latest < b.index]
         now = now or datetime.now(timezone.utc)
+        # A quorum reads at Base's finalized height; one endpoint reads at its head.
+        quorum = callable(getattr(base, "summary", None))
+        missing = "final" if quorum else "anchored"
         for b in unanchored:
             age = now - b.when
             if age > _ANCHOR_WINDOW:
-                report.append(f"block {b.index}: not anchored at Base's finalized height "
+                report.append(f"block {b.index}: still not {missing} on Base "
                               f"{int(age.total_seconds() // 3600)} hours after it was written")
                 failures += 1
 
@@ -253,8 +256,9 @@ def verify_all(ledger, trust, base=None, bitcoin=None, now=None) -> tuple[State,
 
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
-                report.append(f"block {i}: written, not yet final on Base (finalized latestIndex "
-                              f"{latest}); verify fails if it is still not final "
+                report.append(f"block {i}: written, not yet {missing} on Base "
+                              f"({'finalized ' if quorum else ''}latestIndex {latest}); "
+                              f"verify fails if it is still not {missing} "
                               f"{int(_ANCHOR_WINDOW.total_seconds() // 3600)} hours after it was written")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:

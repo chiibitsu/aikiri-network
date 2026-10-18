@@ -1708,10 +1708,10 @@ def test_the_anchor_window_and_its_hours(ledger, sk, mac, trust, age, says):
     if says is None:
         assert state == State.VALID_LOCALLY
         (line,) = [r for r in report if r.startswith("block 1:") and "Base" in r]
-        assert "verify fails if it is still not final 6 hours after it was written" in line, line
+        assert "verify fails if it is still not anchored 6 hours after it was written" in line, line
     else:
         assert state == State.INVALID
-        assert f"block 1: not anchored at Base's finalized height {says} after it was written" in report
+        assert f"block 1: still not anchored on Base {says} after it was written" in report
 
 
 def test_the_quorum_names_an_endpoint_by_host_only():
@@ -1907,6 +1907,48 @@ def test_the_quorum_pins_its_contract_address_though_the_first_endpoint_is_dead(
     assert q.address == _Honest.address
 
 
+def test_the_anchor_lines_say_final_for_a_quorum_and_anchored_for_one_endpoint(ledger, sk, mac, trust):
+    """A just-anchored block read like a failed anchor; and only a quorum reads at the
+    finalized height, so only a quorum's lines may say "final"."""
+    trust.code_keccak = None
+    written = datetime(2026, 9, 3, tzinfo=MANILA)
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=written)
+    q = QuorumBase([_Named("https://a"), _Named("https://b"), _Named("https://c")])
+    _, report = verify_all(ledger, trust, base=q, now=written + timedelta(hours=1))
+    assert ("block 1: written, not yet final on Base (finalized latestIndex 0); verify fails if it "
+            "is still not final 6 hours after it was written") in report, report
+    _, report = verify_all(ledger, trust, base=QuorumBase([_Named("https://a"), _Named("https://b"),
+                                                            _Named("https://c")]),
+                           now=written + timedelta(hours=7))
+    assert "block 1: still not final on Base 7 hours after it was written" in report, report
+    class Behind(_Honest):
+        def latest_index(self, block=None): return 0
+    _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
+    assert ("block 1: written, not yet anchored on Base (latestIndex 0); verify fails if it "
+            "is still not anchored 6 hours after it was written") in report, report
+
+
+def test_a_missed_endpoint_is_named_by_its_first_failure_in_order():
+    class Twice(_Named):
+        def finalized_block(self): raise ConnectionError("refused")
+        def latest_index(self, block=None): raise ValueError("later")
+    q = QuorumBase([_Named("https://a"), Twice("https://b"), _DeadNamed("https://c"), _Named("https://d"),
+                    _Named("https://e")])
+    q.latest_index()
+    assert q.summary().endswith("not b (ConnectionError), c (ConnectionError)"), q.summary()
+
+
+def test_a_systemexit_other_than_a_wrong_chain_still_stops_the_build(monkeypatch, trust):
+    from aikiri_ledger import cli
+    _readers(monkeypatch)
+    def w3(url, chain_id, retrying=False):
+        raise SystemExit("stop")
+    monkeypatch.setattr(cli, "_w3", w3)
+    trust.chain_id, trust.contract = 8453, "0x" + "11" * 20
+    with pytest.raises(SystemExit, match="stop"):
+        cli._base_reader({}, trust, ["https://a", "https://b", "https://c"], need_signer=False)
+
+
 def test_the_waiting_line_says_the_window_in_whole_hours_past_a_day(ledger, sk, mac, trust, monkeypatch):
     from aikiri_ledger import verify as V
     monkeypatch.setattr(V, "_ANCHOR_WINDOW", timedelta(days=1, hours=2))
@@ -1915,7 +1957,7 @@ def test_the_waiting_line_says_the_window_in_whole_hours_past_a_day(ledger, sk, 
     class Behind(_Honest):
         def latest_index(self, block=None): return 0
     _, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=1))
-    assert any("verify fails if it is still not final 26 hours after it was written" in r for r in report), report
+    assert any("verify fails if it is still not anchored 26 hours after it was written" in r for r in report), report
 
 
 @pytest.mark.parametrize("hours, state", [(1, State.VALID_LOCALLY), (7, State.INVALID)])
@@ -1929,7 +1971,7 @@ def test_a_block_still_not_anchored_hours_after_it_was_written_fails(ledger, sk,
     got, report = verify_all(ledger, trust, base=Behind(), now=written + timedelta(hours=hours))
     assert got == state, report
     if state == State.INVALID:
-        assert any("block 1: not anchored at Base's finalized height 7 hours after it was written" in r for r in report)
+        assert any("block 1: still not anchored on Base 7 hours after it was written" in r for r in report)
 
 
 def test_the_runners_install_the_urllib3_the_retry_needs():
