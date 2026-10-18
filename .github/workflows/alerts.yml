@@ -1,13 +1,16 @@
 name: alerts
-# Telegram messages to Chii about this repository's ledger runs on main: when a block run
-# is requested (it then waits for her approval of the ledger environment, or queues
-# behind another ledger run first), and when a ledger run fails. block.yml itself is
-# untouched, so an alert can never hold a block or change how its run ends.
+# Telegram messages to Chii about this repository's runs on main: when a block run is
+# requested (it then waits for her approval of the ledger environment, or queues
+# behind another ledger run first), and when a run of block, nightly, tests, deploy or
+# genesis fails. block.yml itself is untouched, so an alert can never hold a block or
+# change how its run ends.
 # A message carries only fixed words, the workflow's name and result, and the run's
 # link: never a branch name, a commit message or anything else someone else could write.
-# The bot token and chat id are repository secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID);
-# with either unset an alert is skipped and its job passes, but a manual run (a test
-# message) fails, so it cannot look like it worked.
+# The bot token and chat id (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are secrets of the
+# `alerts` environment, limited to main and with no reviewer: repository secrets would
+# reach any workflow a writer pushes on any branch. With either unset an alert is
+# skipped and its job passes, but a manual run (a test message) fails, so it cannot
+# look like it worked.
 on:
   workflow_run:
     workflows: [block, nightly, tests, deploy, genesis]
@@ -26,6 +29,7 @@ jobs:
       && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
+    environment: alerts
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -56,6 +60,7 @@ jobs:
       && contains(fromJSON('["push", "schedule", "workflow_dispatch"]'), github.event.workflow_run.event)
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
+    environment: alerts
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -80,6 +85,7 @@ jobs:
           fi
   test:
     if: github.event_name == 'workflow_dispatch'
+    environment: alerts
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -89,13 +95,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          test -n "$TELEGRAM_BOT_TOKEN" || { echo "repository secret TELEGRAM_BOT_TOKEN is not set"; exit 1; }
-          test -n "$TELEGRAM_CHAT_ID" || { echo "repository secret TELEGRAM_CHAT_ID is not set"; exit 1; }
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "the alerts environment's secret TELEGRAM_BOT_TOKEN is not set"; exit 1; }
+          test -n "$TELEGRAM_CHAT_ID" || { echo "the alerts environment's secret TELEGRAM_CHAT_ID is not set"; exit 1; }
       - name: send a test message
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEXT: "aikiri-network: alerts are on. You will hear here when a block waits for your approval or a ledger run fails."
+          TEXT: "aikiri-network: alerts are on. You will hear here when a block waits for your approval or a run on main fails."
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
             echo "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set; no alert sent."
