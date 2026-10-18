@@ -4,7 +4,8 @@ name: alerts
 # The message carries only the workflow's name, its result and the run's link: never
 # a branch name, a commit message or anything else someone else could write. The bot
 # token and chat id are repository secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID); with
-# either unset, nothing is sent and the job still passes. A manual run sends a test.
+# either unset, a failure alert is skipped and its job still passes. A manual run sends
+# a test, and fails if either is unset, so it cannot look like it worked.
 on:
   workflow_run:
     workflows: [block, nightly, tests, deploy, genesis]
