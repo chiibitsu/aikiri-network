@@ -5,7 +5,7 @@ GitHub's UI and on Chii's own machines.
 
 ## 1. Environments
 
-Create two, under Settings → Environments.
+Create three, under Settings → Environments.
 
 **`ledger`** — holds the automated keys.
 - Secrets: `AIKIRI_VALIDATOR_KEY`, `BASE_PRIVATE_KEY`.
@@ -26,6 +26,12 @@ only upgrades Bitcoin proofs, stamps any block with no `.ots` yet (block 0 was
 anchored at deploy but never stamped), proposes them as a pull request, and
 reports.
 See §8.
+
+**`alerts`** — secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, no reviewers,
+deployment branches `main` only. Used by `alerts.yml`'s Telegram messages. A
+reviewer would hold every alert until approved. If an alert ran before you created
+it, GitHub made it already with no rules: set the `main` limit before adding the
+secrets.
 
 ## 2. Move the secrets
 
