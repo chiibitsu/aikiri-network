@@ -2807,7 +2807,9 @@ def _send(script, tmp_path, refuse=None, **env):
     log = tmp_path / "curl.args"
     curl = bin_dir / "curl"
     body = f'for a in "$@"; do printf "%s\\n" "$a"; done > "{log}"\n'
-    if refuse:
+    if refuse == "":  # never reached: a timeout, say, with nothing written
+        body += "exit 28\n"
+    elif refuse:
         body += ('out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done\n'
                  f"printf '%s' '{refuse}' > \"$out\"; exit 22\n")
     curl.write_text("#!/bin/sh\n" + body)
@@ -2858,6 +2860,24 @@ def test_a_refused_alert_says_telegrams_reason_and_fails(tmp_path):
     code, _, out = _send(step["run"], tmp_path, refuse='{"ok":false,"description":"Bad Request: chat not found"}',
                          TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42", TEXT="x")
     assert code != 0 and "chat not found" in out and "123:abc" not in out
+
+
+def test_an_alert_telegram_never_answered_says_so_and_fails(tmp_path):
+    step = _step(*_ALERT_STEPS[1])
+    code, _, out = _send(step["run"], tmp_path, refuse="",
+                         TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_ID="42", TEXT="x")
+    assert code != 0 and "No reply from Telegram" in out and "Telegram's reply" not in out, out
+
+
+def test_every_workflow_parses_and_alerts_listen_where_they_say():
+    """Text checks pass a workflow GitHub would reject; a parse does not."""
+    import yaml
+    for f in Path(".github/workflows").glob("*.yml"):
+        yaml.safe_load(f.read_text())
+    on = yaml.safe_load(_wf("alerts.yml"))[True]  # YAML reads a bare `on` as true
+    assert on["workflow_run"]["types"] == ["requested", "completed"]
+    assert on["workflow_run"]["branches"] == ["main"]
+    assert "workflow_dispatch" in on
 
 
 @pytest.mark.parametrize("missing", ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
@@ -2930,7 +2950,8 @@ def _run(name, conclusion="failure", event="push", head_branch="main", **kw):
     (_run("tests"), True),                                    # a push to main
     (_run("genesis", conclusion="startup_failure"), True),
     (_run("block", conclusion="success"), False),
-    (_run("nightly", conclusion="cancelled"), False),
+    (_run("nightly", conclusion="cancelled"), True),          # e.g. dropped from the ledger queue
+    (_run("block", conclusion="skipped"), False),
     (_run("tests", head_branch="claude/x"), False),            # a feature branch
     (_run("tests", event="pull_request"), False),
     (_run("block", event="pull_request"), False),              # a fork PR's workflow named block
