@@ -8,9 +8,11 @@
                                      the block the proof names)
   FULLY VERIFIED                     both witnesses agree
 
-There is no grace window and no partial credit. A block that is written but
-not yet anchored leaves the ledger at VALID LOCALLY, which is the honest thing
-to say about it. Only the top state may be described as verified.
+There is no partial credit. A block that is written but not yet anchored
+leaves the ledger at VALID LOCALLY, which is the honest thing to say about it,
+for up to 6 hours after it was written (time for its anchor to land and become
+final on Base); still missing after that, verify fails. Only the top state may
+be described as verified.
 
 Every check runs; the report lists everything wrong, not just the first thing.
 """

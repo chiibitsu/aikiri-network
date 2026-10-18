@@ -1653,7 +1653,7 @@ def test_a_passing_quorum_names_an_endpoint_that_did_not_answer(ledger, trust):
     q = QuorumBase([_Named("https://a"), _DeadNamed("https://dead"), _Named("https://c")])
     state, report = verify_all(ledger, trust, base=q)
     assert state == State.BASE_VERIFIED, report
-    assert "Base: 2 of 3 endpoints answered every read; not https://dead" in report, report
+    assert "Base: 2 of 3 endpoints answered every read; not dead" in report, report
 
 
 def test_a_passing_quorum_says_when_every_endpoint_answered(ledger, trust):

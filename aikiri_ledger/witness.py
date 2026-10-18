@@ -723,6 +723,7 @@ class QuorumBase:
         self.quorum = quorum or (len(self.readers) // 2 + 1)
         self._at = None  # the height every read of this run is made at
         self._missed = set()  # readers that failed a read this run
+        self._disagreed = False
 
     def _gather(self, fn):
         answers, errors = [], []
@@ -737,6 +738,7 @@ class QuorumBase:
                               f"{self.quorum} needed. {'; '.join(errors)}")
         distinct = {repr(a) for a in answers}
         if len(distinct) > 1:
+            self._disagreed = True
             raise QuorumError(f"endpoints disagree: {sorted(distinct)}")
         return answers[0]
 
@@ -766,12 +768,16 @@ class QuorumBase:
     def summary(self) -> str:
         """Which endpoints answered every read, said on a pass too: a 2-of-3 pass
         otherwise reads like a 3-of-3 one, and one dead server goes unseen."""
+        from urllib.parse import urlsplit
         n = len(self.readers)
+        but = " (and they disagreed)" if self._disagreed else ""
         if not self._missed:
-            return f"Base: all {n} endpoints answered every read"
-        names = [getattr(self.readers[i], "rpc", None) or f"endpoint {i + 1}"
+            return f"Base: all {n} endpoints answered every read{but}"
+        # By host only: a keyed URL (https://host/v2/<key>) must not print its key.
+        names = [urlsplit(getattr(self.readers[i], "rpc", "") or "").hostname or f"endpoint {i + 1}"
                  for i in sorted(self._missed)]
-        return f"Base: {n - len(self._missed)} of {n} endpoints answered every read; not {', '.join(names)}"
+        return (f"Base: {n - len(self._missed)} of {n} endpoints answered every read{but}; "
+                f"not {', '.join(names)}")
 
     @property
     def address(self):
