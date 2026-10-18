@@ -1128,8 +1128,106 @@ def test_no_saved_header_passes_the_check(ledger, monkeypatch, capsys):
 
 
 def test_ci_checks_every_saved_header():
+    import re
     text = Path(".github/workflows/ci.yml").read_text()
-    assert "aikiri-ledger check-headers" in text
+    assert re.search(r"^  pull_request:", text, re.M) or re.search(r"^  pull_request:$|^on:[\s\S]*pull_request", text)
+    job = text[text.index("\n  saved-headers:\n"):]
+    job = job[:m.start()] if (m := re.search(r"\n  \S", job[1:])) else job
+    assert re.search(r"^      - run: aikiri-ledger check-headers$", job, re.M), job
+    assert not re.search(r"^    (if|continue-on-error):", job, re.M), job
+    assert 'pip install -e ".[bitcoin]"' in job
+
+
+def _two_blocks(ledger, sk, mac):
+    ledger.append_from_request(make_request(ledger, sk, mac), sk, now=datetime(2026, 9, 3, tzinfo=MANILA))
+
+
+def test_every_header_is_checked_and_any_failure_fails(ledger, sk, mac, monkeypatch, easy_work, capsys):
+    """Block 0's bad header is not hidden by block 1's good one, and each is named by its block."""
+    _two_blocks(ledger, sk, mac)
+    raw, block_hash = _mined(b"\x01" * 32)
+    fake = _mined(b"\x02" * 32)[0]
+    _save(ledger, 0, (800_000, fake))
+    _save(ledger, 1, (800_000, raw))
+    same = {800_000: (raw, block_hash)}
+    assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 1
+    out = capsys.readouterr().out
+    assert "block 0: the saved header for Bitcoin block 800000 is not the block mempool.space names" in out, out
+    assert "block 1: the saved header for Bitcoin block 800000 is the one both public sources name" in out, out
+
+
+def test_a_height_two_blocks_share_is_asked_once(ledger, sk, mac, monkeypatch, easy_work):
+    _two_blocks(ledger, sk, mac)
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, (800_000, raw))
+    _save(ledger, 1, (800_000, raw), (800_000, raw))
+    same = {800_000: (raw, block_hash)}
+    public = _Public(**{"mempool.space": same, "blockstream.info": same})
+    assert _headers_check(ledger, monkeypatch, public) == 0
+    assert len(public.asked) == 2, public.asked
+
+
+def test_each_block_gets_its_own_lookup_budget(ledger, sk, mac, monkeypatch, easy_work, capsys):
+    """A source that hangs on block 0's header leaves block 1's still checked, and says why in our words."""
+    import time
+    from aikiri_ledger import witness as W
+    _two_blocks(ledger, sk, mac)
+    slow, slow_hash = _mined(b"\x01" * 32)
+    raw, block_hash = _mined(b"\x02" * 32)
+    _save(ledger, 0, (800_000, slow))
+    _save(ledger, 1, (800_001, raw))
+    answers = {800_000: (slow, slow_hash), 800_001: (raw, block_hash)}
+    public = _Public(**{"mempool.space": answers, "blockstream.info": answers})
+    def fetch(url):
+        if url.endswith("/block-height/800000"):
+            time.sleep(1.5)
+        return public(url)
+    monkeypatch.setattr(W, "_LOOKUP_BUDGET", 1)
+    assert _headers_check(ledger, monkeypatch, fetch) == 1
+    out = capsys.readouterr().out
+    assert "block 0: the saved header for Bitcoin block 800000 was not checked " \
+           "(out of time: Bitcoin lookups get 1 s per run)" in out, out
+    assert "block 1: the saved header for Bitcoin block 800001 is the one both public sources name" in out, out
+
+
+def test_a_header_without_the_work_is_not_looked_up(ledger, monkeypatch, capsys):
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, (800_000, raw))
+    public = _Public(**{"mempool.space": {800_000: (raw, block_hash)}, "blockstream.info": {800_000: (raw, block_hash)}})
+    assert _headers_check(ledger, monkeypatch, public) == 1
+    assert public.asked == [] and "is the one" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("text", ["", "\n\n"])
+def test_a_header_file_with_no_header_fails(ledger, monkeypatch, capsys, text):
+    _save(ledger, 0, text=text)
+    assert _headers_check(ledger, monkeypatch, _Public()) == 1
+    assert "block 0: its .btc-header is not a saved header file verify reads in full" in capsys.readouterr().out
+
+
+def test_blank_lines_between_headers_are_read_as_verify_reads_them(ledger, monkeypatch, easy_work):
+    raw, block_hash = _mined(b"\x01" * 32)
+    _save(ledger, 0, text=f"800000 {raw.hex()}\n\n800000 {raw.hex()}\n")
+    same = {800_000: (raw, block_hash)}
+    assert _headers_check(ledger, monkeypatch, _Public(**{"mempool.space": same, "blockstream.info": same})) == 0
+
+
+@pytest.mark.parametrize("name", ["000000.BTC-header", "000000.btc-Header", "000007.btc-header", "0.btc-header"])
+def test_a_header_file_no_block_owns_by_its_exact_name_fails(ledger, monkeypatch, capsys, name):
+    """A case-insensitive disk (a Mac's, by default) reads 000000.BTC-header as block 0's
+    .btc-header, which the check, on Linux, would never have looked at."""
+    raw, _ = _mined(b"\x01" * 32)
+    ledger.proofs_dir.mkdir(parents=True, exist_ok=True)
+    (ledger.proofs_dir / name).write_text(f"800000 {raw.hex()}\n")
+    assert _headers_check(ledger, monkeypatch, _Public()) == 1
+    assert f"{name}: not the .btc-header of a block in this ledger, by its exact name" \
+        in capsys.readouterr().out
+
+
+def test_no_ledger_fails_the_check(tmp_path, monkeypatch, capsys):
+    from aikiri_ledger import cli
+    assert cli.main(["--ledger", str(tmp_path / "nowhere"), "check-headers"]) == 1
+    assert "no ledger at" in capsys.readouterr().out
 
 
 def test_a_confirmed_header_is_saved_beside_the_proof(ledger, monkeypatch, easy_work):
