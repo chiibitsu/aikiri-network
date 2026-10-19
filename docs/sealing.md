@@ -69,8 +69,8 @@ content-type: application/json
 
 With no app named the command prints the seal and sends nothing. A redirect is refused rather than followed, since following it would carry the bearer elsewhere. The command exits 0 on a 2xx answer, 1 otherwise.
 
-`verify_url` uses the check page's `?sha=` link. Until the check page reads that parameter it opens empty and the visitor drops the file; the app accepts any link under `https://www.chiibitsu.com/network/`.
+`verify_url` uses the check page's `?sha=` link (from chiibitsu/chiibitsu-labs#34). Until that is live it opens empty and the visitor drops the file; the app accepts any link under `https://www.chiibitsu.com/network/`.
 
 ## Privacy
 
-A fingerprint alone reveals nothing. The ledger holds the kind and the hash. The check page tells anyone *that* a file was sealed and *when*. Who it is between is answered by the document's issuer, and only to someone holding the original file. That protocol (a second digest the issuer stores at seal time) is the check page's, in `chiibitsu/chiibitsu-labs:docs/network-check.md`. The sealing machine has only the hash, so the issuer record is written by the app that holds the file.
+A fingerprint alone reveals nothing. The ledger holds the kind and the hash. The check page tells anyone *that* a file was sealed and *when*. Who it is between is answered by the document's issuer, and only to someone holding the original file. That protocol (a second digest the issuer stores at seal time) is the check page's: `chiibitsu/chiibitsu-labs:docs/network-check.md`, from [chiibitsu/chiibitsu-labs#34](https://github.com/chiibitsu/chiibitsu-labs/pull/34). The sealing machine has only the hash, so the issuer record is written by the app that holds the file.

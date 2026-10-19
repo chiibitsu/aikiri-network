@@ -57,9 +57,9 @@ With both set, the second run of the pasted line reports by itself. The `curl` i
 
 Replace the last sentence of "Official invoice (booklet)" in `docs/cta-flow.md` ("needs the network side … not built here") with the seal line and the report above.
 
-## Later, if the check page's party reveal lands
+## 7. Who the invoice is between (with chiibitsu/chiibitsu-labs#34)
 
-The check page's private-by-default reveal (`chiibitsu/chiibitsu-labs` branch `claude/clever-knuth-jrcj3q`, not merged as of this note) wants the issuer to store, at seal time, who a document is between. Only the app holds the file bytes, so the app would `PUT https://www.chiibitsu.com/api/issuer/seal` with bearer `ISSUER_SEAL_SECRET`:
+The check page's private-by-default reveal ([chiibitsu/chiibitsu-labs#34](https://github.com/chiibitsu/chiibitsu-labs/pull/34), open, its store being connected) shows who a document is between only to someone holding the original file. The issuer stores that at seal time, and only the app holds the file bytes, so the app writes it. Once #34 is merged, when the invoice is stored (same point as step 1), `PUT https://www.chiibitsu.com/api/issuer/seal` with bearer `ISSUER_SEAL_SECRET`:
 
 ```
 {"sha256": "<official_invoice_sha256>",
@@ -68,4 +68,4 @@ The check page's private-by-default reveal (`chiibitsu/chiibitsu-labs` branch `c
  "reveal": "<SHA-256 of the 17 bytes 'chiibitsu-reveal\n' followed by the file bytes>"}
 ```
 
-and the same for the agreement with its own kind. The exact rules are in that branch's `docs/network-check.md`; follow those, not this summary, if they differ.
+and the same for the agreement with its own kind. One record per fingerprint, written once: a repeat with the same body answers 200, a different body 409. Until #34 is live the endpoint answers 404 (not merged) or 503 (store not set); treat either as "try again on the daily run", not a failure of the seal. The exact rules are in #34's `docs/network-check.md`; follow those, not this summary, if they differ.
