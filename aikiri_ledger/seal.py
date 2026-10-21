@@ -22,9 +22,11 @@ ledger a document is a kind and a fingerprint, exactly like every other root.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,18 +95,42 @@ class Sealed:
 
 
 def sealed_facts(ledger, blk) -> Sealed:
-    tx = None
+    return Sealed(blk.index, blk.hash, blk.timestamp, _base_tx(ledger, blk), _ots_proof(ledger, blk))
+
+
+def _base_tx(ledger, blk) -> str | None:
+    """The anchor's transaction, only from a receipt that names this very block."""
     base = ledger.proof_path(blk.index, "base.json")
-    if base.exists():
-        t = str(loads_strict(base.read_text()).get("tx") or "")
-        t = t[2:] if t.startswith("0x") else t
-        tx = "0x" + hex64(t, f"{base.name}.tx")
-    ots = None
+    if base.is_symlink() or not base.is_file():
+        return None
+    r = loads_strict(base.read_text())
+    if not isinstance(r, dict) or r.get("index") != blk.index or r.get("hash") != blk.hash:
+        raise SchemaError(f"{base.name} is not the receipt of block {blk.index}; nothing reported")
+    t = str(r.get("tx") or "")
+    return "0x" + hex64(t[2:] if t.startswith("0x") else t, f"{base.name}.tx")
+
+
+def _ots_proof(ledger, blk) -> str | None:
+    """Base64 of the block's .ots, only when it reads as a proof of this block, read
+    the way verify reads it: never through a link, never past its size limit. Anything
+    else is left out, since the app keeps the first proof it is sent."""
+    from .witness import _OTS_MAX, _read_regular
     p = ledger.proof_path(blk.index, "hash.ots")
-    if p.is_file():
-        b64 = base64.b64encode(p.read_bytes()).decode()
-        ots = b64 if len(b64) <= OTS_MAX else None  # cut short it would be no proof at all
-    return Sealed(blk.index, blk.hash, blk.timestamp, tx, ots)
+    if p.is_symlink():
+        return None
+    try:
+        from opentimestamps.core.serialize import BytesDeserializationContext
+        from opentimestamps.core.timestamp import DetachedTimestampFile
+        data = _read_regular(p, _OTS_MAX + 1)
+        if data is None or len(data) > _OTS_MAX:
+            return None
+        proof = DetachedTimestampFile.deserialize(BytesDeserializationContext(data))
+    except Exception:  # missing, unreadable, not a proof, or no python-opentimestamps here
+        return None
+    if proof.file_digest != hashlib.sha256(bytes.fromhex(blk.hash)).digest():
+        return None
+    b64 = base64.b64encode(data).decode()
+    return b64 if len(b64) <= OTS_MAX else None  # cut short it would be no proof at all
 
 
 def verify_url(sha256: str) -> str:
@@ -122,10 +148,19 @@ def report_payload(rid: str, document: str, sha256: str, s: Sealed) -> dict:
 
 
 def report_url(app: str) -> str:
-    app = app.strip().rstrip("/")
-    if not re.match(r"^https://[^\s/?#]+$", app):
-        raise SchemaError("--report: the app's origin, https://host, with no path")
-    return app + SEAL_PATH
+    """https://host[:port] and nothing else: a user, a path, a query would each let the
+    bearer go somewhere other than the host it reads as."""
+    bad = SchemaError("--report: the app's origin, https://host, with no path")
+    app = app.strip()
+    try:
+        u = urllib.parse.urlsplit(app)
+        port = u.port
+    except ValueError:
+        raise bad
+    if (u.scheme != "https" or not u.hostname or "@" in u.netloc or u.query or u.fragment
+            or u.path not in ("", "/") or not re.match(r"^[A-Za-z0-9.-]+$", u.hostname)):
+        raise bad
+    return f"https://{u.hostname}" + (f":{port}" if port else "") + SEAL_PATH
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):

@@ -44,7 +44,7 @@ Adding a third document is one line in `DOCUMENTS` (`aikiri_ledger/seal.py`) and
 
 ## The report to the app
 
-Sent when the block holding the document has its Base receipt on disk (`ledger/proofs/NNNNNN.base.json`). Before that the command says so and sends nothing.
+Sent when the block holding the document has its Base receipt on disk (`ledger/proofs/NNNNNN.base.json`), and only if that receipt names the same block index and hash. Before that the command says so and sends nothing; a receipt of another block is refused.
 
 ```
 POST https://<app>/api/seal
@@ -60,11 +60,11 @@ content-type: application/json
  "ots_proof": "<base64 of ledger/proofs/NNNNNN.hash.ots>"}
 ```
 
-`ots_proof` is left out when the block has no `.ots` yet, or when its base64 would exceed 50,000 characters (the app keeps no more, and a cut proof is no proof).
+`ots_proof` is sent only when the block's `.ots` is a regular file (never a link) that reads as a proof of this block, as `verify` reads it. It is left out otherwise: no `.ots` yet, not a proof, a proof of other data, or base64 over 50,000 characters (the app keeps no more, and a cut proof is no proof). The app keeps the first proof it is sent, so a wrong one would stay.
 
 | setting | where |
 |---|---|
-| app origin | `--report https://<app>`, or `AIKIRI_SEAL_URL` in the environment. `https://` and a bare origin only. |
+| app origin | `--report https://<app>`, or `AIKIRI_SEAL_URL` in the environment. `https://host[:port]` only: no user, path, query or fragment. |
 | bearer | `AIKIRI_SEAL_SECRET` in the environment. Never on the command line, never printed. |
 
 With no app named the command prints the seal and sends nothing. A redirect is refused rather than followed, since following it would carry the bearer elsewhere. The command exits 0 on a 2xx answer, 1 otherwise.

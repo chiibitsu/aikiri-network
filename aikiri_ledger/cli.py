@@ -535,7 +535,10 @@ def _seal(a, L: Ledger) -> int:
         if had != kind:
             raise SystemExit(f"refused: this file is already sealed as {had} in block {blk.index}; "
                              f"one file is one document")
-        facts = sealing.sealed_facts(L, blk)
+        try:
+            facts = sealing.sealed_facts(L, blk)
+        except SchemaError as e:
+            raise SystemExit(f"refused: {e}")
         print(f"{document} {sha} is sealed: block {facts.index} ({facts.timestamp})")
         print(f"  Base  {facts.base_tx or 'not anchored yet'}")
         print(f"  check {sealing.verify_url(sha)}")
