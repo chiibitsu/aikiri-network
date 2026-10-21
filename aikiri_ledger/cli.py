@@ -174,8 +174,6 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "seal":
             s.add_argument("document", choices=sorted(sealing.DOCUMENTS))
         s.add_argument("record_id"); s.add_argument("sha256")
-        s.add_argument("--out", default=None, help="where the request goes "
-                       "(default: <ledger>/requests/next.json)")
         s.add_argument("--report", default=None, metavar="https://APP",
                        help=f"the app to tell once sealed (default: ${sealing.URL_ENV}); "
                             f"bearer from ${sealing.SECRET_ENV}")
@@ -582,7 +580,9 @@ def _seal(a, L: Ledger) -> int:
     payload = Request.unsigned(index=head.index + 1, prev_hash=head.hash,
                                roots=[{"kind": kind, "sha256": sha}],
                                validator=trust.validator or head.validator, nonce=new_nonce())
-    out = Path(a.out) if a.out else L.requests_dir / "next.json"
+    # Always here: block.yml runs on ledger/requests/*.json and nowhere else, and only
+    # a request here is seen by the next run of this line.
+    out = L.requests_dir / "next.json"
     if out.exists():
         raise SystemExit(f"refused: {out} exists; nothing overwritten")
     out.parent.mkdir(parents=True, exist_ok=True)

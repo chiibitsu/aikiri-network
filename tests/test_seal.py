@@ -327,3 +327,13 @@ def test_only_a_proof_of_this_block_is_sent(world, sk, mac, monkeypatch, tmp_pat
     assert rc == 0 and len(bodies) == 1
     assert "ots_proof" not in bodies[0]
     assert "not for the app" not in json.dumps(bodies)
+
+
+def test_the_request_goes_only_where_block_yml_looks(world, tmp_path):
+    """block.yml runs on ledger/requests/*.json only: a request elsewhere would never be sealed."""
+    L, trust, tf = world
+    with pytest.raises(SystemExit):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE, "--out", str(tmp_path / "elsewhere.json"))
+    assert not (tmp_path / "elsewhere.json").exists()
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE) == 0
+    assert [p.name for p in L.requests_dir.glob("*.json")] == ["next.json"]
