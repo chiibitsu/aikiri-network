@@ -497,3 +497,19 @@ def test_seal_push_finishes_a_request_committed_by_a_failed_push(checkout, mac, 
     monkeypatch.setattr(cli, "_git", real)
     assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
     assert _git(remote, "log", "-1", "--format=%s", "main").strip() == "Request block 1"
+
+
+def test_seal_push_sends_only_the_current_branch_under_push_default_matching(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    _git(repo, "branch", "other")
+    _git(repo, "push", "-q", "origin", "other")
+    _git(repo, "checkout", "-q", "other")
+    (repo / "notes.txt").write_text("private")
+    _git(repo, "add", "notes.txt")
+    _git(repo, "commit", "-q", "-m", "unpublished, other branch")
+    _git(repo, "checkout", "-q", "main")
+    _git(repo, "config", "push.default", "matching")
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
+    assert _git(remote, "log", "-1", "--format=%s", "main").strip() == "Request block 1"
+    assert _git(remote, "rev-list", "--count", "other").strip() == "1"

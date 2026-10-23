@@ -589,7 +589,13 @@ def _push_request(path: Path, device: str, keyfile, ledger: Ledger) -> int:
         c = _git(root, "commit", "-m", f"Request block {index}", "--", rel)
         if c.returncode:
             raise SystemExit(f"not pushed: git commit failed: {c.stderr.strip()[:300]}")
-    p = _git(root, "push")
+    # Named, never a bare push: push.default=matching would send every branch.
+    head = _git(root, "symbolic-ref", "-q", "HEAD").stdout.strip()
+    up = _git(root, "for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)", head)
+    remote, _, ref = up.stdout.strip().partition("\t")
+    if not (remote and ref):
+        raise SystemExit("not pushed: the branch has no upstream")
+    p = _git(root, "push", remote, f"HEAD:{ref}")
     if p.returncode:
         raise SystemExit(f"not pushed: git push failed: {p.stderr.strip()[:300]}")
     print("pushed. The block run waits for your approval in GitHub; once the block is written "
