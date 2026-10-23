@@ -53,6 +53,7 @@ jobs:
           BASE_PRIVATE_KEY: ${{ secrets.BASE_PRIVATE_KEY }}
         run: aikiri-ledger witness "$INDEX"
       - name: commit the block and its proofs
+        id: commit
         run: |
           B=$(printf "%06d" "$INDEX")
           HASH=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['hash'])" "ledger/blocks/$B.json")
@@ -77,3 +78,12 @@ jobs:
           git push origin HEAD:main
       - name: verify
         run: aikiri-ledger --trust trust.json verify --require local
+      # The app learns the seal by fingerprint (the ledger holds no record id). Runs once the
+      # block is on main, even when verify above is red; a failed report turns this run red
+      # (alerts.yml tells her) and the line from the chat, run again, reports by hand.
+      - name: tell the app about any client document this block seals
+        if: ${{ !cancelled() && steps.commit.outcome == 'success' }}
+        env:
+          AIKIRI_SEAL_URL: ${{ vars.AIKIRI_SEAL_URL }}
+          AIKIRI_SEAL_SECRET: ${{ secrets.AIKIRI_SEAL_SECRET }}
+        run: aikiri-ledger report-block "$INDEX"
