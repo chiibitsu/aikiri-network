@@ -7,6 +7,12 @@
   enroll                    register an approval device in a trust file
   request <path>            vault side: the payload a device is asked to approve
   check-request <path>      verify a sealed request before it is pushed
+  seal <document> <id> <sha256>
+                            a client document (agreement, invoice) by its hash:
+                            request it, or once it is in a block, report it to
+                            the app (--report or AIKIRI_SEAL_URL). See docs/sealing.md
+  seal-acceptance <id> <sha256>
+                            the same as `seal agreement`
   block                     write the block a sealed request approves
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
@@ -40,6 +46,7 @@ from .chain import (Ledger, VALIDATOR_KEY_ENV, key_from_env, load_key, new_key, 
                     sha256_file)
 from .errors import SchemaError, TrustError
 from .request import Request, new_nonce, parse_roots
+from . import seal as sealing
 from . import softkey
 from .trust import Trust
 from .verify import State, verify_all
@@ -161,6 +168,15 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("request"); r.add_argument("path")
     r.add_argument("--kind", default="journal"); r.add_argument("--out", default=None)
     sub.add_parser("check-request").add_argument("path")
+
+    for name in ("seal", "seal-acceptance"):
+        s = sub.add_parser(name)
+        if name == "seal":
+            s.add_argument("document", choices=sorted(sealing.DOCUMENTS))
+        s.add_argument("record_id"); s.add_argument("sha256")
+        s.add_argument("--report", default=None, metavar="https://APP",
+                       help=f"the app to tell once sealed (default: ${sealing.URL_ENV}); "
+                            f"bearer from ${sealing.SECRET_ENV}")
 
     b = sub.add_parser("block"); b.add_argument("--keyfile", default=DEFAULT_KEYFILE)
     b.add_argument("--request", default=None)
@@ -300,6 +316,9 @@ def main(argv=None):
               f"{req.roots[0]['sha256'][:16]}…")
         print(f"approval: {'ok, ' + req.approval['device'] if ok else 'REFUSED: ' + why}")
         return 0 if ok else 1
+
+    if a.cmd in ("seal", "seal-acceptance"):
+        return _seal(a, L)
 
     if a.cmd == "block":
         trust = _trust(a)
@@ -496,6 +515,82 @@ def main(argv=None):
              "optimizer": {"enabled": True, "runs": 200}, **cost}, indent=2) + "\n")
         print(f"wrote {cfg_path} and {L.root / 'deploy.json'}")
         return 0
+
+
+def _seal(a, L: Ledger) -> int:
+    """Request the document's block, or report the block that holds it. Never both,
+    and a repeat changes nothing: one fingerprint, one block, one request."""
+    document = getattr(a, "document", None) or "agreement"
+    try:
+        kind = sealing.kind_for(document)
+        rid = sealing.record_id(a.record_id)
+        sha = sealing.fingerprint(a.sha256)
+    except SchemaError as e:
+        raise SystemExit(f"refused: {e}")
+
+    blk, had = sealing.find(L, sha)
+    if blk is not None:
+        if had != kind:
+            raise SystemExit(f"refused: this file is already sealed as {had} in block {blk.index}; "
+                             f"one file is one document")
+        try:
+            facts = sealing.sealed_facts(L, blk)
+        except SchemaError as e:
+            raise SystemExit(f"refused: {e}")
+        print(f"{document} {sha} is sealed: block {facts.index} ({facts.timestamp})")
+        print(f"  Base  {facts.base_tx or 'not anchored yet'}")
+        print(f"  check {sealing.verify_url(sha)}")
+        app = a.report or os.environ.get(sealing.URL_ENV)
+        if not app:
+            print(f"not reported: pass --report https://<app> or set {sealing.URL_ENV}")
+            return 0
+        if not facts.base_tx:
+            raise SystemExit("not reported: the block has no Base receipt yet; pull and run this again")
+        secret = os.environ.get(sealing.SECRET_ENV)
+        if not secret:
+            raise SystemExit(f"not reported: set {sealing.SECRET_ENV} to the app's seal bearer")
+        try:
+            url = sealing.report_url(app)
+        except SchemaError as e:
+            raise SystemExit(f"not reported: {e}")
+        body = sealing.report_payload(rid, document, sha, facts)
+        status, text = sealing.post(url, secret, body)
+        said = re.sub(r"[^ -~]", "?", text)[:300]
+        print(f"reported to {url}: {status} {said}")
+        return 0 if 200 <= status < 300 else 1
+
+    try:
+        waiting = sealing.pending(_requests(L))
+    except SchemaError as e:
+        raise SystemExit(f"refused: {e}")
+    for p, root in waiting:
+        if root["sha256"] == sha:
+            if root["kind"] != kind:
+                raise SystemExit(f"refused: {p} already asks to seal this file as {root['kind']}")
+            print(f"{document} {sha} is already requested in {p}; nothing changed")
+            print("approve it if you have not, commit and push it; once the block is written, "
+                  "pull and run this line again to report it")
+            return 0
+    if waiting:
+        raise SystemExit(f"refused: {', '.join(str(p) for p, _ in waiting)} is waiting; one block, "
+                         f"one request. Push that one first, then run this again")
+
+    trust = _trust(a)
+    head = L.head()
+    payload = Request.unsigned(index=head.index + 1, prev_hash=head.hash,
+                               roots=[{"kind": kind, "sha256": sha}],
+                               validator=trust.validator or head.validator, nonce=new_nonce())
+    # Always here: block.yml runs on ledger/requests/*.json and nowhere else, and only
+    # a request here is seen by the next run of this line.
+    out = L.requests_dir / "next.json"
+    if out.exists():
+        raise SystemExit(f"refused: {out} exists; nothing overwritten")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(f"unsigned request for block {payload['index']} written to {out}: {kind} {sha}")
+    print(f"next: aikiri-ledger approve {out}, then commit and push it. Once the block is "
+          f"written, pull and run this line again to report it")
+    return 0
 
 
 if __name__ == "__main__":

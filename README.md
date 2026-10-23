@@ -31,6 +31,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `aikiri_ledger/chain.py` ~ block format, append-only store, sealed-request consumption
 - `aikiri_ledger/approval.py` ~ P-256 approval from a registered device
 - `aikiri_ledger/request.py` ~ the sealed request: one root, one nonce, consumed once
+- `aikiri_ledger/seal.py` ~ `seal <document> <id> <sha256>`: a client's agreement or invoice by its hash, then the report to the app; see `docs/sealing.md`
 - `aikiri_ledger/trust.py` ~ where the verifier's expectations come from
 - `aikiri_ledger/verify.py` ~ the four states
 - `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin proofs (`ots` stamps and upgrades them; verify reads them)
@@ -79,6 +80,14 @@ aikiri-ledger request ../aikiri-garden/03_human/journal/decision-journal.md \
 aikiri-ledger approve ledger/requests/next.json        # passphrase
 git add ledger/requests/next.json && git commit -m "Request block N" && git push
 ```
+
+## Sealing a client's document
+
+```
+aikiri-ledger seal invoice <record id> <sha256>     # also: agreement; seal-acceptance = seal agreement
+```
+
+Run the line the app posts once to write the request, approve and push it, then run it again after the block lands to report it to the app. The record id never reaches the ledger. Command and contract: `docs/sealing.md`.
 
 ## Run
 
