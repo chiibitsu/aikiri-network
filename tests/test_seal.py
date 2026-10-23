@@ -441,3 +441,33 @@ def test_seal_push_refuses_to_carry_other_staged_files(checkout, mac, monkeypatc
     with pytest.raises(SystemExit, match="other files are staged"):
         run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push")
     assert _git(remote, "rev-list", "--count", "main").strip() == "1"
+
+
+def test_seal_push_refuses_before_approving_when_other_files_are_staged(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    approved = []
+    monkeypatch.setattr(cli, "_approve", lambda *a, **k: approved.append(a))
+    (repo / "notes.txt").write_text("private")
+    _git(repo, "add", "notes.txt")
+    with pytest.raises(SystemExit, match="other files are staged"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push")
+    assert not approved
+    assert _git(repo, "diff", "--cached", "--name-only").split() == ["notes.txt"]
+
+
+def test_seal_push_pulls_first_so_the_next_document_is_not_refused(checkout, mac, monkeypatch, tmp_path):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
+    # block.yml's run, elsewhere: the request is consumed on main.
+    other = tmp_path / "runner"
+    _git(tmp_path, "clone", "-q", "-b", "main", str(remote), str(other))
+    _git(other, "config", "user.email", "t@example.test")
+    _git(other, "config", "user.name", "t")
+    _git(other, "rm", "-q", "ledger/requests/next.json")
+    _git(other, "commit", "-q", "-m", "block run")
+    _git(other, "push", "-q")
+    # The next paste on the Mac, without a manual pull.
+    assert run(L, tf, "seal", "agreement", RECORD, AGREEMENT, "--push") == 0
+    sealed = json.loads(_git(remote, "show", "main:ledger/requests/next.json"))
+    assert sealed["roots"] == [{"kind": "acceptance", "sha256": AGREEMENT}]

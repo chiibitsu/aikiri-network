@@ -538,21 +538,38 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
 
 
-def _push_request(path: Path, device: str, keyfile) -> int:
+def _checkout(ledger: Ledger, request: Path | None = None) -> tuple[Path, str]:
+    """The git checkout holding the ledger, and the request's path inside it. Refuses when
+    anything but that request is staged, before anything is approved, written or added."""
+    top = _git(ledger.root, "rev-parse", "--show-toplevel")
+    if top.returncode:
+        raise SystemExit(f"not pushed: {ledger.root} is not in a git checkout")
+    root = Path(top.stdout.strip())
+    rel = str((request or ledger.requests_dir / "next.json").resolve().relative_to(root.resolve()))
+    staged = _git(root, "diff", "--cached", "--name-only").stdout.split()
+    if [f for f in staged if f != rel]:
+        raise SystemExit("not pushed: other files are staged; commit or unstage them first")
+    return root, rel
+
+
+def _sync(ledger: Ledger) -> None:
+    """`seal --push` starts from what block.yml last wrote: the previous request is gone
+    and its block is in, so the next document is not refused as waiting."""
+    root, _ = _checkout(ledger)
+    p = _git(root, "pull", "--ff-only", "-q")
+    if p.returncode:
+        raise SystemExit(f"not pulled: git pull --ff-only failed: {p.stderr.strip()[:300]}")
+
+
+def _push_request(path: Path, device: str, keyfile, ledger: Ledger) -> int:
     """`seal --push`: approve the waiting request if it is not yet, then commit and push
     only that file. The passphrase stays hers; block.yml does the rest and reports."""
+    root, rel = _checkout(ledger, path)
     if "approval" not in loads_strict(path.read_text()):
         _approve(path, device, keyfile)
-    top = _git(path.parent, "rev-parse", "--show-toplevel")
-    if top.returncode:
-        raise SystemExit(f"not pushed: {path} is not in a git checkout")
-    root = Path(top.stdout.strip())
-    rel = str(path.resolve().relative_to(root.resolve()))
     if _git(root, "add", "--", rel).returncode:
         raise SystemExit(f"not pushed: git add {rel} failed")
     staged = _git(root, "diff", "--cached", "--name-only")
-    if staged.stdout.split() not in ([rel], []):
-        raise SystemExit("not pushed: other files are staged; commit or unstage them first")
     if staged.stdout.strip():
         index = loads_strict(path.read_text())["index"]
         c = _git(root, "commit", "-m", f"Request block {index}", "--", rel)
@@ -608,6 +625,8 @@ def _seal(a, L: Ledger) -> int:
     except SchemaError as e:
         raise SystemExit(f"refused: {e}")
 
+    if a.push:
+        _sync(L)
     blk, had = sealing.find(L, sha)
     if blk is not None:
         if had != kind:
@@ -648,7 +667,7 @@ def _seal(a, L: Ledger) -> int:
             if root["kind"] != kind:
                 raise SystemExit(f"refused: {p} already asks to seal this file as {root['kind']}")
             if a.push:
-                return _push_request(p, a.device, a.keyfile)
+                return _push_request(p, a.device, a.keyfile, L)
             print(f"{document} {sha} is already requested in {p}; nothing changed")
             print("approve it if you have not, commit and push it; once the block is written, "
                   "pull and run this line again to report it")
@@ -671,7 +690,7 @@ def _seal(a, L: Ledger) -> int:
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"unsigned request for block {payload['index']} written to {out}: {kind} {sha}")
     if a.push:
-        return _push_request(out, a.device, a.keyfile)
+        return _push_request(out, a.device, a.keyfile, L)
     print(f"next: aikiri-ledger approve {out}, then commit and push it. Once the block is "
           f"written, pull and run this line again to report it")
     return 0
