@@ -20,7 +20,7 @@ aikiri-ledger seal-acceptance <record id> <sha256>    # the older line; the same
 
 Run it with `--push` (the line the app posts carries it):
 
-1. It refuses if any other file is staged, then fast-forwards the checkout (`git pull --ff-only`) so the last block run's result is in. It writes the unsigned request to `ledger/requests/next.json`, shows what you are approving, asks the device key's passphrase, commits that one file ("Request block N") and pushes it.
+1. It refuses if any other file is staged or any other local commit is not on GitHub yet, then fast-forwards the checkout (`git pull --ff-only`) so the last block run's result is in. It writes the unsigned request to `ledger/requests/next.json`, shows what you are approving, asks the device key's passphrase, commits that one file ("Request block N") and pushes it.
 2. `block.yml` waits for your approval of the `ledger` environment in GitHub (Telegram says so), then writes the block, anchors it on Base, stamps it on Bitcoin, and **reports the seal to the app itself** (`report-block`, below).
 
 That is the whole of it: one paste, one passphrase, one approval. Without `--push` the line only writes the request, as before: approve, commit and push it by hand, and once the block is written, `git pull` and run the line again to report it from the machine.

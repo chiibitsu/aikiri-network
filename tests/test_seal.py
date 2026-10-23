@@ -471,3 +471,29 @@ def test_seal_push_pulls_first_so_the_next_document_is_not_refused(checkout, mac
     assert run(L, tf, "seal", "agreement", RECORD, AGREEMENT, "--push") == 0
     sealed = json.loads(_git(remote, "show", "main:ledger/requests/next.json"))
     assert sealed["roots"] == [{"kind": "acceptance", "sha256": AGREEMENT}]
+
+
+def test_seal_push_refuses_to_publish_other_local_commits(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    approved = []
+    monkeypatch.setattr(cli, "_approve", lambda *a, **k: approved.append(a))
+    (repo / "notes.txt").write_text("private")
+    _git(repo, "add", "notes.txt")
+    _git(repo, "commit", "-q", "-m", "local work")
+    with pytest.raises(SystemExit, match="not on the remote yet"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push")
+    assert not approved
+    assert _git(remote, "rev-list", "--count", "main").strip() == "1"
+
+
+def test_seal_push_finishes_a_request_committed_by_a_failed_push(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    real = cli._git
+    monkeypatch.setattr(cli, "_git", lambda cwd, *a: real(cwd, "push", "--dry-run", "-q", "nowhere")
+                        if a[:1] == ("push",) else real(cwd, *a))
+    with pytest.raises(SystemExit, match="git push failed"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push")
+    monkeypatch.setattr(cli, "_git", real)
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
+    assert _git(remote, "log", "-1", "--format=%s", "main").strip() == "Request block 1"

@@ -561,10 +561,24 @@ def _sync(ledger: Ledger) -> None:
         raise SystemExit(f"not pulled: git pull --ff-only failed: {p.stderr.strip()[:300]}")
 
 
+def _unpublished_only(root: Path, rel: str) -> None:
+    """A plain `git push` sends every local commit, so refuse unless each one not yet on
+    the upstream changes only the request (a request committed by an earlier, failed push)."""
+    ahead = _git(root, "rev-list", "@{u}..HEAD")
+    if ahead.returncode:
+        raise SystemExit(f"not pushed: the branch has no upstream: {ahead.stderr.strip()[:300]}")
+    for c in ahead.stdout.split():
+        files = _git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", c).stdout.split()
+        if files != [rel]:
+            raise SystemExit(f"not pushed: local commit {c[:7]} is not on the remote yet; "
+                             f"push or drop it first")
+
+
 def _push_request(path: Path, device: str, keyfile, ledger: Ledger) -> int:
     """`seal --push`: approve the waiting request if it is not yet, then commit and push
     only that file. The passphrase stays hers; block.yml does the rest and reports."""
     root, rel = _checkout(ledger, path)
+    _unpublished_only(root, rel)
     if "approval" not in loads_strict(path.read_text()):
         _approve(path, device, keyfile)
     if _git(root, "add", "--", rel).returncode:
