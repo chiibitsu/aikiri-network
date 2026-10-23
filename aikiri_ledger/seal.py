@@ -37,6 +37,7 @@ from .request import parse_roots
 
 # document -> root kind. Add a document here, and its kind to ROOT_KINDS.
 DOCUMENTS = {"agreement": "acceptance", "invoice": "invoice"}
+KIND_DOCUMENT = {kind: doc for doc, kind in DOCUMENTS.items()}
 RECORD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 NETWORK_CHECK = "https://www.chiibitsu.com/network/check"
 SEAL_PATH = "/api/seal"
@@ -137,11 +138,15 @@ def verify_url(sha256: str) -> str:
     return f"{NETWORK_CHECK}?sha={sha256}"
 
 
-def report_payload(rid: str, document: str, sha256: str, s: Sealed) -> dict:
+def report_payload(rid: str | None, document: str, sha256: str, s: Sealed) -> dict:
     """What POST /api/seal receives. `document` and `sha256` let the app file the
-    seal under the right document and refuse one that is not the file it holds."""
-    body = {"id": rid, "document": document, "sha256": sha256, "block": s.index,
+    seal under the right document and refuse one that is not the file it holds.
+    With no record id (block.yml's report: the ledger never holds one) the app finds
+    the record by the fingerprint itself."""
+    body = {"document": document, "sha256": sha256, "block": s.index,
             "base_tx": s.base_tx, "verify_url": verify_url(sha256)}
+    if rid is not None:
+        body = {"id": rid, **body}
     if s.ots_proof:
         body["ots_proof"] = s.ots_proof
     return body

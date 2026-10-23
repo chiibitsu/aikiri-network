@@ -87,7 +87,7 @@ git add ledger/requests/next.json && git commit -m "Request block N" && git push
 aikiri-ledger seal invoice <record id> <sha256>     # also: agreement; seal-acceptance = seal agreement
 ```
 
-Run the line the app posts once to write the request, approve and push it, then run it again after the block lands to report it to the app. The record id never reaches the ledger. Command and contract: `docs/sealing.md`.
+The line the app posts ends in `--push`: it writes the request, asks your passphrase, commits and pushes it. After your approval in GitHub, `block.yml` writes the block and reports it to the app by fingerprint (`report-block`). The record id never reaches the ledger. Command and contract: `docs/sealing.md`.
 
 ## Run
 

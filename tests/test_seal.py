@@ -57,7 +57,7 @@ class App:
     def __call__(self, req, timeout):
         body = json.loads(req.data)
         self.calls.append({"url": req.full_url, "auth": req.get_header("Authorization"), "body": body})
-        key = (body["id"], body["document"])
+        key = (body.get("id"), body["document"], body["sha256"])
         already = key in self.seen
         self.seen.add(key)
         app = self
@@ -337,3 +337,107 @@ def test_the_request_goes_only_where_block_yml_looks(world, tmp_path):
     assert not (tmp_path / "elsewhere.json").exists()
     assert run(L, tf, "seal", "invoice", RECORD, INVOICE) == 0
     assert [p.name for p in L.requests_dir.glob("*.json")] == ["next.json"]
+
+
+# --- block.yml's report, by fingerprint alone, and `seal --push` ---
+
+def test_block_yml_reports_by_fingerprint_without_the_record_id(world, sk, mac, monkeypatch, capsys):
+    L, trust, tf = world
+    app = App()
+    monkeypatch.setattr(sealing, "_open", app)
+    assert run(L, tf, "seal", "agreement", RECORD, AGREEMENT) == 0
+    blk = land(L, sk, mac, 1)
+
+    assert run(L, tf, "report-block", "1") == 0                         # not configured: nothing sent
+    assert "not reported" in capsys.readouterr().out and not app.calls
+
+    monkeypatch.setenv(sealing.URL_ENV, APP)
+    monkeypatch.setenv(sealing.SECRET_ENV, "test-bearer")
+    assert run(L, tf, "report-block", "1") == 0
+    (call,) = app.calls
+    assert call["auth"] == "Bearer test-bearer" and call["url"] == APP + "/api/seal"
+    assert call["body"] == {"document": "agreement", "sha256": AGREEMENT, "block": 1,
+                            "base_tx": "0x" + "01" * 32,
+                            "verify_url": f"{sealing.NETWORK_CHECK}?sha={AGREEMENT}",
+                            "ots_proof": base64.b64encode(ots_of(blk.hash)).decode()}
+    assert "id" not in call["body"]
+    assert "test-bearer" not in capsys.readouterr().out
+
+    monkeypatch.setattr(sealing, "_open", App(status=500))
+    assert run(L, tf, "report-block", "1") == 1                         # a refused report is red
+    with pytest.raises(SystemExit, match="no block 9"):
+        run(L, tf, "report-block", "9")
+
+
+def test_a_block_with_no_client_document_reports_nothing(world, sk, mac, monkeypatch, capsys):
+    L, trust, tf = world
+    app = App()
+    monkeypatch.setattr(sealing, "_open", app)
+    monkeypatch.setenv(sealing.URL_ENV, APP)
+    monkeypatch.setenv(sealing.SECRET_ENV, "test-bearer")
+    payload = Request.unsigned(index=1, prev_hash=L.head().hash, roots=[{"kind": "journal", "sha256": "c3" * 32}],
+                               validator=trust.validator, nonce="d4" * 32)
+    (L.requests_dir).mkdir(parents=True, exist_ok=True)
+    (L.requests_dir / "next.json").write_text(json.dumps(payload))
+    land(L, sk, mac, 1)
+    assert run(L, tf, "report-block", "1") == 0
+    assert "nothing to report" in capsys.readouterr().out and not app.calls
+
+
+def _git(cwd, *args):
+    import subprocess
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+@pytest.fixture
+def checkout(world, tmp_path):
+    """The ledger inside a git checkout with a remote, as on the sealing Mac."""
+    L, trust, tf = world
+    remote = tmp_path / "remote.git"
+    _git(tmp_path, "init", "-q", "--bare", str(remote))
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.test")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "add", "ledger")
+    _git(tmp_path, "commit", "-q", "-m", "genesis")
+    _git(tmp_path, "remote", "add", "origin", str(remote))
+    _git(tmp_path, "push", "-q", "-u", "origin", "main")
+    return L, tf, tmp_path, remote
+
+
+def fake_approve(mac):
+    def approve(path, device, keyfile, out=None):
+        payload = json.loads(path.read_text())
+        req = Request.build(index=payload["index"], prev_hash=payload["prev_hash"], roots=payload["roots"],
+                            nonce=payload["nonce"], validator=payload["validator"], approver=mac)
+        path.write_text(req.to_json())
+        return req
+    return approve
+
+
+def test_seal_push_approves_commits_and_pushes_only_the_request(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
+    pushed = _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split()
+    assert pushed[:3] == ["Request", "block", "1"]
+    assert pushed[3:] == ["ledger/requests/next.json"]
+    sealed = json.loads(_git(remote, "show", "main:ledger/requests/next.json"))
+    assert sealed["approval"]["device"] == "mac" and sealed["roots"] == [{"kind": "invoice", "sha256": INVOICE}]
+    assert RECORD not in _git(remote, "show", "main:ledger/requests/next.json")
+
+    # The same line again: already approved and pushed, nothing new to commit, still exits 0.
+    assert run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push") == 0
+    assert _git(remote, "rev-list", "--count", "main").strip() == "2"
+
+
+def test_seal_push_refuses_to_carry_other_staged_files(checkout, mac, monkeypatch):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    (repo / "notes.txt").write_text("private")
+    _git(repo, "add", "notes.txt")
+    with pytest.raises(SystemExit, match="other files are staged"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE, "--push")
+    assert _git(remote, "rev-list", "--count", "main").strip() == "1"

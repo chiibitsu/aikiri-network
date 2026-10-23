@@ -13,6 +13,10 @@
                             the app (--report or AIKIRI_SEAL_URL). See docs/sealing.md
   seal-acceptance <id> <sha256>
                             the same as `seal agreement`
+                            (--push: also approve it, commit and push it)
+  report-block <index>      tell the app about the client documents a block seals,
+                            by fingerprint alone (block.yml runs it; AIKIRI_SEAL_URL,
+                            AIKIRI_SEAL_SECRET)
   block                     write the block a sealed request approves
   witness <index>           anchor on Base, stamp on Bitcoin (a failed stamp waits for `stamp`)
   reconcile                 finish anchors whose receipt was never seen
@@ -177,6 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
         s.add_argument("--report", default=None, metavar="https://APP",
                        help=f"the app to tell once sealed (default: ${sealing.URL_ENV}); "
                             f"bearer from ${sealing.SECRET_ENV}")
+        s.add_argument("--push", action="store_true",
+                       help="also approve the request (passphrase), commit it and push it")
+        s.add_argument("--device", default="mac"); s.add_argument("--keyfile", default=None)
+    sub.add_parser("report-block").add_argument("index", type=int)
 
     b = sub.add_parser("block"); b.add_argument("--keyfile", default=DEFAULT_KEYFILE)
     b.add_argument("--request", default=None)
@@ -245,31 +253,7 @@ def main(argv=None):
         return 0
 
     if a.cmd == "approve":
-        import getpass
-        kf = Path(a.keyfile) if a.keyfile else softkey.default_path(a.device)
-        if not kf.exists():
-            raise SystemExit(f"no approval key at {kf}; run `aikiri-ledger approve-keygen`")
-        payload = loads_strict(Path(a.path).read_text())
-        try:
-            roots = parse_roots(payload["roots"], "roots")
-            index, prev_hash = payload["index"], payload["prev_hash"]
-            nonce, validator = payload["nonce"], payload["validator"]
-        except (KeyError, SchemaError) as e:
-            raise SystemExit(f"{a.path} is not a request payload: {e}")
-
-        # Show her what she is approving, before the passphrase.
-        print(f"Approve block {index} of the Aikiri Network")
-        print(f"  previous   {prev_hash}")
-        print(f"  {roots[0]['kind']:<10} {roots[0]['sha256']}")
-        print(f"  nonce      {nonce}")
-        print(f"  validator  {validator}")
-        print()
-        approver = softkey.load(kf, getpass.getpass("passphrase: "))
-        req = Request.build(index=index, prev_hash=prev_hash, roots=roots, nonce=nonce,
-                            validator=validator, approver=approver)
-        out = Path(a.out or a.path)
-        out.write_text(req.to_json())
-        print(f"approved by {approver.device}; sealed request written to {out}")
+        _approve(Path(a.path), a.device, a.keyfile, Path(a.out) if a.out else None)
         return 0
 
     if a.cmd == "init":
@@ -319,6 +303,9 @@ def main(argv=None):
 
     if a.cmd in ("seal", "seal-acceptance"):
         return _seal(a, L)
+
+    if a.cmd == "report-block":
+        return _report_block(a, L)
 
     if a.cmd == "block":
         trust = _trust(a)
@@ -517,6 +504,99 @@ def main(argv=None):
         return 0
 
 
+def _approve(path: Path, device: str, keyfile, out: Path | None = None) -> Request:
+    """Show the request, ask the device key's passphrase, write the sealed request."""
+    import getpass
+    kf = Path(keyfile) if keyfile else softkey.default_path(device)
+    if not kf.exists():
+        raise SystemExit(f"no approval key at {kf}; run `aikiri-ledger approve-keygen`")
+    payload = loads_strict(path.read_text())
+    try:
+        roots = parse_roots(payload["roots"], "roots")
+        index, prev_hash = payload["index"], payload["prev_hash"]
+        nonce, validator = payload["nonce"], payload["validator"]
+    except (KeyError, SchemaError) as e:
+        raise SystemExit(f"{path} is not a request payload: {e}")
+
+    # Show her what she is approving, before the passphrase.
+    print(f"Approve block {index} of the Aikiri Network")
+    print(f"  previous   {prev_hash}")
+    print(f"  {roots[0]['kind']:<10} {roots[0]['sha256']}")
+    print(f"  nonce      {nonce}")
+    print(f"  validator  {validator}")
+    print()
+    approver = softkey.load(kf, getpass.getpass("passphrase: "))
+    req = Request.build(index=index, prev_hash=prev_hash, roots=roots, nonce=nonce,
+                        validator=validator, approver=approver)
+    out = out or path
+    out.write_text(req.to_json())
+    print(f"approved by {approver.device}; sealed request written to {out}")
+    return req
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+
+
+def _push_request(path: Path, device: str, keyfile) -> int:
+    """`seal --push`: approve the waiting request if it is not yet, then commit and push
+    only that file. The passphrase stays hers; block.yml does the rest and reports."""
+    if "approval" not in loads_strict(path.read_text()):
+        _approve(path, device, keyfile)
+    top = _git(path.parent, "rev-parse", "--show-toplevel")
+    if top.returncode:
+        raise SystemExit(f"not pushed: {path} is not in a git checkout")
+    root = Path(top.stdout.strip())
+    rel = str(path.resolve().relative_to(root.resolve()))
+    if _git(root, "add", "--", rel).returncode:
+        raise SystemExit(f"not pushed: git add {rel} failed")
+    staged = _git(root, "diff", "--cached", "--name-only")
+    if staged.stdout.split() not in ([rel], []):
+        raise SystemExit("not pushed: other files are staged; commit or unstage them first")
+    if staged.stdout.strip():
+        index = loads_strict(path.read_text())["index"]
+        c = _git(root, "commit", "-m", f"Request block {index}", "--", rel)
+        if c.returncode:
+            raise SystemExit(f"not pushed: git commit failed: {c.stderr.strip()[:300]}")
+    p = _git(root, "push")
+    if p.returncode:
+        raise SystemExit(f"not pushed: git push failed: {p.stderr.strip()[:300]}")
+    print("pushed. The block run waits for your approval in GitHub; once the block is written "
+          "it tells the app itself")
+    return 0
+
+
+def _report_block(a, L: Ledger) -> int:
+    """block.yml's last word: for each client document the block seals, tell the app by
+    its fingerprint. The record id was never here to send."""
+    blk = next((b for b in L.blocks() if b.index == a.index), None)
+    if blk is None:
+        raise SystemExit(f"no block {a.index}")
+    docs = [(sealing.KIND_DOCUMENT[r["kind"]], r["sha256"]) for r in blk.roots
+            if r.get("kind") in sealing.KIND_DOCUMENT]
+    if not docs:
+        print(f"block {blk.index} seals no client document; nothing to report")
+        return 0
+    app, secret = os.environ.get(sealing.URL_ENV), os.environ.get(sealing.SECRET_ENV)
+    if not app or not secret:
+        print(f"not reported: {sealing.URL_ENV} and {sealing.SECRET_ENV} are not both set")
+        return 0
+    try:
+        facts = sealing.sealed_facts(L, blk)
+        url = sealing.report_url(app)
+    except SchemaError as e:
+        raise SystemExit(f"not reported: {e}")
+    if not facts.base_tx:
+        raise SystemExit("not reported: the block has no Base receipt yet")
+    worst = 0
+    for document, sha in docs:
+        status, text = sealing.post(url, secret, sealing.report_payload(None, document, sha, facts))
+        said = re.sub(r"[^ -~]", "?", text)[:300]
+        print(f"{document} {sha}: reported to {url}: {status} {said}")
+        worst = worst or (0 if 200 <= status < 300 else 1)
+    return worst
+
+
 def _seal(a, L: Ledger) -> int:
     """Request the document's block, or report the block that holds it. Never both,
     and a repeat changes nothing: one fingerprint, one block, one request."""
@@ -567,6 +647,8 @@ def _seal(a, L: Ledger) -> int:
         if root["sha256"] == sha:
             if root["kind"] != kind:
                 raise SystemExit(f"refused: {p} already asks to seal this file as {root['kind']}")
+            if a.push:
+                return _push_request(p, a.device, a.keyfile)
             print(f"{document} {sha} is already requested in {p}; nothing changed")
             print("approve it if you have not, commit and push it; once the block is written, "
                   "pull and run this line again to report it")
@@ -588,6 +670,8 @@ def _seal(a, L: Ledger) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"unsigned request for block {payload['index']} written to {out}: {kind} {sha}")
+    if a.push:
+        return _push_request(out, a.device, a.keyfile)
     print(f"next: aikiri-ledger approve {out}, then commit and push it. Once the block is "
           f"written, pull and run this line again to report it")
     return 0
