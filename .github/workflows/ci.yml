@@ -31,3 +31,18 @@ jobs:
         # Compilation only. A runner has no signing identity and no Secure
         # Enclave, so neither signing nor key creation can be tested here;
         # both are exercised on a real Mac by tools/approve/build.sh.
+  saved-headers:
+    # verify takes a saved Bitcoin header that carries the proof and Bitcoin's work;
+    # faking one costs about half a block's mining, and it reaches main only through
+    # a PR. This looks each one up by its height from both public sources, so a faked
+    # one is red on its PR (nightly's own PRs get no CI; red then shows on main once
+    # merged). A source that cannot answer is red too: not checked.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[bitcoin]"
+      - run: aikiri-ledger check-headers
