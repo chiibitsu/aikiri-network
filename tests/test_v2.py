@@ -1778,7 +1778,8 @@ def test_every_workflow_installs_only_what_the_lock_pins():
                 f"{where}: the first install must be the lock, by hash: {installs[0]}"
             frozen = set()
             for step in job["steps"]:
-                frozen |= set(re.findall(r"pip freeze\s*>\s*(\S+)", step.get("run", "")))
+                frozen |= {shlex.split(m)[0] for m in
+                           re.findall(r"pip freeze\s*>\s*(\S+)", step.get("run", ""))}
             for cmd in installs[1:]:
                 args = shlex.split(cmd, comments=True)
                 held = "-c" in args and args[args.index("-c") + 1] in frozen
@@ -1794,7 +1795,7 @@ def test_ci_installs_the_test_tools_pyproject_names():
     import re, shlex
     import yaml
     pyproject = Path("pyproject.toml").read_text()
-    dev = re.search(r"^dev = \[(.*?)\]", pyproject, re.M).group(1)
+    dev = re.search(r"^dev = \[(.*)\]\s*(?:#.*)?$", pyproject, re.M).group(1)
     wanted = set(re.findall(r'"([^"]+)"', dev))
     steps = yaml.safe_load((Path(".github/workflows") / "ci.yml").read_text())["jobs"]["test"]["steps"]
     held = [args for s in steps for c in _pip_installs(s.get("run", ""))
