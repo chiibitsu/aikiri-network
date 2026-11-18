@@ -1780,17 +1780,46 @@ def _install_problems(steps, job=None, workflow=None):
     (or a PIP_/UV_ setting, or the freeze file) must be one of `_INSTALLS` exactly
     (with `<dev>` as pyproject's dev extra, spelled as there), in that order, starting
     with the lock. A step that installs sets none of `_STEP_SETTINGS`, and the job and
-    workflow set no env: and no defaults:, which would reach it unseen. No step sets a
-    shell other than bash or sh. What this cannot see: an install inside a program a step
+    workflow set no env:, defaults: or container:, which would reach it unseen. No step,
+    job or workflow sets a shell other than bash or sh, and an installer word anywhere in
+    the workflow outside a step's run: lines (an env value, a container, an input) is
+    refused. What this cannot see: an install inside a program a step
     calls (a script, an action), or an installer's name the shell builds at run time
     (a variable, split quotes); those stay a reviewer's to read."""
     import re
     allowed = [i.replace("<dev>", _dev_tools()) for i in _INSTALLS]
     problems, seen = [], []
+
+    def strings(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from strings(k, path)
+                yield from strings(v, path + [k])
+        elif isinstance(node, list):
+            for v in node:
+                yield from strings(v, path)
+        elif isinstance(node, str):
+            yield path, node
+
+    # Anywhere else in the workflow (env values, defaults, a container's env or options,
+    # a with: input, a key), an installer word is refused outright: only a step's run:
+    # lines, read below, may hold one.
+    outside = {k: v for k, v in (workflow or {}).items() if k != "jobs"}
+    rest_of_job = {k: v for k, v in (job or {}).items() if k != "steps"}
+    for step in steps:
+        for path, text in strings({k: v for k, v in step.items() if k != "run"}, ["step"]):
+            if re.search(_INSTALLER, text):
+                problems.append(f"an installer word outside a run: line, under {path}: {text}")
+    for path, text in strings([outside, rest_of_job], []):
+        if re.search(_INSTALLER, text):
+            problems.append(f"an installer word outside a run: line, under {path}: {text}")
     for where, holder in (("workflow", workflow or {}), ("job", job or {})):
-        if holder.get("env") or holder.get("defaults"):
+        if holder.get("env") or holder.get("defaults") or holder.get("container"):
             if any(re.search(_INSTALLER, (s.get("run") or "")) for s in steps):
-                problems.append(f"the {where} sets env or defaults, which reach its installs")
+                problems.append(f"the {where} sets env, defaults or a container, which reach its installs")
+        shell = ((holder.get("defaults") or {}).get("run") or {}).get("shell", "bash")
+        if shell not in ("bash", "sh"):
+            problems.append(f"the {where} runs a shell this test cannot read: {shell}")
     for step in steps:
         if step.get("shell", "bash") not in ("bash", "sh"):
             problems.append(f"a step runs a shell this test cannot read: {step['shell']}")
@@ -1798,7 +1827,8 @@ def _install_problems(steps, job=None, workflow=None):
         lines = [" ".join(line.split()) for line in run.splitlines()]
         touches = [line for line in lines if re.search(_INSTALLER, line)]
         if touches and _STEP_SETTINGS & set(step) - ({"shell"} if step.get("shell") in ("bash", "sh") else set()):
-            problems.append(f"a step that installs sets {sorted(_STEP_SETTINGS & set(step))}")
+            extra = _STEP_SETTINGS & set(step) - ({"shell"} if step.get("shell") in ("bash", "sh") else set())
+            problems.append(f"a step that installs sets {sorted(extra)}")
         for line in touches:
             if line not in allowed:
                 problems.append(f"not an allowed install line: {line}")
@@ -1887,6 +1917,13 @@ def test_the_install_guard_refuses_what_reaches_a_step_from_outside_it():
     assert _install_problems(steps, workflow={"env": {"PIP_REQUIREMENT": "o.txt"}})
     assert _install_problems([{"run": _LOCK},
                               {"shell": "python -m pip install -r {0}", "run": "opentimestamps==0.5.0"}])
+    odd = [{"run": "opentimestamps==0.5.0"}]
+    assert _install_problems(odd, job={"defaults": {"run": {"shell": "pip install -r {0}"}}})
+    assert _install_problems(odd, workflow={"defaults": {"run": {"shell": "pip install -r {0}"}}})
+    assert _install_problems(steps, job={"container": {"image": "python:3.12",
+                                                       "env": {"PIP_REQUIREMENT": "o.txt"}}})
+    assert _install_problems([{"env": {"X": "PIP_REQUIREMENT=o.txt"}, "run": 'echo "$X" >> "$GITHUB_ENV"'},
+                              *steps])
 
 
 @pytest.mark.parametrize("run", [
