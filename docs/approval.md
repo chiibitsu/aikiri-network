@@ -18,7 +18,8 @@ So consent is a separate factor, held somewhere the runner cannot reach.
 **Today:** one P-256 key in a passphrase-encrypted file on Chii's Mac, made
 with `aikiri-ledger approve-keygen`. It is never in CI and never in the
 repository, and it signs only when she types the passphrase. `trust.json`
-registers one device, `mac`. So the Mac is a single point of failure.
+registers one device, `mac`. So that one key is a single point of failure, not
+the Mac: a backup of the file, with the passphrase, approves from any machine.
 
 **The design it falls short of:** a non-exportable key inside the Secure Enclave
 of her Mac and of her iPhone, each signature gated by Touch ID or Face ID, both
@@ -85,9 +86,9 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 
 ## Losing a device
 
-**Today, with one device registered,** losing the key file or its passphrase is
-the "every device" case below: the chain freezes. `docs/setup.md` §6 says to back
-up the file and remember the passphrase.
+**Today, with one device registered,** losing every copy of the key file, or the
+passphrase, is the "every device" case below: the chain freezes. `docs/setup.md`
+§6 says to back up the file and remember the passphrase.
 
 **One of several**, once a second device is enrolled. Another approves; nothing
 stops. But the lost device's key is still registered and still valid, and
