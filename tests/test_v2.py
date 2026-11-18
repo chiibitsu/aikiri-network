@@ -1759,32 +1759,46 @@ _INSTALLS = [
     "pip install --no-deps -e .",                           # this package, nothing else
     "pip check",
 ]
-_INSTALLER = r"(?<![\w.-])(?:pip[0-9.]*|-mpip|pip-sync|pipx|uv|poetry|conda|mamba|easy_install|setup\.py)(?![\w-])|\b(?:PIP|UV)_[A-Z_]+"
+_INSTALLER = (r"(?<![\w.-])(?:pip[0-9.]*|-mpip|pip-sync|pipx|pipenv|uv|poetry|pdm|hatch|rye|conda"
+              r"|mamba|easy_install|setup\.py)(?![\w-])|\b(?:PIP|UV)_[A-Z_]+|locked")
+# A step that installs may set none of these: each changes what its script does or
+# installs without its text saying so (a custom shell even makes the script a file
+# the shell is given, `pip install -r {0}`).
+_STEP_SETTINGS = {"env", "working-directory", "shell", "if", "continue-on-error"}
 
 
 def _dev_tools():
     import re
     dev = re.search(r"^dev = \[(.*)\]\s*(?:#.*)?$", Path("pyproject.toml").read_text(), re.M)
-    return " ".join(f'"{t}"' if "[" in t else t for t in re.findall(r'"([^"]+)"', dev.group(1)))
+    return " ".join(t if re.fullmatch(r"[\w.-]+", t) else f'"{t}"'
+                    for t in re.findall(r'"([^"]+)"', dev.group(1)))
 
 
-def _install_problems(steps):
-    """What in one job's steps could install something the lock does not pin. Every line
-    of a step's script that names an installer, or a PIP_/UV_ setting, must be one of
-    `_INSTALLS` exactly (with `<dev>` as pyproject's dev extra, spelled as there), in
-    that order, starting with the lock. The freeze file appears on no other line, and a
-    step that installs takes no env: and no working-directory:. What this cannot see:
-    an install inside a program a step calls (a script, an action); that stays a
-    reviewer's to read."""
+def _install_problems(steps, job=None, workflow=None):
+    """What in one job could install something the lock does not pin. Every line of a
+    step's script that names an installer by one of the literal words in `_INSTALLER`
+    (or a PIP_/UV_ setting, or the freeze file) must be one of `_INSTALLS` exactly
+    (with `<dev>` as pyproject's dev extra, spelled as there), in that order, starting
+    with the lock. A step that installs sets none of `_STEP_SETTINGS`, and the job and
+    workflow set no env: and no defaults:, which would reach it unseen. No step sets a
+    shell other than bash or sh. What this cannot see: an install inside a program a step
+    calls (a script, an action), or an installer's name the shell builds at run time
+    (a variable, split quotes); those stay a reviewer's to read."""
     import re
     allowed = [i.replace("<dev>", _dev_tools()) for i in _INSTALLS]
     problems, seen = [], []
+    for where, holder in (("workflow", workflow or {}), ("job", job or {})):
+        if holder.get("env") or holder.get("defaults"):
+            if any(re.search(_INSTALLER, (s.get("run") or "")) for s in steps):
+                problems.append(f"the {where} sets env or defaults, which reach its installs")
     for step in steps:
+        if step.get("shell", "bash") not in ("bash", "sh"):
+            problems.append(f"a step runs a shell this test cannot read: {step['shell']}")
         run = re.sub(r"\\\n\s*", " ", step.get("run", ""))
         lines = [" ".join(line.split()) for line in run.splitlines()]
-        touches = [line for line in lines if re.search(_INSTALLER, line) or "locked.txt" in line]
-        if touches and (set(step.get("env") or {}) | {"working-directory"} & set(step)):
-            problems.append(f"a step that installs sets env or working-directory: {sorted(step)}")
+        touches = [line for line in lines if re.search(_INSTALLER, line)]
+        if touches and _STEP_SETTINGS & set(step) - ({"shell"} if step.get("shell") in ("bash", "sh") else set()):
+            problems.append(f"a step that installs sets {sorted(_STEP_SETTINGS & set(step))}")
         for line in touches:
             if line not in allowed:
                 problems.append(f"not an allowed install line: {line}")
@@ -1807,8 +1821,9 @@ def test_every_workflow_installs_only_what_the_lock_pins():
     files = sorted([*wf.glob("*.yml"), *wf.glob("*.yaml")])
     checked = 0
     for f in files:
-        for job_name, job in yaml.safe_load(f.read_text())["jobs"].items():
-            problems = _install_problems(job.get("steps", []))
+        workflow = yaml.safe_load(f.read_text())
+        for job_name, job in workflow["jobs"].items():
+            problems = _install_problems(job.get("steps", []), job, workflow)
             assert not problems, f"{f.name} job {job_name}: {problems}"
             checked += 1
     assert checked >= 5, f"only {checked} jobs read; the scan is broken"
@@ -1839,6 +1854,9 @@ _HELD = [_INSTALLS[1], _INSTALLS[2].replace("<dev>", "pytest pyyaml \"web3[teste
     f"{_LOCK}\nuv pip sync other.txt",
     f"{_LOCK}\nuv sync",
     f"{_LOCK}\npip-sync other.txt",
+    f"{_LOCK}\npipenv install --system opentimestamps==0.5.0",
+    f"{_LOCK}\npdm add opentimestamps==0.5.0",
+    f'{_LOCK}\n{_HELD[0]}\n: > "$RUNNER_TEMP/locked".txt\n{_HELD[1]}',
     f"{_LOCK}\nbash -c 'pip install opentimestamps==0.5.0'",
     f"{_LOCK}\necho `pip install opentimestamps==0.5.0`",
     f"{_LOCK}\ncurl -sO https://x.example/f#v1 && pip install opentimestamps==0.5.0",
@@ -1856,10 +1874,19 @@ def test_the_install_guard_refuses_each_way_round_the_lock(run):
     assert _install_problems([{"run": run}])
 
 
-def test_the_install_guard_refuses_settings_on_an_installing_step():
-    assert _install_problems([{"run": f"{_LOCK}\npip install --no-deps -e .",
-                               "env": {"PIP_REQUIREMENT": "o.txt"}}])
-    assert _install_problems([{"run": "pip install --no-deps -e .", "working-directory": "vendor"}])
+@pytest.mark.parametrize("setting", [{"env": {"PIP_REQUIREMENT": "o.txt"}}, {"working-directory": "v"},
+                                     {"if": "false"}, {"continue-on-error": True}, {"shell": "pwsh"}])
+def test_the_install_guard_refuses_settings_on_an_installing_step(setting):
+    assert _install_problems([{"run": f"{_LOCK}\npip install --no-deps -e .", **setting}])
+
+
+def test_the_install_guard_refuses_what_reaches_a_step_from_outside_it():
+    steps = [{"run": f"{_LOCK}\npip install --no-deps -e ."}]
+    assert _install_problems(steps, job={"env": {"PIP_REQUIREMENT": "o.txt"}})
+    assert _install_problems(steps, job={"defaults": {"run": {"working-directory": "vendor"}}})
+    assert _install_problems(steps, workflow={"env": {"PIP_REQUIREMENT": "o.txt"}})
+    assert _install_problems([{"run": _LOCK},
+                              {"shell": "python -m pip install -r {0}", "run": "opentimestamps==0.5.0"}])
 
 
 @pytest.mark.parametrize("run", [
