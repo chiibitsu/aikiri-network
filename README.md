@@ -92,9 +92,15 @@ The line the app posts ends in `--push`: it writes the request, asks your passph
 ## Run
 
 ```
-pip install -e ".[dev,bitcoin]"
+python3 -m venv .venv && . .venv/bin/activate
+pip install --require-hashes -r requirements.lock
+pip freeze > "${TMPDIR:-/tmp}/aikiri-locked.txt"
+pip install -c "${TMPDIR:-/tmp}/aikiri-locked.txt" pytest pyyaml "web3[tester]"
+pip install --no-deps -e .
 python -m pytest -q
 ```
+
+The same install `ci.yml` runs: the lock by hash, then the test tools held to it, then this package. The tests check it: run them after a plain `pip install -e ".[dev,bitcoin]"` and `test_the_tests_run_the_versions_the_lock_pins` goes red, naming every package whose version differs from `requirements.lock`. Use a fresh virtualenv, since packages already installed at other versions count too.
 
 solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-static-linux` from the ethereum/solidity v0.8.26 release at `~/.solcx/solc-v0.8.26`; it must hash to `d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef`.
 
