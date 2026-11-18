@@ -17,7 +17,7 @@ So consent is a separate factor, held somewhere the runner cannot reach.
 
 **Today:** one P-256 key in a passphrase-encrypted file on Chii's Mac, made
 with `aikiri-ledger approve-keygen`. It is never in CI and never in the
-repository, and it signs only when she types the passphrase. The trust anchor
+repository, and it signs only when she types the passphrase. `trust.json`
 registers one device, `mac`. So the Mac is a single point of failure.
 
 **The design it falls short of:** a non-exportable key inside the Secure Enclave
@@ -87,10 +87,10 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 
 **Today, with one device registered,** losing the key file or its passphrase is
 the "every device" case below: the chain freezes. `docs/setup.md` §6 says to back
-up both.
+up the file and remember the passphrase.
 
-**One of several**, once a second device is enrolled. Another approves; nothing stops. But the lost device's key is
-still registered and still valid, and rotation does not exist yet, so a device
+**One of several**, once a second device is enrolled. Another approves;
+nothing stops. But the lost device's key is still registered and still valid, and rotation does not exist yet, so a device
 that is lost rather than destroyed must be treated as a live credential in
 someone else's hands. It is one of three factors — an attacker also needs the
 validator key and the wallet key to produce a block — but it is no longer a
@@ -105,8 +105,8 @@ verifiable forever by anyone: verification needs only public keys, the two
 witnesses, and the published trust anchor. The trail survives; it just stops.
 
 **Biometric changes** apply to the enclave signer, once an app exists; the file
-key has no biometry, only its passphrase. The enclave key is created with `.biometryAny`, so adding
-a fingerprint or re-enrolling a face does not destroy it. `--strict-biometry`
+key has no biometry, only its passphrase. The enclave key is created with
+`.biometryAny`, so adding a fingerprint or re-enrolling a face does not destroy it. `--strict-biometry`
 switches to `.biometryCurrentSet`, which is stronger — a stolen unlocked device
 with an added fingerprint cannot sign — but destroys the key on any enrolment
 change. Until rotation exists, that is a way to lose a device by accident, so it
@@ -117,8 +117,8 @@ is not the default.
 Rotation is deliberately unimplemented; designing it under time pressure after a
 loss is how people build back doors. What it needs, when it is designed:
 
-- A third registered factor whose loss is uncorrelated with the two phones and
-  laptops that travel together. An offline key on paper in a safe is the obvious
+- A further registered factor whose loss is uncorrelated with the devices that
+  travel with her. An offline key on paper in a safe is the obvious
   candidate, and it does not need an enclave, only a different failure mode.
 - A rotation record sealed like everything else: a block whose root is the new
   device set, approved by a surviving factor, so the change is on the trail
