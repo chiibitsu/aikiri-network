@@ -1761,12 +1761,16 @@ def test_the_tests_run_the_versions_the_lock_pins():
 
     def norm(name): return re.sub(r"[-_.]+", "-", name.strip().lower())
 
-    pinned = {norm(m[1]): m[2] for line in Path("requirements.lock").read_text().splitlines()
-              if (m := re.match(r"^([A-Za-z0-9_.-]+)==([^\s;\\]+)", line))}
-    assert len(pinned) > 20, "too few pins read; the scan is broken, not the lock"
-    installed = {norm(d.metadata["Name"]): d.version for d in metadata.distributions()}
-    moved = {n: (v, installed.get(n, "not installed")) for n, v in pinned.items()
-             if installed.get(n) != v}
+    lines = [l for l in Path("requirements.lock").read_text().splitlines()
+             if l and not l[0].isspace() and not l.startswith("#")]
+    pinned = {norm(m[1]): m[2] for line in lines
+              if (m := re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==([^\s;\\]+)", line))}
+    assert len(pinned) == len(lines), "a pin in requirements.lock was not read; the scan is broken"
+    installed = {}  # every installed copy of each name: a shadowing copy must match too
+    for d in metadata.distributions():
+        installed.setdefault(norm(d.metadata["Name"]), []).append(d.version)
+    moved = {n: (v, installed.get(n, ["not installed"])) for n, v in pinned.items()
+             if installed.get(n, []) == [] or set(installed[n]) != {v}}
     assert not moved, ("installed outside requirements.lock (pinned, found): "
                        f"{moved}; install with `pip install --require-hashes -r requirements.lock`")
 
