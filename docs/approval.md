@@ -19,7 +19,8 @@ So consent is a separate factor, held somewhere the runner cannot reach.
 with `aikiri-ledger approve-keygen`. It is never in CI and never in the
 repository, and it signs only when she types the passphrase. `trust.json`
 registers one device, `mac`. So that one key is a single point of failure, not
-the Mac: a backup of the file, with the passphrase, approves from any machine.
+the Mac: a backup of the file, with the passphrase, approves from any machine,
+and the label stays `mac` whichever machine signs.
 
 **The design it falls short of:** a non-exportable key inside the Secure Enclave
 of her Mac and of her iPhone, each signature gated by Touch ID or Face ID, both
@@ -88,7 +89,9 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 
 **Today, with one device registered,** losing every copy of the key file, or the
 passphrase, is the "every device" case below: the chain freezes. `docs/setup.md`
-§6 says to back up the file and remember the passphrase.
+§6 says to back up the file and remember the passphrase. A copy lost rather
+than destroyed, the Mac included, is a live credential guarded only by the
+passphrase (`docs/setup.md` §7).
 
 **One of several**, once a second device is enrolled. Another approves; nothing
 stops. But the lost device's key is still registered and still valid, and
@@ -127,6 +130,7 @@ loss is how people build back doors. What it needs, when it is designed:
 - A rule for verifiers reading old blocks: an approval valid when it was made
   stays valid. Rotation adds devices going forward; it never invalidates history.
 
-Until then the honest statement is the one above: one device today, so losing it
-freezes the chain; with more, any one approves and losing all of them freezes it;
-and everything already sealed remains provable.
+Until then the honest statement is the one above: one key today, so losing every
+copy of it, or its passphrase, freezes the chain; with more, any one approves
+and losing all of them freezes it; and everything already sealed remains
+provable.
