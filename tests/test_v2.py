@@ -1748,45 +1748,148 @@ def test_the_lock_carries_what_the_workflows_import():
     assert not missing, f"installed by no workflow: {missing}"
 
 
-def _pip_installs(run):
-    """Each `pip install` command in a step's script, continuation lines joined."""
+def _commands(run):
+    """A step's script as single commands, each a list of words: continuation lines
+    joined, quotes honoured, and split at && || ; | & so a second command on a line is
+    read too. A line the tokenizer cannot read comes back as None: the caller must not
+    take it as clean if it could install."""
+    import re, shlex
+    out = []
+    for line in re.sub(r"\\\n\s*", " ", run).splitlines():
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = "#"
+        try:
+            words = list(lex)
+        except ValueError:
+            out.append(None if re.search(r"\bpip", line) else [])
+            continue
+        cmd = []
+        for w in words + [";"]:
+            if w and set(w) <= set("&|;"):
+                if cmd:
+                    out.append(cmd)
+                cmd = []
+            else:
+                cmd.append(w)
+    return [c for c in out if c != []]
+
+
+def _installs_anything(words):
+    """Any pip spelling that installs: pip, pip3, pip3.12, python -m pip, uv pip, with
+    options anywhere before the verb."""
     import re
-    script = re.sub(r"\\\n\s*", " ", run)
-    return [line.strip() for line in script.splitlines()
-            if re.search(r"\bpip3?\s+install\b", line)]
+    pip = [i for i, w in enumerate(words) if re.fullmatch(r"(?:.*/)?pip[0-9.]*", w)]
+    return bool(pip) and any(w in ("install", "sync") for w in words[pip[0] + 1:])
+
+
+def _option(args, short, long):
+    """The value of an option in any spelling (-c f, -cf, --constraint f,
+    --constraint=f), or None."""
+    for i, a in enumerate(args):
+        if a in (short, long) and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(long + "="):
+            return a[len(long) + 1:]
+        if a.startswith(short) and len(a) > len(short) and not a.startswith("--"):
+            return a[len(short):]
+    return None
+
+
+def _install_problems(steps):
+    """What in one job's steps could install something the lock does not pin. The first
+    install must be the lock, by hash. After it, an install passes only if it names
+    nothing but this package with --no-deps (`-e .` or `.`), or is held by -c to a file
+    `pip freeze` wrote after the lock went in. Commands are read in order, so a freeze
+    taken before the lock holds nothing. A script the step calls cannot be read for
+    installs, so calling one is refused, and so is a pip line that cannot be parsed."""
+    import re
+    problems, locked, frozen = [], False, set()
+    for step in steps:
+        for args in _commands(step.get("run", "")):
+            if args is None:
+                problems.append("a pip line this test cannot parse")
+                continue
+            if args[0].endswith(".sh") or (args[0] in ("bash", "sh") and len(args) > 1
+                                           and args[1].endswith(".sh")):
+                problems.append(f"runs a script this test cannot read for installs: {args}")
+                continue
+            if "freeze" in args and ">" in args and re.fullmatch(r"(?:.*/)?pip[0-9.]*",
+                                                                 args[args.index("freeze") - 1]):
+                if locked and args.index(">") + 1 < len(args):
+                    frozen.add(args[args.index(">") + 1])
+                continue
+            if not _installs_anything(args):
+                continue
+            cmd = " ".join(args)
+            if not locked:
+                if ("--require-hashes" in args and "sync" not in args
+                        and _option(args, "-r", "--requirement") == "requirements.lock"
+                        and sum(a.startswith(("-r", "--requirement")) for a in args) == 1):
+                    locked = True
+                else:
+                    problems.append(f"the first install must be the lock, by hash: {cmd}")
+                continue
+            verb = next(i for i, a in enumerate(args) if a in ("install", "sync"))
+            rest = args[verb + 1:]
+            if args[verb] == "sync" or any(
+                    a in ("-U", "--upgrade") or a.startswith(("-r", "--requirement")) for a in rest):
+                problems.append(f"an install after the lock may move what it pins: {cmd}")
+                continue
+            held = _option(rest, "-c", "--constraint")
+            targets = [a for a in rest if not a.startswith("-") and a != held]
+            only_self = "--no-deps" in rest and targets == ["."]
+            if not only_self and (held is None or held not in frozen):
+                problems.append(f"an install after the lock may move what it pins: {cmd}")
+    return problems
 
 
 def test_every_workflow_installs_only_what_the_lock_pins():
     """ci.yml once ran a plain `pip install -e ".[dev,bitcoin]"`. The day opentimestamps
     0.5.0 came out the tests went red on main while the ledger, installing the lock,
     went on running 0.4.5: the tests had stopped testing what the ledger runs. So in
-    every workflow the first install is the lock, by hash, and every later one either
-    resolves nothing (`--no-deps`) or is held to the versions that install put there
-    (`-c` on a file `pip freeze` wrote after it), so nothing the lock pins can move."""
-    import re, shlex
+    every workflow the first install is the lock, by hash, and every later one is this
+    package alone with --no-deps, or is held to the lock's freeze (`_install_problems`)."""
     import yaml
-    for f in sorted(Path(".github/workflows").glob("*.yml")):
+    wf = Path(".github/workflows")
+    files = sorted([*wf.glob("*.yml"), *wf.glob("*.yaml")])
+    assert files, "no workflows found; the scan is broken"
+    checked = 0
+    for f in files:
         for job_name, job in yaml.safe_load(f.read_text())["jobs"].items():
-            where = f"{f.name} job {job_name}"
-            installs = [cmd for step in job.get("steps", [])
-                        for cmd in _pip_installs(step.get("run", ""))]
-            if not installs:
-                continue
-            first = shlex.split(installs[0], comments=True)
-            assert "--require-hashes" in first and "-r" in first \
-                and first[first.index("-r") + 1] == "requirements.lock", \
-                f"{where}: the first install must be the lock, by hash: {installs[0]}"
-            frozen = set()
-            for step in job["steps"]:
-                frozen |= {shlex.split(m)[0] for m in
-                           re.findall(r"pip freeze\s*>\s*(\S+)", step.get("run", ""))}
-            for cmd in installs[1:]:
-                args = shlex.split(cmd, comments=True)
-                held = "-c" in args and args[args.index("-c") + 1] in frozen
-                assert "--no-deps" in args or held, \
-                    f"{where}: an install after the lock may move what it pins: {cmd}"
-                assert "-r" not in args and "--upgrade" not in args and "-U" not in args, \
-                    f"{where}: {cmd}"
+            problems = _install_problems(job.get("steps", []))
+            assert not problems, f"{f.name} job {job_name}: {problems}"
+            checked += 1
+    assert checked >= 5, f"only {checked} jobs read; the scan is broken"
+
+
+_LOCK = "pip install --require-hashes -r requirements.lock"
+
+
+@pytest.mark.parametrize("run", [
+    'pip install -e ".[dev,bitcoin]"',                                    # the original
+    f"{_LOCK}\npip install --no-deps opentimestamps==0.5.0",             # --no-deps still swaps it
+    f"{_LOCK} && pip install opentimestamps==0.5.0",                     # second command on a line
+    f"{_LOCK}\npip install --no-deps -e . && pip install requests",
+    f"{_LOCK}\npython -m pip -q install opentimestamps",                 # option before the verb
+    f"{_LOCK}\npip3.12 install opentimestamps",
+    f"{_LOCK}\nuv pip sync other.txt",
+    f"{_LOCK}\n./scripts/setup.sh",                                       # unreadable script
+    f"pip freeze > early.txt\n{_LOCK}\npip install -c early.txt opentimestamps==0.5.0",
+    f"{_LOCK}\npip freeze > l.txt\npip install -c l.txt -U opentimestamps",
+    f"{_LOCK}\npip freeze > l.txt\npip install -c l.txt -r other.txt",
+])
+def test_the_install_guard_refuses_each_way_round_the_lock(run):
+    assert _install_problems([{"run": run}])
+
+
+@pytest.mark.parametrize("run", [
+    f"{_LOCK}\npip install --no-deps -e .",
+    f'{_LOCK}\npip freeze > "$T/l.txt"\npip install --constraint="$T/l.txt" pytest\npip install --no-deps .',
+    f"{_LOCK}\npip freeze > l.txt\npip install --constraint l.txt pytest",
+])
+def test_the_install_guard_passes_the_safe_spellings(run):
+    assert _install_problems([{"run": run}]) == []
 
 
 def test_ci_installs_the_test_tools_pyproject_names():
@@ -1798,11 +1901,14 @@ def test_ci_installs_the_test_tools_pyproject_names():
     dev = re.search(r"^dev = \[(.*)\]\s*(?:#.*)?$", pyproject, re.M).group(1)
     wanted = set(re.findall(r'"([^"]+)"', dev))
     steps = yaml.safe_load((Path(".github/workflows") / "ci.yml").read_text())["jobs"]["test"]["steps"]
-    held = [args for s in steps for c in _pip_installs(s.get("run", ""))
-            if "-c" in (args := shlex.split(c, comments=True))]
-    assert held, "ci.yml installs no test tools held to the lock"
-    named = {a for args in held for a in args[args.index("install") + 1:]
-             if not a.startswith("-") and a != args[args.index("-c") + 1]}
+    named = set()
+    for s in steps:
+        for args in _commands(s.get("run", "")) or []:
+            held = args and _option(args, "-c", "--constraint")
+            if args and _installs_anything(args) and held:
+                verb = args.index("install")
+                named |= {a for a in args[verb + 1:] if not a.startswith("-") and a != held}
+    assert named, "ci.yml installs no test tools held to the lock"
     assert named == wanted, f"ci.yml installs {sorted(named)}, pyproject's dev extra is {sorted(wanted)}"
 
 
