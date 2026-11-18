@@ -15,12 +15,21 @@ So consent is a separate factor, held somewhere the runner cannot reach.
 
 ## What it is
 
-A P-256 key created inside the Secure Enclave of Chii's Mac and of her iPhone.
-The private key is not exportable: there is no file, no backup, no copy in a
-password manager, because the chip will not represent it outside itself. Every
-signature is gated by Touch ID or Face ID.
+**Today:** one P-256 key in a passphrase-encrypted file on Chii's Mac, made
+with `aikiri-ledger approve-keygen`. It is never in CI and never in the
+repository, and it signs only when she types the passphrase. The trust anchor
+registers one device, `mac`. So the Mac is a single point of failure.
 
-Both devices are registered from the start. Either one can approve.
+**The design it falls short of:** a non-exportable key inside the Secure Enclave
+of her Mac and of her iPhone, each signature gated by Touch ID or Face ID, both
+devices registered. macOS will not keep an enclave key for a command-line tool,
+so that waits on an app. `docs/setup.md` §7 says why, what the file key still
+delivers, and what it does not.
+
+**The upgrade path:** enroll a second device, either the enclave app or another
+machine with its own file key, and publish an updated trust anchor. Blocks the
+file key already approved stay valid. Which device, and when, is Chii's call
+(`docs/setup.md` §7).
 
 ## What is signed
 
@@ -76,7 +85,11 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 
 ## Losing a device
 
-**One device.** The other approves; nothing stops. But the lost device's key is
+**Today, with one device registered,** losing the key file or its passphrase is
+the "every device" case below: the chain freezes. `docs/setup.md` §6 says to back
+up both.
+
+**One of several**, once a second device is enrolled. Another approves; nothing stops. But the lost device's key is
 still registered and still valid, and rotation does not exist yet, so a device
 that is lost rather than destroyed must be treated as a live credential in
 someone else's hands. It is one of three factors — an attacker also needs the
@@ -85,13 +98,14 @@ factor Chii controls. Remove it by publishing a new trust anchor without that
 device, which every verifier will pick up; blocks already approved by it stay
 valid, which is correct, because they were.
 
-**Both devices.** The chain freezes. No further block can ever be approved, and
+**Every device.** The chain freezes. No further block can ever be approved, and
 under v2 rules there is no way to add a device, because the thing that would
 authorise adding one is exactly what was lost. Everything already written stays
 verifiable forever by anyone: verification needs only public keys, the two
 witnesses, and the published trust anchor. The trail survives; it just stops.
 
-**Biometric changes.** The enclave key is created with `.biometryAny`, so adding
+**Biometric changes** apply to the enclave signer, once an app exists; the file
+key has no biometry, only its passphrase. The enclave key is created with `.biometryAny`, so adding
 a fingerprint or re-enrolling a face does not destroy it. `--strict-biometry`
 switches to `.biometryCurrentSet`, which is stronger — a stolen unlocked device
 with an added fingerprint cannot sign — but destroys the key on any enrolment
@@ -112,5 +126,6 @@ loss is how people build back doors. What it needs, when it is designed:
 - A rule for verifiers reading old blocks: an approval valid when it was made
   stays valid. Rotation adds devices going forward; it never invalidates history.
 
-Until then the honest statement is the one above: two devices, either approves,
-both lost freezes the chain, and everything already sealed remains provable.
+Until then the honest statement is the one above: one device today, so losing it
+freezes the chain; with more, any one approves and losing all of them freezes it;
+and everything already sealed remains provable.
