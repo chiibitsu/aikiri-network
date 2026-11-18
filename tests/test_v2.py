@@ -1748,6 +1748,63 @@ def test_the_lock_carries_what_the_workflows_import():
     assert not missing, f"installed by no workflow: {missing}"
 
 
+def _pip_installs(run):
+    """Each `pip install` command in a step's script, continuation lines joined."""
+    import re
+    script = re.sub(r"\\\n\s*", " ", run)
+    return [line.strip() for line in script.splitlines()
+            if re.search(r"\bpip3?\s+install\b", line)]
+
+
+def test_every_workflow_installs_only_what_the_lock_pins():
+    """ci.yml once ran a plain `pip install -e ".[dev,bitcoin]"`. The day opentimestamps
+    0.5.0 came out the tests went red on main while the ledger, installing the lock,
+    went on running 0.4.5: the tests had stopped testing what the ledger runs. So in
+    every workflow the first install is the lock, by hash, and every later one either
+    resolves nothing (`--no-deps`) or is held to the versions that install put there
+    (`-c` on a file `pip freeze` wrote after it), so nothing the lock pins can move."""
+    import re, shlex
+    import yaml
+    for f in sorted(Path(".github/workflows").glob("*.yml")):
+        for job_name, job in yaml.safe_load(f.read_text())["jobs"].items():
+            where = f"{f.name} job {job_name}"
+            installs = [cmd for step in job.get("steps", [])
+                        for cmd in _pip_installs(step.get("run", ""))]
+            if not installs:
+                continue
+            first = shlex.split(installs[0], comments=True)
+            assert "--require-hashes" in first and "-r" in first \
+                and first[first.index("-r") + 1] == "requirements.lock", \
+                f"{where}: the first install must be the lock, by hash: {installs[0]}"
+            frozen = set()
+            for step in job["steps"]:
+                frozen |= set(re.findall(r"pip freeze\s*>\s*(\S+)", step.get("run", "")))
+            for cmd in installs[1:]:
+                args = shlex.split(cmd, comments=True)
+                held = "-c" in args and args[args.index("-c") + 1] in frozen
+                assert "--no-deps" in args or held, \
+                    f"{where}: an install after the lock may move what it pins: {cmd}"
+                assert "-r" not in args and "--upgrade" not in args and "-U" not in args, \
+                    f"{where}: {cmd}"
+
+
+def test_ci_installs_the_test_tools_pyproject_names():
+    """ci.yml installs pyproject's dev tools by name (held to the lock, above), so the two
+    lists must stay one list."""
+    import re, shlex
+    import yaml
+    pyproject = Path("pyproject.toml").read_text()
+    dev = re.search(r"^dev = \[(.*?)\]", pyproject, re.M).group(1)
+    wanted = set(re.findall(r'"([^"]+)"', dev))
+    steps = yaml.safe_load((Path(".github/workflows") / "ci.yml").read_text())["jobs"]["test"]["steps"]
+    held = [args for s in steps for c in _pip_installs(s.get("run", ""))
+            if "-c" in (args := shlex.split(c, comments=True))]
+    assert held, "ci.yml installs no test tools held to the lock"
+    named = {a for args in held for a in args[args.index("install") + 1:]
+             if not a.startswith("-") and a != args[args.index("-c") + 1]}
+    assert named == wanted, f"ci.yml installs {sorted(named)}, pyproject's dev extra is {sorted(wanted)}"
+
+
 def test_nightly_proposes_proofs_instead_of_pushing_to_main():
     """nightly runs with no secrets and never could forge a block, but a
     standing `git push origin HEAD:main` is still a standing write credential
