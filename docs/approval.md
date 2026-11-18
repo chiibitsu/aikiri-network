@@ -89,9 +89,10 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 
 **Today, with one device registered,** losing every copy of the key file, or the
 passphrase, is the "every device" case below: the chain freezes. `docs/setup.md`
-§6 says to back up the file and remember the passphrase. A copy lost rather
-than destroyed, the Mac included, is a live credential guarded only by the
-passphrase (`docs/setup.md` §7).
+§6 says to back up the file and remember the passphrase. Any copy lost rather
+than destroyed, including the one on a lost Mac, is a live credential guarded
+only by the passphrase, and with one key it cannot be revoked without freezing
+the chain, because rotation does not exist yet.
 
 **One of several**, once a second device is enrolled. Another approves; nothing
 stops. But the lost device's key is still registered and still valid, and
