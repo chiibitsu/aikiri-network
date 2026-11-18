@@ -89,14 +89,14 @@ stamps any block with no `.ots` yet, and re-verifies. Blocks wait for her. That 
 the "every device" case below: the chain freezes. `docs/setup.md` §6 says to back
 up the file and remember the passphrase.
 
-**One of several**, once a second device is enrolled. Another approves;
-nothing stops. But the lost device's key is still registered and still valid, and rotation does not exist yet, so a device
-that is lost rather than destroyed must be treated as a live credential in
-someone else's hands. It is one of three factors — an attacker also needs the
-validator key and the wallet key to produce a block — but it is no longer a
-factor Chii controls. Remove it by publishing a new trust anchor without that
-device, which every verifier will pick up; blocks already approved by it stay
-valid, which is correct, because they were.
+**One of several**, once a second device is enrolled. Another approves; nothing
+stops. But the lost device's key is still registered and still valid, and
+rotation does not exist yet, so a device that is lost rather than destroyed must
+be treated as a live credential in someone else's hands. It is one of three
+factors — an attacker also needs the validator key and the wallet key to produce
+a block — but it is no longer a factor Chii controls. Remove it by publishing a
+new trust anchor without that device, which every verifier will pick up; blocks
+already approved by it stay valid, which is correct, because they were.
 
 **Every device.** The chain freezes. No further block can ever be approved, and
 under v2 rules there is no way to add a device, because the thing that would
@@ -106,11 +106,11 @@ witnesses, and the published trust anchor. The trail survives; it just stops.
 
 **Biometric changes** apply to the enclave signer, once an app exists; the file
 key has no biometry, only its passphrase. The enclave key is created with
-`.biometryAny`, so adding a fingerprint or re-enrolling a face does not destroy it. `--strict-biometry`
-switches to `.biometryCurrentSet`, which is stronger — a stolen unlocked device
-with an added fingerprint cannot sign — but destroys the key on any enrolment
-change. Until rotation exists, that is a way to lose a device by accident, so it
-is not the default.
+`.biometryAny`, so adding a fingerprint or re-enrolling a face does not destroy
+it. `--strict-biometry` switches to `.biometryCurrentSet`, which is stronger — a
+stolen unlocked device with an added fingerprint cannot sign — but destroys the
+key on any enrolment change. Until rotation exists, that is a way to lose a
+device by accident, so it is not the default.
 
 ## The recovery path, not yet built
 
