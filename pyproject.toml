@@ -15,6 +15,7 @@ dependencies = [
   "web3>=7",
   "py-solc-x>=2",
   "cryptography>=41",
+  "urllib3>=2.6.3",  # Retry(retry_after_max=...), used by the verify read path
 ]
 
 [project.optional-dependencies]

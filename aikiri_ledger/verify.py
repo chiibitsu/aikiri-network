@@ -8,14 +8,17 @@
                                      the block the proof names)
   FULLY VERIFIED                     both witnesses agree
 
-There is no grace window and no partial credit. A block that is written but
-not yet anchored leaves the ledger at VALID LOCALLY, which is the honest thing
-to say about it. Only the top state may be described as verified.
+There is no partial credit. A block that is written but not yet anchored
+leaves the ledger at VALID LOCALLY, which is the honest thing to say about it,
+for up to 6 hours after it was written (time for its anchor to land and become
+final on Base); still missing after that, verify fails. Only the top state may
+be described as verified.
 
 Every check runs; the report lists everything wrong, not just the first thing.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 
 from .approval import verify_approval
@@ -124,7 +127,10 @@ def verify_chain(ledger, trust) -> tuple[State, list[str]]:
     return (State.INVALID if failures else State.VALID_LOCALLY), report
 
 
-def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]]:
+_ANCHOR_WINDOW = timedelta(hours=6)  # past this, a block not anchored on Base has failed
+
+
+def verify_all(ledger, trust, base=None, bitcoin=None, now=None) -> tuple[State, list[str]]:
     state, report = verify_chain(ledger, trust)
 
     # Where the expectations came from is part of the result, whatever the outcome.
@@ -201,14 +207,22 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
             for b in blocks:
                 if b.index > min(latest, local_head):
                     break
-                if not base.matches(b):
+                try:
+                    matched = base.matches(b)
+                except Exception as e:  # noqa: BLE001 - a witness that cannot answer is a failure
+                    report.append(f"block {b.index}: could not read Base: {e}")
+                    failures += 1
+                    continue
+                if not matched:
                     report.append(f"block {b.index}: Base holds a different hash")
                     failures += 1
                     continue
                 try:
                     rec = base.record(b.index)
-                except Exception:  # noqa: BLE001
-                    rec = None
+                except Exception as e:  # noqa: BLE001 - an unread record skips the checks below
+                    report.append(f"block {b.index}: could not read Base record: {e}")
+                    failures += 1
+                    continue
                 if rec and rec.get("anchoredAt"):
                     if int(rec["anchoredAt"]) < int(b.when.timestamp()):
                         report.append(f"block {b.index}: Base anchoredAt "
@@ -218,12 +232,34 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                     report.append(f"block {b.index}: anchored by {rec['by']}, not the pinned owner")
                     failures += 1
 
+        # A block anchors minutes after it is written and is final on Base within the
+        # hour; one still missing hours later did not land, and is a failure.
+        unanchored = [b for b in blocks if latest is not None and latest < b.index]
+        now = now or datetime.now(timezone.utc)
+        # A quorum reads at Base's finalized height; one endpoint reads at its head.
+        quorum = callable(getattr(base, "summary", None))
+        missing = "final" if quorum else "anchored"
+        for b in unanchored:
+            age = now - b.when
+            if age > _ANCHOR_WINDOW:
+                report.append(f"block {b.index}: still not {missing} on Base "
+                              f"{int(age.total_seconds() // 3600)} hours after it was written")
+                failures += 1
+
+        summary = getattr(base, "summary", None)
+        if callable(summary):
+            report.append(summary())
+
         if failures:
+            report.append(State.text(State.INVALID))
             return State.INVALID, report
 
         if latest is not None and local_head > latest:
             for i in range(latest + 1, local_head + 1):
-                report.append(f"block {i}: written but not anchored on Base")
+                report.append(f"block {i}: written, not yet {missing} on Base "
+                              f"({'finalized ' if quorum else ''}latestIndex {latest}); "
+                              f"verify fails if it is still not {missing} "
+                              f"{int(_ANCHOR_WINDOW.total_seconds() // 3600)} hours after it was written")
             ceiling = min(ceiling, State.VALID_LOCALLY)
         else:
             report.append(f"Base: {min(latest, local_head) + 1} block(s) anchored and matching")
@@ -247,6 +283,7 @@ def verify_all(ledger, trust, base=None, bitcoin=None) -> tuple[State, list[str]
                 pending += 1
             else:
                 report.append(f"block {b.index}: Bitcoin proof FAILED: {why}")
+                report.append(State.text(State.INVALID))
                 return State.INVALID, report
         if not pending and state >= State.BASE_VERIFIED:
             state = State.FULLY_VERIFIED

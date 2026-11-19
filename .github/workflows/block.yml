@@ -77,7 +77,18 @@ jobs:
           MSG
           git push origin HEAD:main
       - name: verify
-        run: aikiri-ledger --trust trust.json verify --require local
+        timeout-minutes: 20
+        # A single public RPC being rate-limited took this step down on its
+        # first real run, minutes after the fact and again from a fresh
+        # session. Three independent endpoints, quorum-tolerant of one dead
+        # (aikiri_ledger.cli._base_reader builds the QuorumBase, keeping an
+        # endpoint that fails its chainId check as one that cannot vote), so
+        # one provider rate-limiting, down or on the wrong chain does not
+        # fail the whole check. The quorum reads blocks at the finalized
+        # height, which the anchor made minutes ago has usually not reached:
+        # this step checks the blocks before it, and nightly checks it once
+        # final.
+        run: aikiri-ledger --trust trust.json verify --require local --rpc https://mainnet.base.org --rpc https://base.llamarpc.com --rpc https://base-rpc.publicnode.com
       # The app learns the seal by fingerprint (the ledger holds no record id). Runs once the
       # block is on main, even when verify above is red; a failed report turns this run red
       # (alerts.yml tells her) and the line from the chat, run again, reports by hand.
