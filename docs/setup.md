@@ -79,8 +79,10 @@ If the check names are ever wanted as a gate — when a second person arrives an
 pull requests become real — the names are the job names: `test (3.11)`,
 `test (3.12)`, `test (3.13)` (Linux) and `macos`. `macos` is skipped on a pull
 request that touches nothing it checks, and GitHub counts a skipped check as
-passing, so requiring it does not hold such a pull request. There is no check
-named `test` or `tests`; requiring one would block `main` forever.
+passing, so requiring it does not hold such a pull request. `mac-paths` also
+appears; it only decides whether `macos` runs, so do not require it alone. There
+is no check named `tests`, and `test` appears only as the single skipped check of
+a draft pull request; requiring either would block `main` forever.
 
 ## 4. What the workflows already enforce
 
