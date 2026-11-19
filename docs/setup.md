@@ -72,12 +72,15 @@ ledger write or not".
 
 The two rules that remain are the ones the invariant actually needs: history
 cannot be rewritten and the branch cannot be deleted. CI still runs on every
-push and still reports red or green; it is simply not a gate.
+push to `main` and every pull request that is not a draft, and still reports red
+or green; it is simply not a gate.
 
 If the check names are ever wanted as a gate — when a second person arrives and
-pull requests become real — the names are the matrix job names, six of them:
-`test (ubuntu-latest, 3.11)` through `test (macos-latest, 3.13)`. There is no
-check named `test` or `tests`; requiring one would block `main` forever.
+pull requests become real — the names are the job names: `test (3.11)`,
+`test (3.12)`, `test (3.13)` (Linux) and `macos`. `macos` is skipped on a pull
+request that touches nothing it checks, and GitHub counts a skipped check as
+passing, so requiring it does not hold such a pull request. There is no check
+named `test` or `tests`; requiring one would block `main` forever.
 
 ## 4. What the workflows already enforce
 
