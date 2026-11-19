@@ -16,10 +16,13 @@ permissions:
   contents: read
 # A newer commit on the same pull request cancels the run it replaces. On main
 # nothing is cancelled: every commit there keeps its own result, and alerts.yml
-# would report a cancelled run on main to Chii as a failure.
+# would report a cancelled run on main to Chii as a failure. So on main the group
+# is the commit, not the branch: a group holds one pending run and a newer run
+# cancels it even with cancel-in-progress off, so a branch-wide group on main
+# would still cancel when three merges land within one run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
