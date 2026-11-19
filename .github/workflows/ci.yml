@@ -18,7 +18,18 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev,bitcoin]"  # verify reads proofs with python-opentimestamps
+      - name: install, pinned by hash
+        # The lock block.yml and nightly.yml install, so the tests run what the ledger
+        # runs (verify reads proofs with python-opentimestamps, pinned there). The test
+        # tools are not in the lock: they install held to the versions it just put in
+        # (-c on its freeze), so they cannot move anything it pins. pyproject's dev
+        # extra names the same tools; tests/test_v2.py holds the two lists together.
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip freeze > "$RUNNER_TEMP/locked.txt"
+          pip install -c "$RUNNER_TEMP/locked.txt" pytest pyyaml "web3[tester]"
+          pip install --no-deps -e .
+          pip check
       - name: canonical bytes must be identical on every platform and version
         run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
       - run: python -m pytest -q
