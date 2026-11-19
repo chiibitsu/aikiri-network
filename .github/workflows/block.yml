@@ -19,6 +19,14 @@ concurrency: ledger-write
 jobs:
   block:
     runs-on: ubuntu-latest
+    # Counts from when the job starts, after any approval or ledger-write queue.
+    # A run takes about a minute. 30 leaves room for a slow Base receipt (web3
+    # waits up to 120 s for one) and slow OpenTimestamps calendars, so it stops only
+    # a run that has hung. A run stopped between the anchor and the commit (by this,
+    # a lost runner or a manual cancel) leaves its pending-anchor marker on the
+    # runner, not on main, so the next run's reconcile cannot see it: that case
+    # needs a person to check the account's transactions on Base.
+    timeout-minutes: 30
     environment: ledger
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

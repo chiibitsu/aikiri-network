@@ -39,7 +39,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `ledger/` ~ `blocks/`, `proofs/`, `requests/`, `HEAD`, `config.json`, `deploy.json`
 - `aikiri_ledger/softkey.py` ~ the approval key: P-256, passphrase-encrypted, never in CI
 - `tools/approve/` ~ a Secure Enclave signer that macOS will not run as a CLI tool; see `docs/setup.md` §7
-- `tests/vectors/` ~ golden bytes and hashes, checked on Linux and macOS across Python 3.11–3.13
+- `tests/vectors/` ~ golden bytes and hashes, checked on Linux across Python 3.11–3.13 and on macOS with 3.11
 
 ## Block (v2, from block 2)
 
@@ -106,7 +106,7 @@ solc 0.8.26 is pinned by checksum. If the download is blocked, place `solc-stati
 
 ## Workflows
 
-- `ci.yml` ~ tests on Linux and macOS, Python 3.11, 3.12, 3.13.
+- `ci.yml` ~ tests on Linux, Python 3.11, 3.12, 3.13, on every push to `main` and every pull request that is not a draft. One macOS job (Python 3.11) checks the golden bytes on a second platform and that the Secure Enclave signer compiles: on every push to `main`, and on a pull request only when a file those checks read changes.
 - `block.yml` ~ runs when a sealed request lands on `main`: write, anchor, stamp, commit, verify. A failed stamp does not stop the commit; nightly stamps it.
 - `nightly.yml` ~ upgrade Bitcoin proofs, stamp any block with no `.ots` yet, and report
   the state. Writes no blocks, and proposes any new proof as a pull request rather
