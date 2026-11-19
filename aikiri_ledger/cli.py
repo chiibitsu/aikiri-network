@@ -31,8 +31,9 @@
 Keys come from the environment first, then from ~/.aikiri. Never from the repo.
   AIKIRI_VALIDATOR_KEY   ed25519 seed        fallback ~/.aikiri/chii.key
   BASE_PRIVATE_KEY       wallet key          fallback ~/.aikiri/base.env
-Approval keys never leave the Secure Enclave of Chii's Mac and iPhone. Nothing
-here can produce one.
+The approval key is never in CI or in the repo: today one passphrase-encrypted
+file on Chii's Mac (approve-keygen), the Secure Enclave being the upgrade path.
+See docs/setup.md §7.
 """
 from __future__ import annotations
 
@@ -287,7 +288,7 @@ def main(argv=None):
         if a.out:
             Path(a.out).write_text(text)
             print(f"unsigned request for block {payload['index']} written to {a.out}")
-            print("approve it on your Mac or iPhone: aikiri-approve sign " + a.out)
+            print("approve it on your Mac: aikiri-ledger approve " + a.out)
         else:
             sys.stdout.write(text)
         return 0

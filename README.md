@@ -1,6 +1,6 @@
 # Aikiri Network ~ ledger
 
-The Aikiri Network's own chain: the original source of truth for sealed outcomes, witnessed by Base (Chii's own contract) and Bitcoin (OpenTimestamps), and approved block by block from the Secure Enclave of her own devices. One validator for now. Members become validators later by signing each other's blocks.
+The Aikiri Network's own chain: the original source of truth for sealed outcomes, witnessed by Base (Chii's own contract) and Bitcoin (OpenTimestamps), and approved block by block with a key only she holds, never in CI: today a passphrase-encrypted file on her Mac, with the Secure Enclave as the upgrade path (`docs/setup.md` §7). One validator for now. Members become validators later by signing each other's blocks.
 
 Author: Angeline S. Viray. Working name only.
 
