@@ -19,6 +19,12 @@ concurrency: ledger-write
 jobs:
   block:
     runs-on: ubuntu-latest
+    # Counts from when the job starts, after any approval or ledger-write queue.
+    # A run takes about a minute. 30 leaves room for a slow Base receipt (web3
+    # waits up to 120 s for one) and slow OpenTimestamps calendars. If a run were
+    # ever stopped between the anchor and the commit, reconcile, the first step,
+    # picks the anchor up on the next run.
+    timeout-minutes: 30
     environment: ledger
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

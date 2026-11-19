@@ -1,18 +1,34 @@
 name: tests
+# Linux runs the whole suite on every supported Python. macOS bills ten times
+# Linux per minute, so it runs only what needs a Mac: the canonical bytes on a
+# second platform, and the Secure Enclave signer compiling. It runs on every push
+# to main, and on a pull request only when a file those two checks read changes.
+#
+# A pull request is tested by its pull_request run; a branch push is not tested
+# twice. Drafts are skipped: a pull request is tested when it opens ready, on each
+# commit while ready, and when a draft is marked ready.
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 permissions:
   contents: read
+# A newer commit on the same pull request cancels the run it replaces. On main
+# nothing is cancelled: every commit there keeps its own result, and alerts.yml
+# would report a cancelled run on main to Chii as a failure.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   test:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -33,8 +49,63 @@ jobs:
       - name: canonical bytes must be identical on every platform and version
         run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
       - run: python -m pytest -q
+
+  mac-paths:
+    # Whether the macOS job has anything to check. On a pull request the checkout is
+    # GitHub's merge commit, whose first parent is the base branch as it is now, so
+    # the diff between them is exactly what merging would change.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      run: ${{ steps.paths.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+      - name: did a file the macOS checks read change
+        id: paths
+        # The files: the canonical encoder and the approval message (canonical.py,
+        # approval.py, and errors.py, which both raise), the golden vectors, the
+        # signer and its build, the lock and package metadata (what gets installed),
+        # and this workflow. tests/test_v2.py is left out: it changes in most pull
+        # requests and holds hundreds of tests besides the three golden ones; a change
+        # to those still runs on macOS at the push to main.
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          printf 'changed:\n%s\n' "$changed"
+          if grep -qE '^(aikiri_ledger/(canonical|approval|errors)\.py|tests/vectors/.+|tools/approve/.+|requirements\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$' <<< "$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "nothing the macOS checks read changed; macOS skipped"
+          fi
+
+  macos:
+    needs: mac-paths
+    if: needs.mac-paths.outputs.run == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"  # the version the ledger runs; Linux covers the others
+      - name: install, pinned by hash
+        # The same install as the Linux job: tests/test_v2.py imports web3 at the top.
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip freeze > "$RUNNER_TEMP/locked.txt"
+          pip install -c "$RUNNER_TEMP/locked.txt" pytest pyyaml "web3[tester]"
+          pip install --no-deps -e .
+          pip check
+      - name: canonical bytes must be identical on every platform and version
+        run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
       - name: the Secure Enclave signer must compile
-        if: runner.os == 'macOS'
         run: |
           swiftc -O -framework Security -framework LocalAuthentication \
             -o /tmp/aikiri-approve tools/approve/AikiriApprove.swift
