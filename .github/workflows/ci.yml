@@ -80,7 +80,9 @@ jobs:
             exit 0
           fi
           changed=$(git diff --name-only HEAD^1 HEAD)
-          printf 'changed:\n%s\n' "$changed"
+          # Indented, so no file name can start a line the runner reads as a command.
+          echo "changed:"
+          sed 's/^/  /' <<< "$changed"
           if grep -qE '^(aikiri_ledger/(canonical|approval|errors)\.py|tests/vectors/.+|tools/approve/.+|requirements\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$' <<< "$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
