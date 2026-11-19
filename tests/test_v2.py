@@ -2127,6 +2127,52 @@ def test_the_lock_carries_what_the_workflows_import():
     assert not missing, f"installed by no workflow: {missing}"
 
 
+def test_the_tests_run_the_versions_the_lock_pins():
+    """ci.yml once ran a plain `pip install -e ".[dev,bitcoin]"`. The day opentimestamps
+    0.5.0 came out the tests went red on main while the ledger, installing
+    requirements.lock, went on running 0.4.5: the tests had stopped testing what the
+    ledger runs. So this checks the result, not the spelling: every package the lock
+    pins is installed here at exactly the lock's version, however it was installed.
+    The test tools are not in the lock and are not checked. Run outside the lock (a
+    plain `pip install -e .`), this goes red and says which package moved."""
+    import re
+    from importlib import metadata
+
+    def norm(name): return re.sub(r"[-_.]+", "-", name.strip().lower())
+
+    lines = [l for l in Path("requirements.lock").read_text().splitlines()
+             if l and not l[0].isspace() and not l.startswith("#")]
+    pinned = {norm(m[1]): m[2] for line in lines
+              if (m := re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==([^\s;\\]+)", line))}
+    assert len(pinned) == len(lines), "a pin in requirements.lock was not read; the scan is broken"
+    installed = {}  # every installed copy of each name: a shadowing copy must match too
+    for d in metadata.distributions():
+        installed.setdefault(norm(d.metadata["Name"]), []).append(d.version)
+    moved = {n: (v, installed.get(n, ["not installed"])) for n, v in pinned.items()
+             if installed.get(n, []) == [] or set(installed[n]) != {v}}
+    assert not moved, ("installed outside requirements.lock (pinned, found): "
+                       f"{moved}; install with `pip install --require-hashes -r requirements.lock`")
+
+
+def test_ci_installs_the_lock_by_hash_then_the_test_tools_held_to_it():
+    """The check above is the guard; this keeps ci.yml's install readable as the one
+    that satisfies it: the lock by hash first, the test tools (pyproject's dev extra)
+    held by -c to the lock's freeze, then this package with --no-deps."""
+    import re
+    text = (Path(".github/workflows") / "ci.yml").read_text()
+    dev = re.search(r"^dev = \[(.*)\]\s*(?:#.*)?$", Path("pyproject.toml").read_text(), re.M)
+    tools = " ".join(t if re.fullmatch(r"[\w.-]+", t) else f'"{t}"'
+                     for t in re.findall(r'"([^"]+)"', dev.group(1)))
+    order = ["pip install --require-hashes -r requirements.lock",
+             'pip freeze > "$RUNNER_TEMP/locked.txt"',
+             f'pip install -c "$RUNNER_TEMP/locked.txt" {tools}',
+             "pip install --no-deps -e .",
+             "pip check"]
+    lines = [" ".join(l.split()) for l in text.splitlines()]
+    at = [lines.index(want) if want in lines else -1 for want in order]
+    assert -1 not in at and at == sorted(at), f"ci.yml must run, in order: {order}"
+
+
 def test_nightly_proposes_proofs_instead_of_pushing_to_main():
     """nightly runs with no secrets and never could forge a block, but a
     standing `git push origin HEAD:main` is still a standing write credential
