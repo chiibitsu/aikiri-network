@@ -21,7 +21,7 @@
                             write each proof to ledger/certs/ naming that block
                             (--push: approve, commit and push them together)
   cohort verify <proof | record | payload>
-                            VALID, REVOKED, NOT SEALED, NOT FOUND or INVALID
+                            VALID, REVOKED, NOT FOUND or INVALID
   cohort revoke <proof>     request the block that revokes that one certificate, and
                             write ledger/certs/revoked/<fingerprint>.json (--push)
   report-block <index>      tell the app about the client documents a block seals,

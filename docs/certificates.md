@@ -18,8 +18,8 @@ A JSON object with exactly these fields, and `host` only when the certificate na
 | `number` | the certificate number: **128 to 256 random bits** from a cryptographic random source, as 32 to 64 lowercase hex characters, never reused. It is the salt (below). |
 | `holder` | who the certificate is for |
 | `course` | the course |
-| `completed` | the completion date, `YYYY-MM-DD`, a real calendar date |
-| `issuer` | who issues it |
+| `completed` | the completion date exactly as printed on the certificate, `YYYY-MM-DD`, a real calendar date, no time and no time zone |
+| `issuer` | who issues it. In format v1 it is exactly `Chiibitsu Labs`; any other value is refused, so no v1 record can read as valid otherwise. |
 | `instructor` | who taught it |
 | `host` | *optional.* Left out when the certificate names none; never present and empty. |
 
@@ -27,7 +27,13 @@ Every text field is 1 to 200 Unicode code points, NFC-normalised, with no contro
 
 ### Canonical bytes
 
-The repository's canonical JSON (`aikiri_ledger/canonical.py`): keys sorted, no whitespace, `v` as a bare integer, every other value a string, and **ASCII only**. Every character outside ASCII is written `\uXXXX` with lowercase hex, and a character beyond U+FFFF as its UTF-16 surrogate pair (`🎓` is `🎓`). `"` and `\` are written `\"` and `\\`. Nothing else is escaped; `/` is not. A browser's `JSON.stringify` does not ASCII-escape, so a page must escape everything above U+007E itself. `tests/vectors/cert_cohort.json` has a record with an accent, quotes, a backslash, a dash and an emoji to test against.
+JSON with the keys sorted (by code point), no whitespace, encoded as **UTF-8**. `v` is a bare integer; every other value is a string. There are no floats, NaN or Infinity. Inside a string only `"` and `\` are escaped, as `\"` and `\\`. Everything else is written as itself, in UTF-8, with no `\uXXXX` escapes: a non-ASCII character is its UTF-8 bytes, and 🎓 is the four bytes `f0 9f 8e 93`.
+
+The record format already refuses control characters, lone surrogates and any string that is not NFC. Given that, these are exactly the bytes a browser's `JSON.stringify` gives for the same object with its keys in sorted order, encoded with `TextEncoder`.
+
+**NFC.** Every string must already be NFC-normalised. The issuer normalises when it builds the record. A verifier does not normalise: it refuses a record or payload whose strings are not NFC. Silently normalising would give one certificate two encodings.
+
+These bytes differ from the ledger's own canonical form (`canonical.py`, ASCII-escaped). That form is for what the ledger signs; this one is for what a browser has to rebuild.
 
 ### Fingerprint
 
@@ -45,11 +51,24 @@ fingerprint = SHA-256( "aikiri-ledger/cert-record/v1\n" || canonical bytes )
 payload = base64url( canonical bytes )      RFC 4648 §5 alphabet, no "=" padding
 ```
 
-The check page reads it from the link's fragment, `/network/cert#<payload>`, so it never reaches a server. Only the canonical encoding is accepted. A payload that decodes to a valid record that is not in canonical form is refused, so one record has exactly one payload. A payload is at most 4,096 characters.
+The check page reads it from the link's fragment, `/network/cert#<payload>`, so it never reaches a server. A verifier **must** refuse a payload unless re-encoding the record it decodes to gives back exactly the same bytes, `canonical(parse(bytes)) = bytes`, and so the same payload. That leaves one valid payload per record. A payload with `=` padding, or with characters outside the base64url alphabet, is refused. A payload is at most 4,096 characters.
+
+The payload carries the whole record, holder's name included. The holder controls who sees it: they choose whom to share the link with.
 
 ### Golden vectors
 
-`tests/vectors/cert_cohort.json`, under `records`: three fake records, each with its exact canonical bytes, its fingerprint and its payload, plus the root and proofs of the cohort they make together. The check page's TypeScript tests against the same file.
+`tests/vectors/cert_cohort.json`, under `records`. Every value is fake except the issuer.
+
+- Three records, each with its canonical bytes (as text and as hex), its fingerprint and its payload:
+  - one plain;
+  - one with `host`;
+  - one with a non-ASCII holder name in NFC, a quote, a backslash, a dash and an emoji.
+- A 1-, 2- and 3-leaf cohort of those fingerprints, each with its root and proofs, naming blocks 10, 11 and 12.
+- A revoked fingerprint: its `revoked/` file, naming block 13.
+- The sample blocks, with only the fields a reader takes from `ledger/blocks/` (index, timestamp, roots).
+- The verdict each proof of the 3-leaf cohort must get against those blocks.
+
+The check page's TypeScript tests against the same file.
 
 ## The fingerprint file
 
@@ -67,9 +86,14 @@ Under `ledger/certs/`, on `main`, read by the check page from `raw.githubusercon
 | file | holds |
 |---|---|
 | `ledger/certs/<fingerprint>.json` | the certificate's proof (format below) |
-| `ledger/certs/revoked/<fingerprint>.json` | `{"block": <index>, "leaf": "<fingerprint>", "v": 1}`: the block that revokes it. The date is that block's timestamp. |
+| `ledger/certs/revoked/<fingerprint>.json` | `{"block":<index>,"fingerprint":"<fingerprint>","v":1}`: the block that revokes it. The date is that block's timestamp. |
 
-**These files are pointers, not evidence.** A proof is good only if the block it names is a `cert-cohort` block with that root. A revoked file is good only if the block it names is a `revocation` block with that fingerprint. A file can be on `main` before its block is: they are pushed with the request, and the block is written only after the approval in GitHub. A reader must check the block (`ledger/blocks/<index, six digits>.json`), as `cohort verify` does. If the block isn't there yet, the proof reads as `NOT SEALED`, or the revocation as requested but not yet sealed.
+**These files are pointers, not evidence.** A file can be on `main` before its block is: the files are pushed with the request, and the block is written only after the approval in GitHub. A reader must check the block (`ledger/blocks/<index, six digits>.json`), as `cohort verify` does:
+
+- **A proof** is good only if the block it names exists and its roots are exactly `[{"kind":"cert-cohort","sha256":<the proof's root>}]`: the one root of a v2 block. A proof with `"block": null`, or naming a block that isn't there or holds anything else, is **not found**.
+- **A revoked file** counts only if the block it names exists and its roots are exactly `[{"kind":"revocation","sha256":<the fingerprint>}]`. Until then the certificate is still valid; the revocation is only requested.
+
+Times shown to a reader come from block timestamps: when the cohort was sealed, and when it was revoked. The blocks carry them with a `+08:00` offset, and the page shows them in Asia/Manila. `completed` is a date and is shown exactly as written.
 
 ## The commands
 
@@ -92,7 +116,7 @@ aikiri-ledger --trust ~/aikiri-trust.json cohort revoke <proof.json> --push
 4. shows what you are approving and asks the device key's passphrase;
 5. commits the request and those proofs together, and pushes them.
 
-`block.yml` runs on the request as for any block. It waits for your approval in GitHub, then writes, anchors and stamps the block. It does not touch `ledger/certs/`, so it needs no change. If the approval is never given, the proofs stay on `main` and read as `NOT SEALED`.
+`block.yml` runs on the request as for any block. It waits for your approval in GitHub, then writes, anchors and stamps the block. It does not touch `ledger/certs/`, so it needs no change. If the approval is never given, the proofs stay on `main` and read as not found.
 
 A request is bound to one index. If another block lands first, the request can never be written. Running the line again then refuses it as stale, and writes no proof naming someone else's block. Delete it and run the line again.
 
@@ -110,21 +134,22 @@ Refused, with nothing written:
 
 | result | meaning | exit |
 |---|---|---|
-| `VALID` | the proof leads from this fingerprint to a root that a `cert-cohort` block on this ledger seals, and no revocation block names it | 0 |
+| `VALID` | the proof leads from this fingerprint to its root, the block it names seals exactly that root as `cert-cohort`, and no revocation block names the fingerprint | 0 |
 | `REVOKED` | as VALID, and a `revocation` block names this fingerprint; the line says which block and when | 1 |
-| `NOT SEALED` | the proof is sound, but no `cert-cohort` block on this ledger copy seals its root (not sealed yet, or the copy is behind: `git pull`) | 1 |
-| `NOT FOUND` | a record or payload whose fingerprint has no proof in `ledger/certs/` | 1 |
-| `INVALID` | not a proof or record; a proof that does not lead to its root, names a different block than the one that seals its root, or sits under another certificate's name; or this ledger copy itself does not verify | 1 |
+| `NOT FOUND` | the proof names no block (`null`); or its block is not on this ledger copy (not sealed yet, never approved, or the copy is behind: `git pull`); or its block seals something else; or a record or payload has no proof in `ledger/certs/` | 1 |
+| `INVALID` | not a proof or a v1 record; a proof that does not lead to its root, or sits under another certificate's name; or this ledger copy itself does not verify | 1 |
 
 It also prints the ledger's own state, checked offline (`VALID LOCALLY` or `INVALID`). Pass the external trust file as for `verify`. Without one, no approval key is registered, so every v2 block reads as unapproved and the result is `INVALID`. `aikiri-ledger verify` is what checks the Base and Bitcoin witnesses.
 
 A revocation block counts wherever it sits on the ledger. Through `cohort revoke` it can only come after the cohort's block.
 
+A record must also pass the format, issuer included: a record that names any issuer but `Chiibitsu Labs` is `INVALID`.
+
 **revoke** seals one certificate's fingerprint under the existing `revocation` kind, as its own block, by the same request path. It writes `ledger/certs/revoked/<fingerprint>.json` naming that block, and `--push` commits the two together. It takes the certificate's proof, not a bare hash; with `--push` it pulls first. It refuses unless `verify` would say `VALID` on this ledger copy, so a typo cannot revoke anything. A certificate already revoked is left as it is.
 
 ## The Merkle tree
 
-The construction is the **Merkle Tree Hash of RFC 9162** (Certificate Transparency v2, §2.1.1) and its audit path (§2.1.3). It uses text domain prefixes in place of the RFC's single `0x00` / `0x01` bytes, in the style of every other hash on this ledger:
+The construction is the **Merkle Tree Hash of RFC 9162** (Certificate Transparency v2, §2.1.1; the same as RFC 6962) and its audit path (§2.1.3). It differs from the RFC in one way: **the leaf and node prefixes are text, not the RFC's single bytes `0x00` / `0x01`**, in the style of every other hash on this ledger. A verifier must use these exact prefixes:
 
 ```
 leaf(fp)   = SHA-256("aikiri-ledger/cert-leaf/v1\n" || fp)      fp: the fingerprint's 32 bytes

@@ -214,28 +214,75 @@ def test_verify_proof_is_false_not_an_exception_for_junk():
 # --- the issuer record: format, fingerprint, link payload --------------------------------
 
 RECORD = {"v": 1, "number": "00112233445566778899aabbccddeeff", "holder": "Test Holder",
-          "course": "Example Course", "completed": "2026-01-31", "issuer": "Example Issuer",
+          "course": "Example Course", "completed": "2026-01-31", "issuer": "Chiibitsu Labs",
           "instructor": "Test Instructor"}
 
 
 def test_golden_record_vectors_exact():
     R = VECTORS["records"]
     assert R["record_domain"] == "aikiri-ledger/cert-record/v1\n" == cohort.RECORD_DOMAIN.decode()
+    assert R["issuer"] == "Chiibitsu Labs" == cohort.ISSUER
     for ex in R["examples"]:
-        assert cohort.record_bytes(ex["record"]).decode("ascii") == ex["canonical"]
-        assert hashlib.sha256(cohort.RECORD_DOMAIN + ex["canonical"].encode()).hexdigest() == ex["fingerprint"]
+        b = cohort.record_bytes(ex["record"])
+        assert b.hex() == ex["canonical_utf8_hex"] and b.decode("utf-8") == ex["canonical"]
+        assert hashlib.sha256(cohort.RECORD_DOMAIN + b).hexdigest() == ex["fingerprint"]
         assert cohort.record_fingerprint(ex["record"]) == ex["fingerprint"]
         assert cohort.encode_payload(ex["record"]) == ex["payload"]
         assert cohort.decode_payload(ex["payload"]) == cohort.parse_record(ex["record"])
-    root, proofs = cohort.build([ex["fingerprint"] for ex in R["examples"]])
-    assert root == R["cohort"]["root"] and proofs == R["cohort"]["proofs"]
+    fps = [ex["fingerprint"] for ex in R["examples"]]
+    assert [c["size"] for c in R["cohorts"]] == [1, 2, 3]
+    for c in R["cohorts"]:
+        root, proofs = cohort.build(fps[:c["size"]], block=c["block"])
+        assert root == c["root"] and proofs == c["proofs"] and c["leaves"] == sorted(fps[:c["size"]])
+    for fp, f in R["revoked_files"].items():
+        assert cohort.revoked_json(fp, f["block"]) == json.dumps(f, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+class _Blk:
+    def __init__(self, d): self.index, self.timestamp, self.roots = d["index"], d["timestamp"], d["roots"]
+
+
+class _Ledger:
+    """Only what a reader takes from ledger/blocks/: index, timestamp, roots."""
+    def __init__(self, blocks): self._b = [_Blk(d) for d in blocks]
+    def blocks(self): return iter(self._b)
+
+
+def test_golden_expected_verdicts_from_the_sample_blocks():
+    R = VECTORS["records"]
+    L = _Ledger(R["blocks"])
+    three = R["cohorts"][2]
+    got = {p["leaf"]: cohort.status(p, L)[0] for p in three["proofs"]}
+    assert got == R["expected_with_3_leaf_cohort"]
+    assert sorted(got.values()) == ["REVOKED", "VALID", "VALID"]
+    # Every 1- and 2-leaf proof is good too: each cohort is in its own block.
+    for c in R["cohorts"][:2]:
+        for p in c["proofs"]:
+            assert cohort.status(p, L)[0] in ("VALID", "REVOKED")
 
 
 def test_golden_record_pinned_here_too():
-    assert cohort.record_fingerprint(RECORD) == "733c4847f82e5bf2fcf4ce73375b32a31fd44691cdfac96e1a7cb963ce4c62b9"
-    esc = VECTORS["records"]["examples"][2]["canonical"]
-    assert '"T\\u00ebst \\"Quoted\\" Holder \\\\ Three"' in esc     # lowercase \u, quote and backslash escaped
-    assert "\\ud83c\\udf93" in esc                                  # outside the BMP: a surrogate pair
+    assert cohort.record_fingerprint(RECORD) == "209fad06c360f203a8c3abb18172127c71d742680bb23a3c4deab40025f08e7d"
+    raw = bytes.fromhex(VECTORS["records"]["examples"][2]["canonical_utf8_hex"])
+    assert '"T\u00ebst H\u014dlder \\"Three\\" \\\\ Example"'.encode() in raw  # UTF-8 as is; " and \ escaped
+    assert "\U0001F393".encode() in raw and b"\\u" not in raw               # no \u escapes at all
+
+
+def test_the_canonical_bytes_are_what_a_browser_gives():
+    """JSON.stringify of a sorted object: the same rules, spelled out in Python."""
+    for ex in VECTORS["records"]["examples"]:
+        r = cohort.parse_record(ex["record"])
+        js = "{" + ",".join(json.dumps(k) + ":" + (str(v) if isinstance(v, int) else
+                            '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"')
+                            for k, v in sorted(r.items())) + "}"
+        assert js.encode("utf-8") == cohort.record_bytes(r)
+
+
+def test_issuer_is_fixed_in_format_v1():
+    with pytest.raises(SchemaError, match="Chiibitsu Labs"):
+        cohort.parse_record({**RECORD, "issuer": "Example Issuer"})
+    with pytest.raises(SchemaError):
+        cohort.parse_record({**RECORD, "issuer": "chiibitsu labs"})
 
 
 def test_host_is_optional_and_only_where_given():
@@ -332,7 +379,7 @@ def test_the_public_files_hold_hashes_only(world, sk, mac, tmp_path):
         text = p.read_text()
         for w in words | {"Test", "Example", "Holder", "Course", "Host"}:
             assert w not in text, (p, w)
-    assert set(json.loads((certs(L) / "revoked" / f"{fps[0]}.json").read_text())) == {"v", "leaf", "block"}
+    assert set(json.loads((certs(L) / "revoked" / f"{fps[0]}.json").read_text())) == {"v", "fingerprint", "block"}
 
 
 def test_seal_a_cohort_then_verify_then_revoke_one(world, sk, mac, tmp_path, capsys):
@@ -349,7 +396,7 @@ def test_seal_a_cohort_then_verify_then_revoke_one(world, sk, mac, tmp_path, cap
     # Before the block lands the proof is sound but not sealed.
     capsys.readouterr()
     assert run(L, tf, "cohort", "verify", str(certs(L) / f"{FIVE[0]}.json")) == 1
-    assert capsys.readouterr().out.startswith("NOT SEALED")
+    assert capsys.readouterr().out.startswith("NOT FOUND")
 
     blk = land(L, sk, mac, 1)
     assert blk.index == req["index"] and blk.roots == req["roots"]
@@ -365,7 +412,7 @@ def test_seal_a_cohort_then_verify_then_revoke_one(world, sk, mac, tmp_path, cap
     rreq = json.loads((L.requests_dir / "next.json").read_text())
     assert rreq["roots"] == [{"kind": "revocation", "sha256": FIVE[2]}]
     mark = cohort.parse_revoked((certs(L) / "revoked" / f"{FIVE[2]}.json").read_text())
-    assert mark == {"v": 1, "leaf": FIVE[2], "block": rreq["index"]}
+    assert mark == {"v": 1, "fingerprint": FIVE[2], "block": rreq["index"]}
 
     # Requested, not yet in a block: still valid, and verify says a revocation is waiting.
     capsys.readouterr()
@@ -502,12 +549,14 @@ def test_verify_says_invalid_for_a_tampered_proof_and_a_wrong_block(world, sk, m
     land(L, sk, mac, 1)
     good = cohort.parse_proof((certs(L) / f"{FIVE[0]}.json").read_text())
 
-    for bad in (_tamper(good, "sibling"), {**good, "block": 7}):
+    for bad, said in ((_tamper(good, "sibling"), "INVALID"), ({**good, "block": 7}, "NOT FOUND"),
+                      ({**good, "block": None}, "NOT FOUND")):
         f = tmp_path / "bad.json"
         f.write_text(json.dumps(bad))
         capsys.readouterr()
         assert run(L, tf, "cohort", "verify", str(f)) == 1
-        assert capsys.readouterr().out.startswith("INVALID")
+        assert capsys.readouterr().out.startswith(said)
+    f.write_text(json.dumps(_tamper(good, "sibling")))
     with pytest.raises(SystemExit, match="refused: INVALID"):
         run(L, tf, "cohort", "revoke", str(f))
 
@@ -519,15 +568,15 @@ def test_a_proof_of_a_cohort_never_sealed_is_not_sealed(world, sk, mac, tmp_path
     assert run(L, tf, "cohort", "build", str(write_fps(tmp_path, FIVE[:4])), "--out", str(tmp_path / "b")) == 0
     capsys.readouterr()
     assert run(L, tf, "cohort", "verify", str(tmp_path / "b" / f"{FIVE[0]}.json")) == 1
-    assert capsys.readouterr().out.startswith("NOT SEALED")
-    with pytest.raises(SystemExit, match="refused: NOT SEALED"):
+    assert capsys.readouterr().out.startswith("NOT FOUND")
+    with pytest.raises(SystemExit, match="refused: NOT FOUND"):
         run(L, tf, "cohort", "revoke", str(tmp_path / "b" / f"{FIVE[0]}.json"))
 
 
 def test_a_root_sealed_as_another_kind_does_not_count(world, sk, mac, tmp_path, capsys):
     """Only a cert-cohort block seals a cohort: the same hash sealed as a revocation is not one."""
     L, trust, tf = world
-    _, [p] = cohort.build([FIVE[0]])
+    _, [p] = cohort.build([FIVE[0]], block=1)   # names the very block that holds its root
     pf = tmp_path / "p.json"; pf.write_text(cohort.proof_json(p))
     from aikiri_ledger.request import Request
     head = L.head()
@@ -538,7 +587,7 @@ def test_a_root_sealed_as_another_kind_does_not_count(world, sk, mac, tmp_path, 
     land(L, sk, mac, 1)
     capsys.readouterr()
     assert run(L, tf, "cohort", "verify", str(pf)) == 1
-    assert capsys.readouterr().out.startswith("NOT SEALED")
+    assert capsys.readouterr().out.startswith("NOT FOUND")
     with pytest.raises(SystemExit, match="already sealed as revocation"):
         run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [FIVE[0]])))
 
@@ -578,7 +627,7 @@ def test_nothing_personal_in_the_vectors():
     assert set(v["inputs"]) == {f"test-cert-{i}" for i in range(1, 6)}
     for ex in v["records"]["examples"]:
         r = ex["record"]
-        assert r["issuer"] == "Example Issuer" and r["instructor"] == "Test Instructor"
+        assert r["issuer"] == "Chiibitsu Labs" and r["instructor"] == "Test Instructor"
         assert r["holder"].startswith(("Test", "T\u00ebst")) and r["course"].startswith("Example Course")
         assert r.get("host", "Example Host") == "Example Host"
 

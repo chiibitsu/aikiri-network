@@ -94,6 +94,7 @@ RECORD_VERSION = 1
 RECORD_FIELDS = ("v", "number", "holder", "course", "completed", "issuer", "instructor")
 RECORD_OPTIONAL = ("host",)
 RECORD_TEXT_MAX = 200
+ISSUER = "Chiibitsu Labs"   # format v1: the only issuer a v1 record can name
 _NUMBER = re.compile(r"\A(?:[0-9a-f]{2}){16,32}\Z")   # 128 to 256 bits, lowercase hex
 _DATE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 _B64URL = re.compile(r"\A[A-Za-z0-9_-]+\Z")
@@ -102,7 +103,7 @@ PAYLOAD_MAX = 4096
 # The public layout under ledger/: hashes only, never a record field.
 CERTS_DIR = "certs"
 REVOKED_DIR = "revoked"
-REVOKED_FIELDS = ("v", "leaf", "block")
+REVOKED_FIELDS = ("v", "fingerprint", "block")
 
 
 def leaf_hash(fp: str) -> bytes:
@@ -237,11 +238,17 @@ def parse_record(value) -> dict:
     out = {"v": RECORD_VERSION, "number": d["number"], "completed": c}
     for k in ("holder", "course", "issuer", "instructor") + tuple(k for k in RECORD_OPTIONAL if k in d):
         out[k] = _text(d[k], f"record.{k}")
+    if out["issuer"] != ISSUER:
+        raise SchemaError(f"record.issuer: a v1 record is issued by {ISSUER!r} exactly")
     return out
 
 
 def record_bytes(record) -> bytes:
-    return canonical_bytes(parse_record(record))
+    """Sorted keys, no whitespace, UTF-8 (not ASCII-escaped: this is the one encoding a
+    browser's JSON.stringify of the same sorted object also gives, since parse_record has
+    already refused control characters, lone surrogates and anything not NFC)."""
+    return json.dumps(parse_record(record), sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 def record_fingerprint(record) -> str:
@@ -278,11 +285,11 @@ def parse_revoked(value) -> dict:
         raise SchemaError("revoked.v: expected 1")
     if exact_int(d["block"], "revoked.block") < 1:
         raise SchemaError("revoked.block: a block index, at least 1")
-    return {"v": 1, "leaf": hex64(d["leaf"], "revoked.leaf"), "block": d["block"]}
+    return {"v": 1, "fingerprint": hex64(d["fingerprint"], "revoked.fingerprint"), "block": d["block"]}
 
 
-def revoked_json(leaf: str, block: int) -> str:
-    return canonical_bytes(parse_revoked({"v": 1, "leaf": leaf, "block": block})).decode() + "\n"
+def revoked_json(fingerprint: str, block: int) -> str:
+    return canonical_bytes(parse_revoked({"v": 1, "fingerprint": fingerprint, "block": block})).decode() + "\n"
 
 
 def read_fingerprints(text: str) -> list[str]:
@@ -303,28 +310,26 @@ def read_fingerprints(text: str) -> list[str]:
 
 
 def status(proof: dict, ledger) -> tuple[str, list[str]]:
-    """What a proof says against a ledger: VALID, REVOKED, NOT SEALED or INVALID, with the
-    reasons. Only the math and the blocks on this ledger copy; the chain's own state is
-    verify's to report."""
+    """What a proof says against a ledger: VALID, REVOKED, NOT FOUND or INVALID, with the
+    reasons. It reads the ledger the way the check page does: the block the proof names,
+    by its index, must hold this root as its one cert-cohort root, and any revocation block
+    naming the fingerprint revokes it. The chain's own state is verify's to report."""
     if not verify_proof(proof):
         return "INVALID", ["the path does not lead from this certificate to the root it names"]
     p = parse_proof(proof)
-    sealed = None
-    revoked = []
-    for blk in ledger.blocks():
-        for r in blk.roots:
-            if r.get("sha256") == p["root"] and r.get("kind") == KIND and sealed is None:
-                sealed = blk
-            if r.get("sha256") == p["leaf"] and r.get("kind") == "revocation":
-                revoked.append(blk)
-    if sealed is None:
-        return "NOT SEALED", [f"no {KIND} block on this ledger seals root {p['root']} "
-                              f"(not sealed yet, or this copy is behind: git pull)"]
-    if p["block"] is not None and p["block"] != sealed.index:
-        return "INVALID", [f"the proof names block {p['block']}, but root {p['root']} is sealed "
-                           f"in block {sealed.index}"]
-    lines = [f"in cohort {p['root']}, sealed in block {sealed.index} ({sealed.timestamp})"]
+    if p["block"] is None:
+        return "NOT FOUND", ["the proof names no block yet: it is from `cohort build`, or not sealed"]
+    blocks = {b.index: b for b in ledger.blocks()}
+    blk = blocks.get(p["block"])
+    if blk is None:
+        return "NOT FOUND", [f"block {p['block']} is not on this ledger (not sealed yet, never "
+                             f"approved, or this copy is behind: git pull)"]
+    if blk.roots != [{"kind": KIND, "sha256": p["root"]}]:
+        return "NOT FOUND", [f"block {p['block']} does not seal cohort {p['root']}"]
+    lines = [f"in cohort {p['root']}, sealed in block {blk.index} ({blk.timestamp})"]
+    revoked = [b for b in blocks.values()
+               if b.roots == [{"kind": "revocation", "sha256": p["leaf"]}]]
     if revoked:
-        b = revoked[0]
+        b = min(revoked, key=lambda b: b.index)
         return "REVOKED", lines + [f"revoked in block {b.index} ({b.timestamp})"]
     return "VALID", lines
