@@ -926,9 +926,9 @@ def _cohort(a, L: Ledger) -> int:
         return _cohort_verify(a, L)
 
     # revoke: only a certificate verify would call VALID here, after the pull
-    proof = _read_proof(a.proof)
     if a.push:
-        _sync(L)
+        _sync(L)        # first: the proof is read from the checkout as it is after the pull
+    proof = _read_proof(a.proof)
     verdict, why = _verdict(a, L, proof)
     if verdict == "REVOKED":
         print(f"certificate {proof['leaf']} is already {why[-1]}; nothing changed")

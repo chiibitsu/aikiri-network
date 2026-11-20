@@ -718,3 +718,20 @@ def test_proofs_are_written_whole(world, tmp_path, monkeypatch):
     for f in FIVE:
         assert (certs(L) / f"{f}.json").read_bytes() == before[f]   # still whole
     assert not [p for p in certs(L).iterdir() if p.name.endswith(".tmp")]
+
+
+def test_revoke_push_reads_the_proof_after_the_pull(world, sk, mac, tmp_path, monkeypatch):
+    """The proof is read from the checkout as the pull leaves it, never from before it."""
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    target = certs(L) / f"{FIVE[0]}.json"
+    upstream = target.read_bytes()
+    target.unlink()                                   # not here until the pull brings it
+    seen = []
+    monkeypatch.setattr(cli, "_sync", lambda L: (seen.append("sync"), target.write_bytes(upstream)))
+    monkeypatch.setattr(cli, "_push_request", lambda req, *a, **k: seen.append("push") or 0)
+    assert run(L, tf, "cohort", "revoke", str(target), "--push") == 0
+    assert seen == ["sync", "push"]
+    assert json.loads((L.requests_dir / "next.json").read_text())["roots"] == [
+        {"kind": "revocation", "sha256": FIVE[0]}]
