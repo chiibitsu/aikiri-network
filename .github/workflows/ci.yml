@@ -50,7 +50,7 @@ jobs:
           pip install --no-deps -e .
           pip check
       - name: canonical bytes must be identical on every platform and version
-        run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
+        run: python -m pytest tests/test_v2.py tests/test_cohort.py -q -k "golden or canonical"
       - run: python -m pytest -q
 
   mac-paths:
@@ -69,7 +69,8 @@ jobs:
       - name: did a file the macOS checks read change
         id: paths
         # The files: the canonical encoder and the approval message (canonical.py,
-        # approval.py, and errors.py, which both raise), the golden vectors, the
+        # approval.py, and errors.py, which both raise), the certificate tree and
+        # record encoding (cohort.py, golden in tests/test_cohort.py), the golden vectors, the
         # signer and its build, the lock and package metadata (what gets installed),
         # and this workflow. tests/test_v2.py is left out: it changes in most pull
         # requests and holds hundreds of tests besides the three golden ones; a change
@@ -83,7 +84,7 @@ jobs:
           # Indented, so no file name can start a line the runner reads as a command.
           echo "changed:"
           sed 's/^/  /' <<< "$changed"
-          if grep -qE '^(aikiri_ledger/(canonical|approval|errors)\.py|tests/vectors/.+|tools/approve/.+|requirements\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$' <<< "$changed"; then
+          if grep -qE '^(aikiri_ledger/(canonical|approval|errors|cohort)\.py|tests/vectors/.+|tools/approve/.+|requirements\.lock|pyproject\.toml|\.github/workflows/ci\.yml)$' <<< "$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -109,7 +110,7 @@ jobs:
           pip install --no-deps -e .
           pip check
       - name: canonical bytes must be identical on every platform and version
-        run: python -m pytest tests/test_v2.py -q -k "golden or canonical"
+        run: python -m pytest tests/test_v2.py tests/test_cohort.py -q -k "golden or canonical"
       - name: the Secure Enclave signer must compile
         run: |
           swiftc -O -framework Security -framework LocalAuthentication \

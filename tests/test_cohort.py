@@ -649,7 +649,7 @@ def test_revoke_refuses_on_a_ledger_copy_that_does_not_verify(world, sk, mac, tm
     assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
     land(L, sk, mac, 1)
     # No external trust file: no approval key registered, so every v2 block reads unapproved.
-    with pytest.raises(SystemExit, match="refused: INVALID"):
+    with pytest.raises(SystemExit, match="refused: INVALID.*no trust file given"):
         cli.main(["--ledger", str(L.root), "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json")])
     assert not (L.requests_dir / "next.json").exists()
 

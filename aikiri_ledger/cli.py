@@ -975,6 +975,9 @@ def _verdict(a, L: Ledger, proof: dict) -> tuple[str, list[str]]:
     if verdict != "INVALID" and chain == State.INVALID:
         verdict, why = "INVALID", why + ["this ledger copy does not verify: " + next(
             (n for n in notes if ": ok (" not in n), notes[-1])]
+    if chain == State.INVALID and not (getattr(a, "trust", None) or os.environ.get("AIKIRI_TRUST")):
+        why = why + ["no trust file given: pass --trust <file> (the published trust anchor); "
+                     "without it no approval key is known and no block can read as approved"]
     return verdict, why + [f"ledger: {State.text(chain)} (this copy, offline; "
                            f"`aikiri-ledger verify` checks Base and Bitcoin)"]
 

@@ -6,7 +6,7 @@ A block holds exactly one root (`parse_roots`), and that rule stays. The cohort'
 
 ## The issuer record and its fingerprint
 
-The issuer record is what the certificate says. It is built and kept by the issuing app (story 2) and lives with the holder, inside their own link. **A real record never enters this repository**: not in code, tests, docs, requests, blocks or the public files. This page fixes only its format; every value here and in the tests is fake.
+The issuer record is what the certificate says. It is built and kept by the issuing app and lives with the holder, inside their own link. **A real record never enters this repository**: not in code, tests, docs, requests, blocks or the public files. This page fixes only its format; every value here and in the tests is fake.
 
 ### Fields
 
@@ -96,7 +96,7 @@ aikiri-ledger --trust ~/aikiri-trust.json cohort revoke <proof.json> --push
 
 A request is bound to one index. If another block lands first, the request can never be written. Running the line again then refuses it as stale, and writes no proof naming someone else's block. Delete it and run the line again.
 
-A repeat changes nothing. A request already waiting for the same root is left byte for byte. Once the root is sealed, the line writes no request and leaves the proofs naming that block.
+A repeat changes nothing new. A request already waiting for the same root is kept (with `--push` it is approved if it was not yet, as with `seal`). Once the root is sealed, the line writes no request and leaves the proofs naming that block.
 
 Refused, with nothing written:
 
@@ -160,8 +160,10 @@ Checking a proof needs no ledger and no network: hash the leaf, fold in each sib
 
 ## What is public, and what it says
 
-- **The cohort block:** one root, `{"kind": "cert-cohort", "sha256": "<root>"}`. Not the fingerprints, not their number, nothing about the course.
+- **The cohort block:** one root, `{"kind": "cert-cohort", "sha256": "<root>"}`.
 - **A revocation block:** one root, `{"kind": "revocation", "sha256": "<fingerprint>"}`.
 - **`ledger/certs/`:** one proof per certificate and one pointer per revocation, named by fingerprint.
 
-The number of files in one cohort's commit shows the cohort's size. A proof's path length shows roughly the same (about log2 n steps). Nothing in any public file names anyone: without the record, a fingerprint is a random-looking number.
+From these, anyone can read a cohort's exact size, every fingerprint in it, which fingerprints were revoked, and when. A proof's path also gives its leaf's place in the sorted order. That is the whole of it. Each fingerprint hashes a record that carries 128 or more random bits, so without the record it names no one, and it can't be found by guessing what a record says. The link between a fingerprint and a person exists only in the record, which stays with the issuer and inside the holder's own link.
+
+The files are pushed with the request, before the approval in GitHub. If a cohort is never approved, its proofs stay in the public history anyway, as hashes that no block ever seals.
