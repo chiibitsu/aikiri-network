@@ -142,7 +142,9 @@ def _mth(level: list[bytes]) -> bytes:
 
 
 def _path(level: list[bytes], m: int) -> list[dict]:
-    """RFC 9162 PATH(m, D), leaf first, each sibling with the side it sits on."""
+    """RFC 9162 PATH(m, D), leaf first, each sibling with the side it sits on. The plain
+    reference, O(n) per leaf: build() derives every path in one walk, and the tests hold
+    the two to the same output."""
     if len(level) == 1:
         return []
     k = _split(len(level))
@@ -159,8 +161,23 @@ def build(fingerprints, block: int | None = None) -> tuple[str, list[dict]]:
     """The cohort's root and one proof per certificate, in leaf order."""
     fps = leaves(fingerprints)
     level = [leaf_hash(f) for f in fps]
-    r = _mth(level).hex()
-    return r, [{"v": PROOF_VERSION, "leaf": fp, "root": r, "block": block, "path": _path(level, i)}
+    paths: list[list[dict]] = [[] for _ in fps]
+
+    def tree(lo: int, hi: int) -> bytes:
+        """MTH(D[lo:hi]), adding each subtree's hash to the path of every leaf on the
+        other side as it goes: every path from one walk, O(n log n) in all."""
+        if hi - lo == 1:
+            return level[lo]
+        mid = lo + _split(hi - lo)
+        left, right = tree(lo, mid), tree(mid, hi)
+        for i in range(lo, mid):
+            paths[i].append({"side": "right", "sha256": right.hex()})
+        for i in range(mid, hi):
+            paths[i].append({"side": "left", "sha256": left.hex()})
+        return node_hash(left, right)
+
+    r = tree(0, len(level)).hex()
+    return r, [{"v": PROOF_VERSION, "leaf": fp, "root": r, "block": block, "path": paths[i]}
                for i, fp in enumerate(fps)]
 
 

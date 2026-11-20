@@ -839,9 +839,14 @@ def _same_cohort(p: Path, root: str) -> None:
 
 def _write_atomic(path: Path, text: str) -> None:
     """Whole or not at all: an interrupted write never leaves half a proof behind."""
-    tmp = path.with_name(f".{path.name}.tmp")
+    # A fresh, unguessable name, created exclusively (O_EXCL never follows a link), so
+    # nothing planted beside the proof can redirect the write. os.replace swaps the name
+    # itself: a link at `path` is replaced, never written through.
+    import tempfile
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
-        with open(tmp, "w") as f:
+        with os.fdopen(fd, "w") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())

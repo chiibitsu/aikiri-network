@@ -867,3 +867,37 @@ def test_a_pointer_whose_push_failed_is_pushed_on_the_rerun(checkout, sk, mac, m
     assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json"), "--push") == 0
     pushed = [l for l in _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split("\n") if l]
     assert pushed == ["Point the revoked certificate at block 2", f"ledger/certs/revoked/{FIVE[0]}.json"]
+
+
+@pytest.mark.parametrize("n", list(range(1, 34)))
+def test_the_one_walk_builder_gives_the_rfc_paths(n):
+    """build() derives every path from one walk; each must equal RFC 9162 PATH(m, D)."""
+    fps = sorted(fake(i) for i in range(1, n + 1))
+    level = [cohort.leaf_hash(f) for f in fps]
+    _, proofs = cohort.build(fps)
+    assert [p["path"] for p in proofs] == [cohort._path(level, m) for m in range(n)]
+
+
+def test_a_full_size_cohort_builds_in_seconds():
+    import time
+    fps = [hashlib.sha256(f"test-cert-{i}".encode()).hexdigest() for i in range(cohort.MAX_LEAVES)]
+    t = time.monotonic()
+    root, proofs = cohort.build(fps)
+    assert time.monotonic() - t < 30            # quadratic would take hours
+    assert len(proofs) == cohort.MAX_LEAVES and all(len(p["path"]) == 16 for p in proofs)
+    assert all(cohort.verify_proof(p) for p in proofs[:100] + proofs[-100:])
+
+
+def test_a_planted_temp_link_is_never_written_through(world, tmp_path):
+    """A `.<fp>.json.tmp` link pulled into ledger/certs must not redirect the proof write."""
+    L, trust, tf = world
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    certs(L).mkdir(parents=True)
+    for f in FIVE:
+        (certs(L) / f".{f}.json.tmp").symlink_to(victim)
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    assert victim.read_text() == "keep me"
+    for f in FIVE:
+        p = certs(L) / f"{f}.json"
+        assert not p.is_symlink() and cohort.parse_proof(p.read_text())["leaf"] == f
