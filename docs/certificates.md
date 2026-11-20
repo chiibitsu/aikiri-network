@@ -128,7 +128,7 @@ aikiri-ledger --trust ~/aikiri-trust.json cohort revoke <proof.json> --push
 
 A request is bound to one index. If another block lands first, the request can never be written. Running the line again then refuses it as stale, and writes no proof naming someone else's block. Delete it and run the line again.
 
-A repeat changes nothing new. A request already waiting for the same root is kept (with `--push` it is approved if it was not yet, as with `seal`). Once the root is sealed, the line writes no request and leaves the proofs naming that block.
+A repeat changes nothing new. A request already waiting for the same root is kept (with `--push` it is approved if it was not yet, as with `seal`). Once the root is sealed, the line writes no request and leaves the proofs naming that block. With `--push`, it also commits and pushes any proof that was missing or changed on `main`, and nothing else; no passphrase is needed, since the block is already there. With `--push`, the fingerprint file is read after the pull.
 
 Refused, with nothing written:
 

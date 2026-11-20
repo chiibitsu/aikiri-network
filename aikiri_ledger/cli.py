@@ -880,6 +880,8 @@ def _write_proofs(out: Path, fps: list[str], block: int | None, *, root_txt: boo
 def _cohort(a, L: Ledger) -> int:
     """Certificates: one cohort, one root, one block; one proof per certificate."""
     if a.cohort_cmd in ("build", "seal"):
+        if a.cohort_cmd == "seal" and a.push:
+            _sync(L)    # first: the fingerprint file is read as the pull leaves it
         try:
             fps = cohort.leaves(cohort.read_fingerprints(Path(a.fingerprints).read_text()))
         except (SchemaError, OSError, UnicodeDecodeError) as e:
@@ -896,8 +898,6 @@ def _cohort(a, L: Ledger) -> int:
             _write_proofs(out, fps, None, root_txt=True)
             print("nothing requested; `aikiri-ledger cohort seal` asks for the block")
             return 0
-        if a.push:
-            _sync(L)
         certs = _certs(L)
         _public_ok(certs)
         for fp in fps:   # a certificate already published in another cohort is refused
@@ -908,8 +908,10 @@ def _cohort(a, L: Ledger) -> int:
                 _same_cohort(f, root)
         state, index, req = _where(L, cohort.KIND, root)
         if state == "sealed":
-            _write_proofs(certs, fps, index, root_txt=False)
+            files = _write_proofs(certs, fps, index, root_txt=False)
             print(f"already sealed in block {index}; nothing requested")
+            if a.push:   # a proof missing or damaged on main is put back there
+                return _push_files(L, files, f"Proofs of the cohort sealed in block {index}")
             return 0
         if state == "free":
             req = _write_request(a, L, cohort.KIND, root)
@@ -981,17 +983,23 @@ def _named_right(path: Path, proof: dict) -> None:
 
 
 def _push_pointer(L: Ledger, mark: Path, block: int) -> int:
-    """Commit and push the repaired pointer alone: no request, no passphrase (it asserts
-    nothing the ledger does not already say, and every reader checks the block it names)."""
-    root, _, allowed = _checkout(L, mark, ())
+    return _push_files(L, [mark], f"Point the revoked certificate at block {block}")
+
+
+def _push_files(L: Ledger, files, message: str) -> int:
+    """Commit and push these public files alone, for a block already on the ledger: no
+    request, no passphrase (they assert nothing the ledger does not already say, and every
+    reader checks the block they name). Nothing new to commit is still a push, and fine."""
+    files = list(files)
+    root, _, allowed = _checkout(L, files[0], tuple(files[1:]))
     _unpublished_only(root, allowed)
     if _git_add(root, allowed).returncode:
-        raise SystemExit(f"not pushed: git add {mark} failed")
+        raise SystemExit("not pushed: git add failed")
     staged = [f for f in _git(root, "diff", "--cached", "--name-only", "-z").stdout.split("\0") if f]
     if not set(staged) <= allowed:
         raise SystemExit("not pushed: other files are staged; commit or unstage them first")
     if staged:
-        c = _git(root, "commit", "-q", "-m", f"Point the revoked certificate at block {block}")
+        c = _git(root, "commit", "-q", "-m", message)
         if c.returncode:
             raise SystemExit(f"not pushed: git commit failed: {c.stderr.strip()[:300]}")
     head = _git(root, "symbolic-ref", "-q", "HEAD").stdout.strip()

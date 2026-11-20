@@ -808,3 +808,38 @@ def test_a_repaired_pointer_is_pushed_alone(checkout, sk, mac, monkeypatch, tmp_
     pushed = _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split("\n")
     assert pushed[0] == "Point the revoked certificate at block 2"
     assert [f for f in pushed[1:] if f] == [f"ledger/certs/revoked/{FIVE[0]}.json"]
+
+
+def test_seal_push_reads_the_fingerprint_file_after_the_pull(world, tmp_path, monkeypatch):
+    """The cohort sealed is the file as the pull leaves it, never the one from before it."""
+    L, trust, tf = world
+    fpfile = tmp_path / "fps.txt"
+    fpfile.write_text(FIVE[0] + "\n")                 # stale: the pull brings all five
+    seen = []
+    monkeypatch.setattr(cli, "_sync", lambda L: (seen.append("sync"), fpfile.write_text("\n".join(FIVE) + "\n")))
+    monkeypatch.setattr(cli, "_push_request", lambda req, *a, **k: seen.append("push") or 0)
+    assert run(L, tf, "cohort", "seal", str(fpfile), "--push") == 0
+    assert seen == ["sync", "push"]
+    assert json.loads((L.requests_dir / "next.json").read_text())["roots"] == [
+        {"kind": "cert-cohort", "sha256": cohort.root(FIVE)}]
+
+
+def test_seal_push_on_a_sealed_cohort_puts_a_missing_proof_back(checkout, sk, mac, monkeypatch, tmp_path_factory):
+    L, tf, repo, remote = checkout
+    elsewhere = tmp_path_factory.mktemp("issuer")
+    fps = write_fps(elsewhere, FIVE)
+    assert run(L, tf, "cohort", "seal", str(fps)) == 0
+    land(L, sk, mac, 1)
+    (certs(L) / f"{FIVE[0]}.json").unlink()           # lost from main
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "block 1, one proof lost"); _git(repo, "push", "-q")
+
+    monkeypatch.setattr(cli, "_sync", lambda L: None)
+    assert run(L, tf, "cohort", "seal", str(fps), "--push") == 0
+    pushed = [l for l in _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split("\n") if l]
+    assert pushed == ["Proofs of the cohort sealed in block 1", f"ledger/certs/{FIVE[0]}.json"]
+    assert not (L.requests_dir / "next.json").exists()
+
+    # Nothing missing: the same line again commits nothing and still exits 0.
+    n = _git(remote, "rev-list", "--count", "main").strip()
+    assert run(L, tf, "cohort", "seal", str(fps), "--push") == 0
+    assert _git(remote, "rev-list", "--count", "main").strip() == n
