@@ -315,6 +315,18 @@ def revocation_block(fingerprint: str, blocks):
     return min(hits, key=lambda b: b.index) if hits else None
 
 
+def status_of_file(file_name: str, proof, ledger) -> tuple[str, list[str]]:
+    """As status(), for a proof read from ledger/certs/<file_name>: a proof whose leaf is not
+    the fingerprint its file is named by is INVALID, whatever else it says."""
+    try:
+        leaf = parse_proof(proof)["leaf"]
+    except (SchemaError, TypeError, ValueError, RecursionError):
+        return "INVALID", ["not a proof"]
+    if file_name != f"{leaf}.json":
+        return "INVALID", [f"{file_name} holds the proof of another certificate ({leaf})"]
+    return status(proof, ledger)
+
+
 def status(proof: dict, ledger) -> tuple[str, list[str]]:
     """What a proof says against a ledger: VALID, REVOKED, NOT FOUND or INVALID, with the
     reasons. The block the proof names, by its index, must hold this root as its one

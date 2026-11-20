@@ -261,8 +261,9 @@ def test_golden_reader_cases():
     R = VECTORS["records"]
     L = _Ledger(R["blocks"])
     assert {c["expected"] for c in R["reader_cases"]} == {"VALID", "REVOKED", "NOT FOUND", "INVALID"}
+    assert any(c["file"] != f'{c["proof"]["leaf"]}.json' for c in R["reader_cases"])
     for c in R["reader_cases"]:
-        assert cohort.status(c["proof"], L)[0] == c["expected"], c["case"]
+        assert cohort.status_of_file(c["file"], c["proof"], L)[0] == c["expected"], c["case"]
 
 
 def test_golden_revoked_file_cases():

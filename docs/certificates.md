@@ -71,7 +71,9 @@ The payload carries the whole record, holder's name included. The holder control
 - The verdict every proof of each cohort must get against those blocks.
 - `reader_cases`: one proof altered in each way a reader must catch, with the verdict it must give:
   - its block `null`, missing, holding another cohort, holding the root under another kind, or holding something else (each NOT FOUND);
-  - its path tampered with, or its root swapped (INVALID).
+  - its path tampered with, its root swapped, or the proof filed under another certificate's fingerprint (INVALID).
+
+  Each case names the file the proof is read from, `ledger/certs/<file>`. A proof whose `leaf` is not the fingerprint in its file name is INVALID, whatever else it says (`cohort.status_of_file`).
 - `revoked_file_cases`: a `revoked/` file naming the right revocation block (it counts), a missing block, or a block that is not its revocation (neither counts).
 
 The check page's TypeScript tests against the same file.
