@@ -37,7 +37,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `aikiri_ledger/verify.py` ~ the four states
 - `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin proofs (`ots` stamps and upgrades them; verify reads them)
 - `contracts/AikiriLedger.sol` ~ owner-only anchor, sequential, no re-anchoring
-- `ledger/` ~ `blocks/`, `proofs/`, `requests/`, `HEAD`, `config.json`, `deploy.json`
+- `ledger/` ~ `blocks/`, `proofs/`, `requests/`, `certs/` (certificate proofs, hashes only), `HEAD`, `config.json`, `deploy.json`
 - `aikiri_ledger/softkey.py` ~ the approval key: P-256, passphrase-encrypted, never in CI
 - `tools/approve/` ~ a Secure Enclave signer that macOS will not run as a CLI tool; see `docs/setup.md` §7
 - `tests/vectors/` ~ golden bytes and hashes, checked on Linux across Python 3.11–3.13 and on macOS with 3.11
@@ -93,12 +93,12 @@ The line the app posts ends in `--push`: it writes the request, asks your passph
 ## Sealing a certificate cohort
 
 ```
-aikiri-ledger cohort seal <fingerprints.txt> --out <folder> --push        # folder outside this repo
-aikiri-ledger --trust ~/aikiri-trust.json cohort verify <proof.json>   # VALID, REVOKED, NOT SEALED, INVALID
-aikiri-ledger cohort revoke <proof.json> --push
+aikiri-ledger cohort seal <fingerprints.txt> --push
+aikiri-ledger --trust ~/aikiri-trust.json cohort verify <proof.json | record.json | payload>
+aikiri-ledger --trust ~/aikiri-trust.json cohort revoke <proof.json> --push
 ```
 
-A whole cohort's certificates in one block: the root is the Merkle root of their fingerprints (kind `cert-cohort`), and each certificate gets a proof file. One paste, one passphrase, one approval, as for `seal`. Revoking one certificate seals its fingerprint as a `revocation`. Only fingerprints ever reach this repository; the certificate records stay with the issuer. Contract, tree and proof format: `docs/certificates.md`.
+A whole cohort's certificates in one block. The root is the Merkle root of their fingerprints (kind `cert-cohort`). Each certificate's proof goes to `ledger/certs/<fingerprint>.json`, pushed with the request: one paste, one passphrase, one approval, as for `seal`. Revoking one certificate seals its fingerprint as a `revocation` and writes `ledger/certs/revoked/<fingerprint>.json`. Only fingerprints ever reach this repository; the certificate records stay with the issuer and the holder. The record format, the proof format and the tree are in `docs/certificates.md`.
 
 ## Run
 

@@ -17,11 +17,13 @@
   cohort build <file> --out <dir>
                             a certificate cohort's Merkle root, and one proof per
                             certificate; writes no request. See docs/certificates.md
-  cohort seal <file> --out <dir>
-                            request the one block that seals the cohort's root; the
-                            proofs name that block (--push: approve, commit, push)
-  cohort verify <proof>     VALID, REVOKED, NOT SEALED or INVALID for one certificate
-  cohort revoke <proof>     request the block that revokes that one certificate (--push)
+  cohort seal <file>        request the one block that seals the cohort's root, and
+                            write each proof to ledger/certs/ naming that block
+                            (--push: approve, commit and push them together)
+  cohort verify <proof | record | payload>
+                            VALID, REVOKED, NOT SEALED, NOT FOUND or INVALID
+  cohort revoke <proof>     request the block that revokes that one certificate, and
+                            write ledger/certs/revoked/<fingerprint>.json (--push)
   report-block <index>      tell the app about the client documents a block seals,
                             by fingerprint alone (block.yml runs it; AIKIRI_SEAL_URL,
                             AIKIRI_SEAL_SECRET)
@@ -199,12 +201,14 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("build", "seal"):
         cs = c.add_parser(name)
         cs.add_argument("fingerprints", help="a file of 64-hex certificate fingerprints, one per line")
-        cs.add_argument("--out", required=True, help="the folder for root.txt and the proofs")
-        if name == "seal":
+        if name == "build":
+            cs.add_argument("--out", required=True, help="the folder for root.txt and the proofs")
+        else:
             cs.add_argument("--push", action="store_true",
                             help="also approve the request (passphrase), commit it and push it")
             cs.add_argument("--device", default="mac"); cs.add_argument("--keyfile", default=None)
-    c.add_parser("verify").add_argument("proof")
+    c.add_parser("verify").add_argument(
+        "proof", help="a proof file, an issuer record (JSON file), or a certificate link's payload")
     cr = c.add_parser("revoke"); cr.add_argument("proof")
     cr.add_argument("--push", action="store_true",
                     help="also approve the request (passphrase), commit it and push it")
@@ -565,55 +569,71 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
 
 
-def _checkout(ledger: Ledger, request: Path | None = None) -> tuple[Path, str]:
-    """The git checkout holding the ledger, and the request's path inside it. Refuses when
-    anything but that request is staged, before anything is approved, written or added."""
+def _git_add(cwd: Path, paths) -> subprocess.CompletedProcess:
+    """git add, the paths on stdin: a cohort can be more files than a command line holds."""
+    return subprocess.run(["git", "-C", str(cwd), "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                          capture_output=True, text=True, input="\0".join(sorted(paths)))
+
+
+def _checkout(ledger: Ledger, request: Path | None = None,
+              with_files: tuple[Path, ...] = ()) -> tuple[Path, str, set[str]]:
+    """The git checkout holding the ledger, the request's path inside it, and every path the
+    push may carry (the request, and the certificate files written beside it). Refuses when
+    anything else is staged, before anything is approved, written or added."""
     top = _git(ledger.root, "rev-parse", "--show-toplevel")
     if top.returncode:
         raise SystemExit(f"not pushed: {ledger.root} is not in a git checkout")
     root = Path(top.stdout.strip())
-    rel = str((request or ledger.requests_dir / "next.json").resolve().relative_to(root.resolve()))
-    staged = _git(root, "diff", "--cached", "--name-only").stdout.split()
-    if [f for f in staged if f != rel]:
+    base = root.resolve()
+    rel = str((request or ledger.requests_dir / "next.json").resolve().relative_to(base))
+    allowed = {rel} | {str(f.resolve().relative_to(base)) for f in with_files}
+    staged = _git(root, "diff", "--cached", "--name-only", "-z").stdout.split("\0")
+    if [f for f in staged if f and f not in allowed]:
         raise SystemExit("not pushed: other files are staged; commit or unstage them first")
-    return root, rel
+    return root, rel, allowed
 
 
 def _sync(ledger: Ledger) -> None:
     """`seal --push` starts from what block.yml last wrote: the previous request is gone
     and its block is in, so the next document is not refused as waiting."""
-    root, _ = _checkout(ledger)
+    root, _, _ = _checkout(ledger)
     p = _git(root, "pull", "--ff-only", "-q")
     if p.returncode:
         raise SystemExit(f"not pulled: git pull --ff-only failed: {p.stderr.strip()[:300]}")
 
 
-def _unpublished_only(root: Path, rel: str) -> None:
+def _unpublished_only(root: Path, allowed: set[str]) -> None:
     """A plain `git push` sends every local commit, so refuse unless each one not yet on
-    the upstream changes only the request (a request committed by an earlier, failed push)."""
+    the upstream changes only what this push carries (a request committed by an earlier,
+    failed push)."""
     ahead = _git(root, "rev-list", "@{u}..HEAD")
     if ahead.returncode:
         raise SystemExit(f"not pushed: the branch has no upstream: {ahead.stderr.strip()[:300]}")
     for c in ahead.stdout.split():
-        files = _git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", c).stdout.split()
-        if files != [rel]:
+        files = _git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", c).stdout.split("\0")
+        files = [f for f in files if f]
+        if not files or not set(files) <= allowed:
             raise SystemExit(f"not pushed: local commit {c[:7]} is not on the remote yet; "
                              f"push or drop it first")
 
 
-def _push_request(path: Path, device: str, keyfile, ledger: Ledger) -> int:
+def _push_request(path: Path, device: str, keyfile, ledger: Ledger,
+                  with_files: tuple[Path, ...] = ()) -> int:
     """`seal --push`: approve the waiting request if it is not yet, then commit and push
-    only that file. The passphrase stays hers; block.yml does the rest and reports."""
-    root, rel = _checkout(ledger, path)
-    _unpublished_only(root, rel)
+    only that file (and, for a certificate cohort or revocation, the public files written
+    beside it). The passphrase stays hers; block.yml does the rest."""
+    root, rel, allowed = _checkout(ledger, path, with_files)
+    _unpublished_only(root, allowed)
     if "approval" not in loads_strict(path.read_text()):
         _approve(path, device, keyfile)
-    if _git(root, "add", "--", rel).returncode:
+    if _git_add(root, allowed).returncode:
         raise SystemExit(f"not pushed: git add {rel} failed")
-    staged = _git(root, "diff", "--cached", "--name-only")
-    if staged.stdout.strip():
+    staged = [f for f in _git(root, "diff", "--cached", "--name-only", "-z").stdout.split("\0") if f]
+    if not set(staged) <= allowed:
+        raise SystemExit("not pushed: other files are staged; commit or unstage them first")
+    if staged:
         index = loads_strict(path.read_text())["index"]
-        c = _git(root, "commit", "-m", f"Request block {index}", "--", rel)
+        c = _git(root, "commit", "-q", "-m", f"Request block {index}")
         if c.returncode:
             raise SystemExit(f"not pushed: git commit failed: {c.stderr.strip()[:300]}")
     # Named, never a bare push: push.default=matching would send every branch.
@@ -755,15 +775,22 @@ def _where(L: Ledger, kind: str, sha: str) -> tuple[str, int, Path | None]:
         waiting = sealing.pending(_requests(L))
     except SchemaError as e:
         raise SystemExit(f"refused: {e}")
+    head = L.head()
     for p, root in waiting:
         if root["sha256"] == sha:
             if root["kind"] != kind:
                 raise SystemExit(f"refused: {p} already asks to seal {sha} as {root['kind']}")
-            return "waiting", int(loads_strict(p.read_text())["index"]), p
+            r = loads_strict(p.read_text())
+            if r.get("index") != head.index + 1 or r.get("prev_hash") != head.hash:
+                # Another block landed first: this request can never be written. Proofs
+                # naming its index would name someone else's block.
+                raise SystemExit(f"refused: {p} is stale (it asks for block {r.get('index')} after "
+                                 f"a block that is no longer the head); delete it and run this again")
+            return "waiting", head.index + 1, p
     if waiting:
         raise SystemExit(f"refused: {', '.join(str(p) for p, _ in waiting)} is waiting; one block, "
                          f"one request. Push that one first, then run this again")
-    return "free", L.head().index + 1, None
+    return "free", head.index + 1, None
 
 
 def _write_request(a, L: Ledger, kind: str, sha: str) -> Path:
@@ -782,7 +809,7 @@ def _write_request(a, L: Ledger, kind: str, sha: str) -> Path:
 
 
 def _cohort_out(out: Path, root: str, fps: list[str]) -> None:
-    """The proofs folder holds this cohort's root.txt and proofs, or nothing yet. Anything
+    """`build`'s folder holds this cohort's root.txt and proofs, or nothing yet. Anything
     else there is refused before a byte is written, so no other cohort's proof is replaced."""
     if out.is_symlink() or (out.exists() and not out.is_dir()):
         raise SystemExit(f"refused: {out} is not a folder")
@@ -797,22 +824,57 @@ def _cohort_out(out: Path, root: str, fps: list[str]) -> None:
             if p.read_text().strip() != root:
                 raise SystemExit(f"refused: {p} is another cohort's root")
         else:
-            try:
-                if cohort.parse_proof(p.read_text())["root"] != root:
-                    raise SystemExit(f"refused: {p} is a proof of another cohort")
-            except SchemaError:
-                raise SystemExit(f"refused: {p} is not a proof; nothing overwritten")
+            _same_cohort(p, root)
 
 
-def _write_proofs(out: Path, fps: list[str], block: int | None) -> str:
+def _same_cohort(p: Path, root: str) -> None:
+    try:
+        theirs = cohort.parse_proof(p.read_bytes())["root"]
+    except (SchemaError, OSError):
+        raise SystemExit(f"refused: {p} is not a proof; nothing overwritten")
+    if theirs != root:
+        raise SystemExit(f"refused: {p} is a proof of another cohort ({theirs}); "
+                         f"a certificate is in one cohort only")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Whole or not at all: an interrupted write never leaves half a proof behind."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _certs(L: Ledger) -> Path:
+    return L.root / cohort.CERTS_DIR
+
+
+def _public_ok(d: Path) -> None:
+    """ledger/certs and ledger/certs/revoked are plain folders, never links out of the ledger."""
+    if d.is_symlink() or (d.exists() and not d.is_dir()):
+        raise SystemExit(f"refused: {d} is not a folder")
+
+
+def _write_proofs(out: Path, fps: list[str], block: int | None, *, root_txt: bool) -> list[Path]:
     root, proofs = cohort.build(fps, block=block)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "root.txt").write_text(root + "\n")
+    written = []
+    if root_txt:
+        _write_atomic(out / "root.txt", root + "\n")
     for pr in proofs:
-        (out / f"{pr['leaf']}.json").write_text(cohort.proof_json(pr))
+        f = out / f"{pr['leaf']}.json"
+        if f.is_symlink():
+            raise SystemExit(f"refused: {f} is a link; nothing overwritten")
+        _write_atomic(f, cohort.proof_json(pr))
+        written.append(f)
     where = f"naming block {block}" if block is not None else "naming no block yet"
     print(f"{len(proofs)} proof(s) written to {out}/, {where}")
-    return root
+    return written
 
 
 def _cohort(a, L: Ledger) -> int:
@@ -820,75 +882,144 @@ def _cohort(a, L: Ledger) -> int:
     if a.cohort_cmd in ("build", "seal"):
         try:
             fps = cohort.leaves(cohort.read_fingerprints(Path(a.fingerprints).read_text()))
-        except SchemaError as e:
+        except (SchemaError, OSError, UnicodeDecodeError) as e:
             raise SystemExit(f"refused: {a.fingerprints}: {e}")
         root = cohort.root(fps)
-        out = Path(a.out)
-        _cohort_out(out, root, fps)
         print(f"cohort of {len(fps)} certificate(s), root {root}")
         if a.cohort_cmd == "build":
-            _write_proofs(out, fps, None)
+            out = Path(a.out)
+            here = L.root.resolve()
+            if out.resolve() == here or here in out.resolve().parents:
+                raise SystemExit(f"refused: {out} is inside the ledger; `cohort seal` writes the "
+                                 f"public proofs there itself. Build into a folder of your own")
+            _cohort_out(out, root, fps)
+            _write_proofs(out, fps, None, root_txt=True)
             print("nothing requested; `aikiri-ledger cohort seal` asks for the block")
             return 0
         if a.push:
             _sync(L)
+        certs = _certs(L)
+        _public_ok(certs)
+        for fp in fps:   # a certificate already published in another cohort is refused
+            f = certs / f"{fp}.json"
+            if f.is_symlink():
+                raise SystemExit(f"refused: {f} is a link; nothing written")
+            if f.exists():
+                _same_cohort(f, root)
         state, index, req = _where(L, cohort.KIND, root)
         if state == "sealed":
-            _write_proofs(out, fps, index)
+            _write_proofs(certs, fps, index, root_txt=False)
             print(f"already sealed in block {index}; nothing requested")
             return 0
         if state == "free":
             req = _write_request(a, L, cohort.KIND, root)
         else:
             print(f"already requested in {req}; nothing changed")
-        _write_proofs(out, fps, index)
+        files = _write_proofs(certs, fps, index, root_txt=False)
         if a.push:
-            return _push_request(req, a.device, a.keyfile, L)
-        print(f"next: aikiri-ledger approve {req}, then commit and push it. The proofs are "
-              f"good once block {index} is written")
+            return _push_request(req, a.device, a.keyfile, L, tuple(files))
+        print(f"next: aikiri-ledger approve {req}, then commit and push it with {certs}/. "
+              f"The proofs are good once block {index} is written")
         return 0
 
-    try:
-        proof = cohort.parse_proof(Path(a.proof).read_text())
-    except (SchemaError, OSError) as e:
-        raise SystemExit(f"INVALID  {a.proof}: {e}")
-
     if a.cohort_cmd == "verify":
-        chain, notes = verify_chain(L, _trust(a))
-        try:
-            verdict, why = cohort.status(proof, L)
-        except SchemaError as e:
-            verdict, why = "INVALID", [f"unreadable block: {e}"]
-        if verdict != "INVALID" and chain == State.INVALID:
-            verdict, why = "INVALID", why + ["this ledger copy does not verify: " + next(
-                (n for n in notes if ": ok (" not in n), notes[-1])]
-        print(f"{verdict}  certificate {proof['leaf']}")
-        for line in why:
-            print(f"  {line}")
-        print(f"  ledger: {State.text(chain)} (this copy, offline; `aikiri-ledger verify` checks Base and Bitcoin)")
-        return 0 if verdict == "VALID" else 1
+        return _cohort_verify(a, L)
 
-    # revoke: only a certificate this ledger shows sealed, and not revoked already
-    verdict, why = cohort.status(proof, L)
+    # revoke: only a certificate verify would call VALID here, after the pull
+    proof = _read_proof(a.proof)
+    if a.push:
+        _sync(L)
+    verdict, why = _verdict(a, L, proof)
     if verdict == "REVOKED":
         print(f"certificate {proof['leaf']} is already {why[-1]}; nothing changed")
         return 0
     if verdict != "VALID":
         raise SystemExit(f"refused: {verdict}: {'; '.join(why)}")
-    if a.push:
-        _sync(L)
     state, index, req = _where(L, "revocation", proof["leaf"])
     if state == "sealed":   # landed since the check above, after the pull
         print(f"certificate {proof['leaf']} is already revoked in block {index}; nothing changed")
         return 0
+    revoked_dir = _certs(L) / cohort.REVOKED_DIR
+    _public_ok(_certs(L)); _public_ok(revoked_dir)
+    mark = revoked_dir / f"{proof['leaf']}.json"
+    if mark.is_symlink():
+        raise SystemExit(f"refused: {mark} is a link; nothing overwritten")
     if state == "free":
         req = _write_request(a, L, "revocation", proof["leaf"])
     else:
         print(f"already requested in {req}; nothing changed")
+    revoked_dir.mkdir(parents=True, exist_ok=True)
+    _write_atomic(mark, cohort.revoked_json(proof["leaf"], index))
+    print(f"{mark} written, naming block {index}")
     if a.push:
-        return _push_request(req, a.device, a.keyfile, L)
-    print(f"next: aikiri-ledger approve {req}, then commit and push it")
+        return _push_request(req, a.device, a.keyfile, L, (mark,))
+    print(f"next: aikiri-ledger approve {req}, then commit and push it with {mark}")
     return 0
+
+
+def _read_proof(path: str) -> dict:
+    try:
+        return cohort.parse_proof(Path(path).read_bytes())
+    except (SchemaError, OSError) as e:
+        raise SystemExit(f"INVALID  {path}: {e}")
+
+
+def _verdict(a, L: Ledger, proof: dict) -> tuple[str, list[str]]:
+    """The proof against this ledger copy, and the copy itself checked offline: a copy that
+    does not verify makes every certificate on it INVALID."""
+    chain, notes = verify_chain(L, _trust(a))
+    try:
+        verdict, why = cohort.status(proof, L)
+    except SchemaError as e:
+        verdict, why = "INVALID", [f"unreadable block: {e}"]
+    if verdict != "INVALID" and chain == State.INVALID:
+        verdict, why = "INVALID", why + ["this ledger copy does not verify: " + next(
+            (n for n in notes if ": ok (" not in n), notes[-1])]
+    return verdict, why + [f"ledger: {State.text(chain)} (this copy, offline; "
+                           f"`aikiri-ledger verify` checks Base and Bitcoin)"]
+
+
+def _cohort_verify(a, L: Ledger) -> int:
+    """One certificate, given as its proof file, its issuer record (a JSON file) or the
+    payload of its link. A record or payload is looked up by fingerprint in ledger/certs."""
+    given = a.proof
+    p = Path(given)
+    try:
+        if p.is_file():
+            obj = cohort._loads(p.read_bytes())
+            if isinstance(obj, dict) and "path" in obj:
+                proof = cohort.parse_proof(obj)
+                fp = None
+            else:
+                fp = cohort.record_fingerprint(obj)
+        else:
+            fp = cohort.record_fingerprint(cohort.decode_payload(given))
+    except (SchemaError, OSError, ValueError) as e:
+        print(f"INVALID  {e}")
+        return 1
+    if fp is not None:
+        f = _certs(L) / f"{fp}.json"
+        if f.is_symlink() or not f.is_file():
+            print(f"NOT FOUND  certificate {fp}")
+            print(f"  no proof at {f} (not sealed yet, or this copy is behind: git pull)")
+            return 1
+        try:
+            proof = cohort.parse_proof(f.read_bytes())
+        except (SchemaError, OSError) as e:
+            print(f"INVALID  certificate {fp}\n  {f}: {e}")
+            return 1
+        if proof["leaf"] != fp:
+            print(f"INVALID  certificate {fp}\n  {f} is the proof of another certificate")
+            return 1
+
+    verdict, why = _verdict(a, L, proof)
+    mark = _certs(L) / cohort.REVOKED_DIR / f"{proof['leaf']}.json"
+    if verdict == "VALID" and mark.is_file() and not mark.is_symlink():
+        why.insert(-1, f"a revocation is requested ({mark.name}) but no block on this ledger seals it yet")
+    print(f"{verdict}  certificate {proof['leaf']}")
+    for line in why:
+        print(f"  {line}")
+    return 0 if verdict == "VALID" else 1
 
 
 if __name__ == "__main__":

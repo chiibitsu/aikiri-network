@@ -303,5 +303,103 @@
   "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491": "3c28aace9a7300e59ed15d37743532e9896644eb6267175972382dadd2f51c7a",
   "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5"
  },
- "node_domain": "aikiri-ledger/cert-node/v1\n"
+ "node_domain": "aikiri-ledger/cert-node/v1\n",
+ "records": {
+  "about": "Issuer record format vectors. Every value is fake. canonical is the exact ASCII bytes hashed; fingerprint = sha256(record_domain + canonical); payload = base64url(canonical), no padding.",
+  "cohort": {
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "06b82007fe5eb7cb296b0dd033f502ffa11c828df50e7feaec3797c53a9449b7",
+     "path": [
+      {
+       "sha256": "a3dbb5019248123996af11dd20e78a2a0dbcb2d1b4c79e9cfd13adef2a8e06d9",
+       "side": "right"
+      },
+      {
+       "sha256": "a5c5383d03d7f45e08fa4af6863415c463cdc1ab5303fd4f264bc214ae022c18",
+       "side": "right"
+      }
+     ],
+     "root": "dc1fa899cc3635a6e6d6e93a24a120c24360a9385ced985cfe000fd3f6df5b9c",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "293e828240a382ed4528974f9a0b07e0cf42b98a6e5cbe0c0a736d7e64530747",
+     "path": [
+      {
+       "sha256": "17b49003dce3c680def27f7af9694ba531e4178d5616465b9e22b70727fd9583",
+       "side": "left"
+      },
+      {
+       "sha256": "a5c5383d03d7f45e08fa4af6863415c463cdc1ab5303fd4f264bc214ae022c18",
+       "side": "right"
+      }
+     ],
+     "root": "dc1fa899cc3635a6e6d6e93a24a120c24360a9385ced985cfe000fd3f6df5b9c",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "733c4847f82e5bf2fcf4ce73375b32a31fd44691cdfac96e1a7cb963ce4c62b9",
+     "path": [
+      {
+       "sha256": "b3129a5464d1b9a67c27442149e87261f0eadf6e8e69cc5cea47b33ddc915be0",
+       "side": "left"
+      }
+     ],
+     "root": "dc1fa899cc3635a6e6d6e93a24a120c24360a9385ced985cfe000fd3f6df5b9c",
+     "v": 1
+    }
+   ],
+   "root": "dc1fa899cc3635a6e6d6e93a24a120c24360a9385ced985cfe000fd3f6df5b9c"
+  },
+  "examples": [
+   {
+    "canonical": "{\"completed\":\"2026-01-31\",\"course\":\"Example Course\",\"holder\":\"Test Holder\",\"instructor\":\"Test Instructor\",\"issuer\":\"Example Issuer\",\"number\":\"00112233445566778899aabbccddeeff\",\"v\":1}",
+    "fingerprint": "733c4847f82e5bf2fcf4ce73375b32a31fd44691cdfac96e1a7cb963ce4c62b9",
+    "payload": "eyJjb21wbGV0ZWQiOiIyMDI2LTAxLTMxIiwiY291cnNlIjoiRXhhbXBsZSBDb3Vyc2UiLCJob2xkZXIiOiJUZXN0IEhvbGRlciIsImluc3RydWN0b3IiOiJUZXN0IEluc3RydWN0b3IiLCJpc3N1ZXIiOiJFeGFtcGxlIElzc3VlciIsIm51bWJlciI6IjAwMTEyMjMzNDQ1NTY2Nzc4ODk5YWFiYmNjZGRlZWZmIiwidiI6MX0",
+    "record": {
+     "completed": "2026-01-31",
+     "course": "Example Course",
+     "holder": "Test Holder",
+     "instructor": "Test Instructor",
+     "issuer": "Example Issuer",
+     "number": "00112233445566778899aabbccddeeff",
+     "v": 1
+    }
+   },
+   {
+    "canonical": "{\"completed\":\"2026-01-31\",\"course\":\"Example Course\",\"holder\":\"Test Holder Two\",\"host\":\"Example Host\",\"instructor\":\"Test Instructor\",\"issuer\":\"Example Issuer\",\"number\":\"ffeeddccbbaa99887766554433221100\",\"v\":1}",
+    "fingerprint": "293e828240a382ed4528974f9a0b07e0cf42b98a6e5cbe0c0a736d7e64530747",
+    "payload": "eyJjb21wbGV0ZWQiOiIyMDI2LTAxLTMxIiwiY291cnNlIjoiRXhhbXBsZSBDb3Vyc2UiLCJob2xkZXIiOiJUZXN0IEhvbGRlciBUd28iLCJob3N0IjoiRXhhbXBsZSBIb3N0IiwiaW5zdHJ1Y3RvciI6IlRlc3QgSW5zdHJ1Y3RvciIsImlzc3VlciI6IkV4YW1wbGUgSXNzdWVyIiwibnVtYmVyIjoiZmZlZWRkY2NiYmFhOTk4ODc3NjY1NTQ0MzMyMjExMDAiLCJ2IjoxfQ",
+    "record": {
+     "completed": "2026-01-31",
+     "course": "Example Course",
+     "holder": "Test Holder Two",
+     "host": "Example Host",
+     "instructor": "Test Instructor",
+     "issuer": "Example Issuer",
+     "number": "ffeeddccbbaa99887766554433221100",
+     "v": 1
+    }
+   },
+   {
+    "canonical": "{\"completed\":\"2024-02-29\",\"course\":\"Example Course \\u2014 Part 1 \\ud83c\\udf93\",\"holder\":\"T\\u00ebst \\\"Quoted\\\" Holder \\\\ Three\",\"instructor\":\"Test Instructor\",\"issuer\":\"Example Issuer\",\"number\":\"0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\",\"v\":1}",
+    "fingerprint": "06b82007fe5eb7cb296b0dd033f502ffa11c828df50e7feaec3797c53a9449b7",
+    "payload": "eyJjb21wbGV0ZWQiOiIyMDI0LTAyLTI5IiwiY291cnNlIjoiRXhhbXBsZSBDb3Vyc2UgXHUyMDE0IFBhcnQgMSBcdWQ4M2NcdWRmOTMiLCJob2xkZXIiOiJUXHUwMGVic3QgXCJRdW90ZWRcIiBIb2xkZXIgXFwgVGhyZWUiLCJpbnN0cnVjdG9yIjoiVGVzdCBJbnN0cnVjdG9yIiwiaXNzdWVyIjoiRXhhbXBsZSBJc3N1ZXIiLCJudW1iZXIiOiIwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmIiwidiI6MX0",
+    "record": {
+     "completed": "2024-02-29",
+     "course": "Example Course \u2014 Part 1 \ud83c\udf93",
+     "holder": "T\u00ebst \"Quoted\" Holder \\ Three",
+     "instructor": "Test Instructor",
+     "issuer": "Example Issuer",
+     "number": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+     "v": 1
+    }
+   }
+  ],
+  "record_domain": "aikiri-ledger/cert-record/v1\n"
+ }
 }

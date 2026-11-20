@@ -211,12 +211,86 @@ def test_verify_proof_is_false_not_an_exception_for_junk():
         assert cohort.verify_proof(junk) is False
 
 
+# --- the issuer record: format, fingerprint, link payload --------------------------------
+
+RECORD = {"v": 1, "number": "00112233445566778899aabbccddeeff", "holder": "Test Holder",
+          "course": "Example Course", "completed": "2026-01-31", "issuer": "Example Issuer",
+          "instructor": "Test Instructor"}
+
+
+def test_golden_record_vectors_exact():
+    R = VECTORS["records"]
+    assert R["record_domain"] == "aikiri-ledger/cert-record/v1\n" == cohort.RECORD_DOMAIN.decode()
+    for ex in R["examples"]:
+        assert cohort.record_bytes(ex["record"]).decode("ascii") == ex["canonical"]
+        assert hashlib.sha256(cohort.RECORD_DOMAIN + ex["canonical"].encode()).hexdigest() == ex["fingerprint"]
+        assert cohort.record_fingerprint(ex["record"]) == ex["fingerprint"]
+        assert cohort.encode_payload(ex["record"]) == ex["payload"]
+        assert cohort.decode_payload(ex["payload"]) == cohort.parse_record(ex["record"])
+    root, proofs = cohort.build([ex["fingerprint"] for ex in R["examples"]])
+    assert root == R["cohort"]["root"] and proofs == R["cohort"]["proofs"]
+
+
+def test_golden_record_pinned_here_too():
+    assert cohort.record_fingerprint(RECORD) == "733c4847f82e5bf2fcf4ce73375b32a31fd44691cdfac96e1a7cb963ce4c62b9"
+    esc = VECTORS["records"]["examples"][2]["canonical"]
+    assert '"T\\u00ebst \\"Quoted\\" Holder \\\\ Three"' in esc     # lowercase \u, quote and backslash escaped
+    assert "\\ud83c\\udf93" in esc                                  # outside the BMP: a surrogate pair
+
+
+def test_host_is_optional_and_only_where_given():
+    with_host = {**RECORD, "host": "Example Host"}
+    assert "host" not in cohort.parse_record(RECORD)
+    assert cohort.parse_record(with_host)["host"] == "Example Host"
+    assert cohort.record_fingerprint(with_host) != cohort.record_fingerprint(RECORD)
+    for bad in ("", None, 3):
+        with pytest.raises(SchemaError):
+            cohort.parse_record({**RECORD, "host": bad})
+
+
+@pytest.mark.parametrize("change", [
+    {"number": "00" * 15},                 # 120 bits: too few
+    {"number": "00" * 33},                 # too long
+    {"number": "0" * 33},                  # odd length
+    {"number": "AA" * 16},                 # capitals
+    {"completed": "2026-02-30"}, {"completed": "2026-1-31"}, {"completed": "31/01/2026"},
+    {"v": 2}, {"v": True}, {"holder": ""}, {"holder": "x" * 201}, {"holder": "a\nb"},
+    {"holder": "e\u0301"},               # not NFC
+    {"holder": "\ud800"},                # a lone surrogate
+    {"extra": "x"},
+])
+def test_a_bad_record_is_refused(change):
+    with pytest.raises(SchemaError):
+        cohort.parse_record({**RECORD, **change})
+
+
+def test_every_required_field_is_required():
+    for k in cohort.RECORD_FIELDS:
+        with pytest.raises(SchemaError):
+            cohort.parse_record({f: v for f, v in RECORD.items() if f != k})
+
+
+def test_payload_is_read_from_a_link_and_only_in_canonical_form():
+    pl = cohort.encode_payload(RECORD)
+    assert "=" not in pl
+    assert cohort.decode_payload(f"https://example.test/network/cert#{pl}") == RECORD
+    import base64
+    loose = base64.urlsafe_b64encode(json.dumps(RECORD).encode()).rstrip(b"=").decode()
+    for bad in (pl + "=", pl[:-1], pl + "A", loose, "", "#", "not base64!", "A" * 5000):
+        with pytest.raises(SchemaError):
+            cohort.decode_payload(bad)
+
+
 # --- the ledger side: seal, verify, revoke ---------------------------------------------
 
 def write_fps(tmp_path, fps):
     f = tmp_path / "fingerprints.txt"
     f.write_text("\n".join(fps) + "\n")
     return f
+
+
+def certs(L):
+    return L.root / "certs"
 
 
 def test_the_kind_is_known_and_still_one_root_per_block():
@@ -242,44 +316,70 @@ def test_build_writes_proofs_and_touches_no_ledger(world, tmp_path, capsys):
     assert cohort.root(FIVE) in capsys.readouterr().out
 
 
+def test_the_public_files_hold_hashes_only(world, sk, mac, tmp_path):
+    """ledger/certs/<fp>.json and ledger/certs/revoked/<fp>.json: no record field, ever."""
+    L, trust, tf = world
+    recs = [{**RECORD, "number": f"{i:02x}" * 16, "holder": f"Test Holder {i}"} for i in range(1, 4)]
+    recs[0]["host"] = "Example Host"
+    fps = [cohort.record_fingerprint(r) for r in recs]
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, fps))) == 0
+    land(L, sk, mac, 1)
+    assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{fps[0]}.json")) == 0
+    public = [p for p in certs(L).rglob("*") if p.is_file()]
+    assert sorted(p.name for p in public) == sorted([f"{f}.json" for f in fps] + [f"{fps[0]}.json"])
+    words = {w for r in recs for k, v in r.items() if k not in ("v", "completed") for w in [v]}
+    for p in public:
+        text = p.read_text()
+        for w in words | {"Test", "Example", "Holder", "Course", "Host"}:
+            assert w not in text, (p, w)
+    assert set(json.loads((certs(L) / "revoked" / f"{fps[0]}.json").read_text())) == {"v", "leaf", "block"}
+
+
 def test_seal_a_cohort_then_verify_then_revoke_one(world, sk, mac, tmp_path, capsys):
     L, trust, tf = world
-    out = tmp_path / "proofs"
     fps = write_fps(tmp_path, FIVE)
     root = cohort.root(FIVE)
 
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(out)) == 0
+    assert run(L, tf, "cohort", "seal", str(fps)) == 0
     req = json.loads((L.requests_dir / "next.json").read_text())
     assert req["roots"] == [{"kind": "cert-cohort", "sha256": root}]
-    assert all(cohort.parse_proof((out / f"{f}.json").read_text())["block"] == req["index"] for f in FIVE)
+    assert all(cohort.parse_proof((certs(L) / f"{f}.json").read_text())["block"] == req["index"] for f in FIVE)
+    assert not (certs(L) / "root.txt").exists()
 
     # Before the block lands the proof is sound but not sealed.
     capsys.readouterr()
-    assert run(L, tf, "cohort", "verify", str(out / f"{FIVE[0]}.json")) == 1
+    assert run(L, tf, "cohort", "verify", str(certs(L) / f"{FIVE[0]}.json")) == 1
     assert capsys.readouterr().out.startswith("NOT SEALED")
 
     blk = land(L, sk, mac, 1)
     assert blk.index == req["index"] and blk.roots == req["roots"]
     for f in FIVE:
-        assert run(L, tf, "cohort", "verify", str(out / f"{f}.json")) == 0
+        assert run(L, tf, "cohort", "verify", str(certs(L) / f"{f}.json")) == 0
     said = capsys.readouterr().out
     assert said.count("VALID  certificate") == 5 and f"sealed in block {blk.index}" in said
     assert "ledger: VALID LOCALLY" in said
 
     # Revoke the third: its fingerprint, sealed under the existing revocation kind.
-    victim = out / f"{FIVE[2]}.json"
+    victim = certs(L) / f"{FIVE[2]}.json"
     assert run(L, tf, "cohort", "revoke", str(victim)) == 0
     rreq = json.loads((L.requests_dir / "next.json").read_text())
     assert rreq["roots"] == [{"kind": "revocation", "sha256": FIVE[2]}]
-    rblk = land(L, sk, mac, 2)
+    mark = cohort.parse_revoked((certs(L) / "revoked" / f"{FIVE[2]}.json").read_text())
+    assert mark == {"v": 1, "leaf": FIVE[2], "block": rreq["index"]}
 
+    # Requested, not yet in a block: still valid, and verify says a revocation is waiting.
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", str(victim)) == 0
+    assert "a revocation is requested" in capsys.readouterr().out
+
+    rblk = land(L, sk, mac, 2)
     capsys.readouterr()
     assert run(L, tf, "cohort", "verify", str(victim)) == 1
     said = capsys.readouterr().out
     assert said.startswith("REVOKED  certificate " + FIVE[2])
     assert f"revoked in block {rblk.index}" in said
     for f in FIVE[:2] + FIVE[3:]:
-        assert run(L, tf, "cohort", "verify", str(out / f"{f}.json")) == 0
+        assert run(L, tf, "cohort", "verify", str(certs(L) / f"{f}.json")) == 0
 
     # Revoking again changes nothing.
     before = snapshot(L)
@@ -287,53 +387,103 @@ def test_seal_a_cohort_then_verify_then_revoke_one(world, sk, mac, tmp_path, cap
     assert snapshot(L) == before
 
 
+def test_a_revoked_file_alone_revokes_nothing(world, sk, mac, tmp_path, capsys):
+    """The pointer file is not evidence: only a revocation block is."""
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    (certs(L) / "revoked").mkdir()
+    (certs(L) / "revoked" / f"{FIVE[0]}.json").write_text(cohort.revoked_json(FIVE[0], 2))
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", str(certs(L) / f"{FIVE[0]}.json")) == 0
+    assert capsys.readouterr().out.startswith("VALID")
+
+
+def test_verify_takes_a_record_or_a_link_payload(world, sk, mac, tmp_path, capsys):
+    L, trust, tf = world
+    recs = [{**RECORD, "number": f"{i:02x}" * 16} for i in range(1, 4)]
+    fps = [cohort.record_fingerprint(r) for r in recs]
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, fps))) == 0
+    land(L, sk, mac, 1)
+    rf = tmp_path / "record.json"; rf.write_text(json.dumps(recs[1]))
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", str(rf)) == 0
+    assert run(L, tf, "cohort", "verify", "https://example.test/network/cert#" + cohort.encode_payload(recs[2])) == 0
+    said = capsys.readouterr().out
+    assert said.count("VALID  certificate") == 2 and fps[1] in said and fps[2] in said
+    assert "Test Holder" not in said    # verify prints the fingerprint, never the record
+
+    stranger = {**RECORD, "number": "ab" * 16}
+    assert run(L, tf, "cohort", "verify", cohort.encode_payload(stranger)) == 1
+    assert capsys.readouterr().out.startswith("NOT FOUND  certificate " + cohort.record_fingerprint(stranger))
+    assert run(L, tf, "cohort", "verify", "#not-a-payload") == 1
+    assert capsys.readouterr().out.startswith("INVALID")
+
+    # A proof file put under another certificate's name is caught.
+    (certs(L) / f"{cohort.record_fingerprint(stranger)}.json").write_text(
+        (certs(L) / f"{fps[0]}.json").read_text())
+    assert run(L, tf, "cohort", "verify", cohort.encode_payload(stranger)) == 1
+    assert "proof of another certificate" in capsys.readouterr().out
+
+
 def test_a_repeat_seal_changes_nothing(world, sk, mac, tmp_path):
     L, trust, tf = world
-    out = tmp_path / "proofs"
     fps = write_fps(tmp_path, FIVE)
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(out)) == 0
-    before, proofs = snapshot(L), {p.name: p.read_bytes() for p in out.iterdir()}
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(out)) == 0
+    assert run(L, tf, "cohort", "seal", str(fps)) == 0
+    before = snapshot(L)
+    assert run(L, tf, "cohort", "seal", str(fps)) == 0
     assert snapshot(L) == before
-    assert {p.name: p.read_bytes() for p in out.iterdir()} == proofs
 
     blk = land(L, sk, mac, 1)
     before = snapshot(L)
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(out)) == 0   # sealed: no request
+    assert run(L, tf, "cohort", "seal", str(fps)) == 0   # sealed: no request, same proofs
     assert snapshot(L) == before and not (L.requests_dir / "next.json").exists()
-    assert cohort.parse_proof((out / f"{FIVE[0]}.json").read_text())["block"] == blk.index
-
-
-def test_seal_after_build_fills_in_the_block(world, tmp_path):
-    L, trust, tf = world
-    out = tmp_path / "proofs"
-    fps = write_fps(tmp_path, FIVE)
-    assert run(L, tf, "cohort", "build", str(fps), "--out", str(out)) == 0
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(out)) == 0
-    assert cohort.parse_proof((out / f"{FIVE[0]}.json").read_text())["block"] == 1
+    assert cohort.parse_proof((certs(L) / f"{FIVE[0]}.json").read_text())["block"] == blk.index
 
 
 def test_one_request_at_a_time(world, tmp_path):
     L, trust, tf = world
-    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)), "--out", str(tmp_path / "a")) == 0
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    before = snapshot(L)
     with pytest.raises(SystemExit, match="one block, one request"):
-        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE[:2])), "--out", str(tmp_path / "b"))
-    assert not (tmp_path / "b").exists()
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [fake(8), fake(9)])))
+    assert snapshot(L) == before
 
 
-def test_a_folder_holding_anything_else_is_refused(world, tmp_path):
+def test_a_certificate_is_in_one_cohort_only(world, sk, mac, tmp_path):
     L, trust, tf = world
-    fps = write_fps(tmp_path, FIVE)
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE[:3]))) == 0
+    land(L, sk, mac, 1)
+    before = snapshot(L)
+    with pytest.raises(SystemExit, match="in one cohort only"):
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE[2:])))
+    assert snapshot(L) == before
+
+
+def test_a_build_folder_holding_anything_else_is_refused(world, tmp_path):
+    L, trust, tf = world
     other = tmp_path / "other"
     assert run(L, tf, "cohort", "build", str(write_fps(tmp_path, FIVE[:2])), "--out", str(other)) == 0
     fps = write_fps(tmp_path, FIVE)
     with pytest.raises(SystemExit, match="another cohort"):
-        run(L, tf, "cohort", "seal", str(fps), "--out", str(other))
+        run(L, tf, "cohort", "build", str(fps), "--out", str(other))
     stray = tmp_path / "stray"
     stray.mkdir(); (stray / "notes.txt").write_text("x")
     with pytest.raises(SystemExit, match="not this cohort's"):
         run(L, tf, "cohort", "build", str(fps), "--out", str(stray))
-    assert not (L.requests_dir / "next.json").exists()
+
+
+def test_a_linked_certs_folder_or_proof_is_refused(world, tmp_path):
+    L, trust, tf = world
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    certs(L).symlink_to(elsewhere)
+    with pytest.raises(SystemExit, match="not a folder"):
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)))
+    certs(L).unlink(); certs(L).mkdir()
+    (certs(L) / f"{FIVE[0]}.json").symlink_to(elsewhere / "x.json")
+    with pytest.raises(SystemExit, match="is a link"):
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)))
+    assert not (L.requests_dir / "next.json").exists() and not (elsewhere / "x.json").exists()
 
 
 def test_a_bad_fingerprint_file_is_refused_with_nothing_written(world, tmp_path):
@@ -342,16 +492,15 @@ def test_a_bad_fingerprint_file_is_refused_with_nothing_written(world, tmp_path)
     f.write_text(f"{FIVE[0]}\nnot-a-fingerprint\n")
     before = snapshot(L)
     with pytest.raises(SystemExit, match="line 2"):
-        run(L, tf, "cohort", "seal", str(f), "--out", str(tmp_path / "out"))
-    assert snapshot(L) == before and not (tmp_path / "out").exists()
+        run(L, tf, "cohort", "seal", str(f))
+    assert snapshot(L) == before
 
 
 def test_verify_says_invalid_for_a_tampered_proof_and_a_wrong_block(world, sk, mac, tmp_path, capsys):
     L, trust, tf = world
-    out = tmp_path / "proofs"
-    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)), "--out", str(out)) == 0
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
     land(L, sk, mac, 1)
-    good = cohort.parse_proof((out / f"{FIVE[0]}.json").read_text())
+    good = cohort.parse_proof((certs(L) / f"{FIVE[0]}.json").read_text())
 
     for bad in (_tamper(good, "sibling"), {**good, "block": 7}):
         f = tmp_path / "bad.json"
@@ -365,7 +514,7 @@ def test_verify_says_invalid_for_a_tampered_proof_and_a_wrong_block(world, sk, m
 
 def test_a_proof_of_a_cohort_never_sealed_is_not_sealed(world, sk, mac, tmp_path, capsys):
     L, trust, tf = world
-    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)), "--out", str(tmp_path / "a")) == 0
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
     land(L, sk, mac, 1)
     assert run(L, tf, "cohort", "build", str(write_fps(tmp_path, FIVE[:4])), "--out", str(tmp_path / "b")) == 0
     capsys.readouterr()
@@ -380,11 +529,9 @@ def test_a_root_sealed_as_another_kind_does_not_count(world, sk, mac, tmp_path, 
     L, trust, tf = world
     _, [p] = cohort.build([FIVE[0]])
     pf = tmp_path / "p.json"; pf.write_text(cohort.proof_json(p))
-    assert run(L, tf, "cohort", "build", str(write_fps(tmp_path, [FIVE[0]])), "--out", str(tmp_path / "x")) == 0
-    # A revocation block whose root happens to be the cohort root.
     from aikiri_ledger.request import Request
     head = L.head()
-    (L.requests_dir).mkdir(parents=True, exist_ok=True)
+    L.requests_dir.mkdir(parents=True, exist_ok=True)
     (L.requests_dir / "next.json").write_text(json.dumps(Request.unsigned(
         index=head.index + 1, prev_hash=head.hash, roots=[{"kind": "revocation", "sha256": p["root"]}],
         validator=head.validator)))
@@ -393,26 +540,132 @@ def test_a_root_sealed_as_another_kind_does_not_count(world, sk, mac, tmp_path, 
     assert run(L, tf, "cohort", "verify", str(pf)) == 1
     assert capsys.readouterr().out.startswith("NOT SEALED")
     with pytest.raises(SystemExit, match="already sealed as revocation"):
-        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [FIVE[0]])), "--out", str(tmp_path / "y"))
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [FIVE[0]])))
 
 
-def test_cohort_seal_push_commits_only_the_request(checkout, mac, monkeypatch, tmp_path_factory):
+def test_cohort_seal_push_commits_the_request_and_its_proofs_only(checkout, mac, monkeypatch, tmp_path_factory):
     L, tf, repo, remote = checkout
     monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    (repo / "unrelated.txt").write_text("not staged, never pushed")
     elsewhere = tmp_path_factory.mktemp("issuer")
-    fps = write_fps(elsewhere, FIVE)
-    assert run(L, tf, "cohort", "seal", str(fps), "--out", str(elsewhere / "proofs"), "--push") == 0
+    assert run(L, tf, "cohort", "seal", str(write_fps(elsewhere, FIVE)), "--push") == 0
     pushed = _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split()
-    assert pushed == ["Request", "block", "1", "ledger/requests/next.json"]
+    assert pushed[:3] == ["Request", "block", "1"]
+    assert sorted(pushed[3:]) == sorted(["ledger/requests/next.json"] +
+                                        [f"ledger/certs/{f}.json" for f in FIVE])
     sealed = json.loads(_git(remote, "show", "main:ledger/requests/next.json"))
     assert sealed["approval"]["device"] == "mac"
     assert sealed["roots"] == [{"kind": "cert-cohort", "sha256": cohort.root(FIVE)}]
-    for f in FIVE:   # no fingerprint of a single certificate travels with the cohort's block
-        assert f not in _git(remote, "show", "main:ledger/requests/next.json")
+
+    # The same line again: nothing new to commit, still exits 0.
+    assert run(L, tf, "cohort", "seal", str(write_fps(elsewhere, FIVE)), "--push") == 0
+    assert _git(remote, "rev-list", "--count", "main").strip() == "2"
+
+
+def test_cohort_push_refuses_to_carry_other_staged_files(checkout, mac, monkeypatch, tmp_path_factory):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    (repo / "other.txt").write_text("x")
+    _git(repo, "add", "other.txt")
+    elsewhere = tmp_path_factory.mktemp("issuer")
+    with pytest.raises(SystemExit, match="other files are staged"):
+        run(L, tf, "cohort", "seal", str(write_fps(elsewhere, FIVE)), "--push")
 
 
 def test_nothing_personal_in_the_vectors():
-    """The vectors hold hashes of the fake strings and nothing else."""
-    text = (Path(__file__).parent / "vectors" / "cert_cohort.json").read_text()
-    words = set(json.loads(text)["inputs"])
-    assert words == {f"test-cert-{i}" for i in range(1, 6)}
+    """The vectors hold hashes of fake strings and fake records, and nothing else."""
+    v = VECTORS
+    assert set(v["inputs"]) == {f"test-cert-{i}" for i in range(1, 6)}
+    for ex in v["records"]["examples"]:
+        r = ex["record"]
+        assert r["issuer"] == "Example Issuer" and r["instructor"] == "Test Instructor"
+        assert r["holder"].startswith(("Test", "T\u00ebst")) and r["course"].startswith("Example Course")
+        assert r.get("host", "Example Host") == "Example Host"
+
+
+# --- found in review: each one refused cleanly, never a traceback or a wrong block --------
+
+def test_a_stale_waiting_request_is_refused_and_names_no_block(world, sk, mac, tmp_path):
+    """A request for block 1 still sits there after another block 1 landed: re-running the
+    line must not write proofs naming that other block."""
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    payload = json.loads((L.requests_dir / "next.json").read_text())
+    land(L, sk, mac, 1)                                   # block 1 is written; the head moved
+    other = [fake(8), fake(9)]
+    (L.requests_dir / "next.json").write_text(json.dumps(
+        {**payload, "roots": [{"kind": "cert-cohort", "sha256": cohort.root(other)}]}))
+    with pytest.raises(SystemExit, match="stale"):
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, other)))
+    assert not (certs(L) / f"{fake(8)}.json").exists()
+
+
+@pytest.mark.parametrize("junk", [b"\xff\xfe", b"[" * 30000 + b"]" * 30000, b"1" * 5000,
+                                  b'{"v":1,"v":1}', b"x" * 70000])
+def test_junk_proof_files_are_invalid_not_a_crash(world, tmp_path, capsys, junk):
+    L, trust, tf = world
+    f = tmp_path / "junk.json"; f.write_bytes(junk)
+    assert run(L, tf, "cohort", "verify", str(f)) == 1
+    assert capsys.readouterr().out.startswith("INVALID")
+    with pytest.raises(SystemExit, match="INVALID"):
+        run(L, tf, "cohort", "revoke", str(f))
+    assert cohort.verify_proof(junk) is False
+
+
+def test_a_duplicate_key_is_refused_not_read_last_wins():
+    _, [p] = cohort.build([FIVE[0]], block=3)
+    text = cohort.proof_json(p).rstrip("\n")[:-1] + ',"block":9}'
+    with pytest.raises(SchemaError, match="duplicate"):
+        cohort.parse_proof(text)
+
+
+def test_a_missing_or_unreadable_fingerprint_file_is_refused(world, tmp_path):
+    L, trust, tf = world
+    with pytest.raises(SystemExit, match="refused"):
+        run(L, tf, "cohort", "seal", str(tmp_path / "nope.txt"))
+    bad = tmp_path / "bad.txt"; bad.write_bytes(b"\xff\n")
+    with pytest.raises(SystemExit, match="refused"):
+        run(L, tf, "cohort", "build", str(bad), "--out", str(tmp_path / "o"))
+
+
+def test_build_never_writes_inside_the_ledger(world, tmp_path):
+    L, trust, tf = world
+    before = snapshot(L)
+    for inside in (L.root, L.requests_dir, L.root / "certs"):
+        with pytest.raises(SystemExit, match="inside the ledger"):
+            run(L, tf, "cohort", "build", str(write_fps(tmp_path, FIVE)), "--out", str(inside))
+    assert snapshot(L) == before
+
+
+def test_only_a_newline_separates_fingerprints():
+    for sep in ("\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\x0b", "\x0c"):
+        with pytest.raises(SchemaError, match="line 1"):
+            cohort.read_fingerprints(FIVE[0] + sep + FIVE[1])
+    assert cohort.read_fingerprints(FIVE[0] + "\r\n" + FIVE[1]) == FIVE[:2]
+
+
+def test_revoke_refuses_on_a_ledger_copy_that_does_not_verify(world, sk, mac, tmp_path):
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    # No external trust file: no approval key registered, so every v2 block reads unapproved.
+    with pytest.raises(SystemExit, match="refused: INVALID"):
+        cli.main(["--ledger", str(L.root), "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json")])
+    assert not (L.requests_dir / "next.json").exists()
+
+
+def test_proofs_are_written_whole(world, tmp_path, monkeypatch):
+    """A write that dies part way leaves the old file, never half a proof."""
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    before = {f: (certs(L) / f"{f}.json").read_bytes() for f in FIVE}
+    import os
+    real = os.replace
+    monkeypatch.setattr(os, "replace", lambda *a: (_ for _ in ()).throw(OSError("disk full")))
+    (L.requests_dir / "next.json").unlink()
+    with pytest.raises(OSError):
+        run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE)))
+    monkeypatch.setattr(os, "replace", real)
+    for f in FIVE:
+        assert (certs(L) / f"{f}.json").read_bytes() == before[f]   # still whole
+    assert not [p for p in certs(L).iterdir() if p.name.endswith(".tmp")]
