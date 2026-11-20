@@ -936,6 +936,8 @@ def _cohort(a, L: Ledger) -> int:
         mark, named, real = _mark_state(L, proof["leaf"])
         if named == real:
             print(f"certificate {proof['leaf']} is already {why[-2]}; nothing changed")
+            if a.push:   # a pointer committed by an earlier push that failed is sent now
+                return _push_files(L, [mark], f"Point the revoked certificate at block {real}")
             return 0
         # Revoked on the ledger, but the page's pointer is missing or wrong: put it right,
         # or the check page would go on calling the certificate valid.

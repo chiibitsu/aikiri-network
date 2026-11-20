@@ -843,3 +843,27 @@ def test_seal_push_on_a_sealed_cohort_puts_a_missing_proof_back(checkout, sk, ma
     n = _git(remote, "rev-list", "--count", "main").strip()
     assert run(L, tf, "cohort", "seal", str(fps), "--push") == 0
     assert _git(remote, "rev-list", "--count", "main").strip() == n
+
+
+def test_a_pointer_whose_push_failed_is_pushed_on_the_rerun(checkout, sk, mac, monkeypatch, tmp_path_factory):
+    L, tf, repo, remote = checkout
+    elsewhere = tmp_path_factory.mktemp("issuer")
+    assert run(L, tf, "cohort", "seal", str(write_fps(elsewhere, FIVE))) == 0
+    land(L, sk, mac, 1)
+    assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json")) == 0
+    land(L, sk, mac, 2)
+    (certs(L) / "revoked" / f"{FIVE[0]}.json").unlink()
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "two blocks, no pointer"); _git(repo, "push", "-q")
+    monkeypatch.setattr(cli, "_sync", lambda L: None)
+
+    real = cli._git
+    monkeypatch.setattr(cli, "_git", lambda cwd, *a: real(cwd, "push", "--dry-run", "-q", "nowhere")
+                        if a[:1] == ("push",) else real(cwd, *a))
+    with pytest.raises(SystemExit, match="git push failed"):
+        run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json"), "--push")
+    monkeypatch.setattr(cli, "_git", real)
+
+    # The pointer is right locally and committed, but not on the remote: the rerun sends it.
+    assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json"), "--push") == 0
+    pushed = [l for l in _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split("\n") if l]
+    assert pushed == ["Point the revoked certificate at block 2", f"ledger/certs/revoked/{FIVE[0]}.json"]
