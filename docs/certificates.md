@@ -25,6 +25,8 @@ A JSON object with exactly these fields, and `host` only when the certificate na
 
 Every text field is 1 to 200 Unicode code points, NFC-normalised, with no control characters (U+0000–U+001F, U+007F) and no lone surrogates. No other field is accepted.
 
+Other invisible or direction-changing characters are allowed in the bytes, such as U+0080–U+009F, U+2028 and bidi overrides like U+202E. They hash the same everywhere, but they can make text look like something else. A page that shows `holder` or `course` must display them neutralised, for example inside a `<bdi>` with the overrides stripped.
+
 ### Canonical bytes
 
 JSON with the keys sorted (by code point), no whitespace, encoded as **UTF-8**. `v` is a bare integer; every other value is a string. There are no floats, NaN or Infinity. Inside a string only `"` and `\` are escaped, as `\"` and `\\`. Everything else is written as itself, in UTF-8, with no `\uXXXX` escapes: a non-ASCII character is its UTF-8 bytes, and 🎓 is the four bytes `f0 9f 8e 93`.
@@ -66,7 +68,11 @@ The payload carries the whole record, holder's name included. The holder control
 - A 1-, 2- and 3-leaf cohort of those fingerprints, each with its root and proofs, naming blocks 10, 11 and 12.
 - A revoked fingerprint: its `revoked/` file, naming block 13.
 - The sample blocks, with only the fields a reader takes from `ledger/blocks/` (index, timestamp, roots).
-- The verdict each proof of the 3-leaf cohort must get against those blocks.
+- The verdict every proof of each cohort must get against those blocks.
+- `reader_cases`: one proof altered in each way a reader must catch, with the verdict it must give:
+  - its block `null`, missing, holding another cohort, holding the root under another kind, or holding something else (each NOT FOUND);
+  - its path tampered with, or its root swapped (INVALID).
+- `revoked_file_cases`: a `revoked/` file naming the right revocation block (it counts), a missing block, or a block that is not its revocation (neither counts).
 
 The check page's TypeScript tests against the same file.
 
@@ -145,7 +151,7 @@ A revocation block counts wherever it sits on the ledger. Through `cohort revoke
 
 A record must also pass the format, issuer included: a record that names any issuer but `Chiibitsu Labs` is `INVALID`.
 
-**revoke** seals one certificate's fingerprint under the existing `revocation` kind, as its own block, by the same request path. It writes `ledger/certs/revoked/<fingerprint>.json` naming that block, and `--push` commits the two together. It takes the certificate's proof, not a bare hash; with `--push` it pulls first. It refuses unless `verify` would say `VALID` on this ledger copy, so a typo cannot revoke anything. A certificate already revoked is left as it is.
+**revoke** seals one certificate's fingerprint under the existing `revocation` kind, as its own block, by the same request path. It writes `ledger/certs/revoked/<fingerprint>.json` naming that block, and `--push` commits the two together. It takes the certificate's proof, not a bare hash; with `--push` it pulls first. It refuses unless `verify` would say `VALID` on this ledger copy, so a typo cannot revoke anything. A certificate already revoked gets no second revocation block. If its `revoked/` file is missing, or names another block, revoke rewrites the file to name the real revocation block. With `--push` it commits and pushes that one file (no request and no passphrase, since the file asserts nothing the ledger doesn't already say). Without that file the check page would go on showing the certificate as valid. `cohort verify` warns when it finds this.
 
 ## The Merkle tree
 

@@ -251,14 +251,28 @@ class _Ledger:
 def test_golden_expected_verdicts_from_the_sample_blocks():
     R = VECTORS["records"]
     L = _Ledger(R["blocks"])
-    three = R["cohorts"][2]
-    got = {p["leaf"]: cohort.status(p, L)[0] for p in three["proofs"]}
-    assert got == R["expected_with_3_leaf_cohort"]
-    assert sorted(got.values()) == ["REVOKED", "VALID", "VALID"]
-    # Every 1- and 2-leaf proof is good too: each cohort is in its own block.
-    for c in R["cohorts"][:2]:
-        for p in c["proofs"]:
-            assert cohort.status(p, L)[0] in ("VALID", "REVOKED")
+    for c in R["cohorts"]:
+        got = {p["leaf"]: cohort.status(p, L)[0] for p in c["proofs"]}
+        assert got == R["expected_by_cohort"][str(c["size"])]
+    assert sorted(R["expected_by_cohort"]["3"].values()) == ["REVOKED", "VALID", "VALID"]
+
+
+def test_golden_reader_cases():
+    R = VECTORS["records"]
+    L = _Ledger(R["blocks"])
+    assert {c["expected"] for c in R["reader_cases"]} == {"VALID", "REVOKED", "NOT FOUND", "INVALID"}
+    for c in R["reader_cases"]:
+        assert cohort.status(c["proof"], L)[0] == c["expected"], c["case"]
+
+
+def test_golden_revoked_file_cases():
+    R = VECTORS["records"]
+    blocks = {b["index"]: b for b in R["blocks"]}
+    for c in R["revoked_file_cases"]:
+        f = cohort.parse_revoked(c["file"])
+        blk = blocks.get(f["block"])
+        counts = blk is not None and blk["roots"] == [{"kind": "revocation", "sha256": f["fingerprint"]}]
+        assert counts == c["counts"], c["case"]
 
 
 def test_golden_record_pinned_here_too():
@@ -561,7 +575,7 @@ def test_verify_says_invalid_for_a_tampered_proof_and_a_wrong_block(world, sk, m
         run(L, tf, "cohort", "revoke", str(f))
 
 
-def test_a_proof_of_a_cohort_never_sealed_is_not_sealed(world, sk, mac, tmp_path, capsys):
+def test_a_proof_of_a_cohort_never_sealed_is_not_found(world, sk, mac, tmp_path, capsys):
     L, trust, tf = world
     assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
     land(L, sk, mac, 1)
@@ -735,3 +749,61 @@ def test_revoke_push_reads_the_proof_after_the_pull(world, sk, mac, tmp_path, mo
     assert seen == ["sync", "push"]
     assert json.loads((L.requests_dir / "next.json").read_text())["roots"] == [
         {"kind": "revocation", "sha256": FIVE[0]}]
+
+
+def test_revoke_puts_a_missing_or_wrong_pointer_right(world, sk, mac, tmp_path, capsys):
+    """Revoked on the ledger but not in ledger/certs/revoked/: the page would say valid."""
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    proof = certs(L) / f"{FIVE[0]}.json"
+    assert run(L, tf, "cohort", "revoke", str(proof)) == 0
+    rblk = land(L, sk, mac, 2)
+    mark = certs(L) / "revoked" / f"{FIVE[0]}.json"
+
+    for damage in ("missing", "wrong block"):
+        if damage == "missing":
+            mark.unlink()
+        else:
+            mark.write_text(cohort.revoked_json(FIVE[0], 1))
+        capsys.readouterr()
+        assert run(L, tf, "cohort", "verify", str(proof)) == 1
+        said = capsys.readouterr().out
+        assert said.startswith("REVOKED") and "check page does not show this revocation" in said
+        assert run(L, tf, "cohort", "revoke", str(proof)) == 0
+        assert cohort.parse_revoked(mark.read_text()) == {"v": 1, "fingerprint": FIVE[0], "block": rblk.index}
+        assert not (L.requests_dir / "next.json").exists()       # no second revocation block
+        capsys.readouterr()
+        assert run(L, tf, "cohort", "verify", str(proof)) == 1
+        assert "check page does not show" not in capsys.readouterr().out
+
+
+def test_a_proof_file_under_another_certificates_name_is_refused(world, sk, mac, tmp_path, capsys):
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    (certs(L) / f"{FIVE[0]}.json").write_bytes((certs(L) / f"{FIVE[1]}.json").read_bytes())
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", str(certs(L) / f"{FIVE[0]}.json")) == 1
+    assert capsys.readouterr().out.startswith("INVALID")
+    with pytest.raises(SystemExit, match="proof of another certificate"):
+        run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json"))
+    assert not (L.requests_dir / "next.json").exists()
+
+
+def test_a_repaired_pointer_is_pushed_alone(checkout, sk, mac, monkeypatch, tmp_path_factory):
+    L, tf, repo, remote = checkout
+    monkeypatch.setattr(cli, "_approve", fake_approve(mac))
+    elsewhere = tmp_path_factory.mktemp("issuer")
+    assert run(L, tf, "cohort", "seal", str(write_fps(elsewhere, FIVE))) == 0
+    land(L, sk, mac, 1)
+    assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json")) == 0
+    land(L, sk, mac, 2)
+    (certs(L) / "revoked" / f"{FIVE[0]}.json").unlink()
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "two blocks, no pointer"); _git(repo, "push", "-q")
+
+    monkeypatch.setattr(cli, "_sync", lambda L: None)
+    assert run(L, tf, "cohort", "revoke", str(certs(L) / f"{FIVE[0]}.json"), "--push") == 0
+    pushed = _git(remote, "log", "-1", "--name-only", "--format=%s", "main").split("\n")
+    assert pushed[0] == "Point the revoked certificate at block 2"
+    assert [f for f in pushed[1:] if f] == [f"ledger/certs/revoked/{FIVE[0]}.json"]

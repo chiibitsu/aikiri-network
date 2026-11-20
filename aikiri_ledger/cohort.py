@@ -309,11 +309,18 @@ def read_fingerprints(text: str) -> list[str]:
     return out
 
 
+def revocation_block(fingerprint: str, blocks):
+    """The earliest block whose one root revokes this fingerprint, or None."""
+    hits = [b for b in blocks if b.roots == [{"kind": "revocation", "sha256": fingerprint}]]
+    return min(hits, key=lambda b: b.index) if hits else None
+
+
 def status(proof: dict, ledger) -> tuple[str, list[str]]:
     """What a proof says against a ledger: VALID, REVOKED, NOT FOUND or INVALID, with the
-    reasons. It reads the ledger the way the check page does: the block the proof names,
-    by its index, must hold this root as its one cert-cohort root, and any revocation block
-    naming the fingerprint revokes it. The chain's own state is verify's to report."""
+    reasons. The block the proof names, by its index, must hold this root as its one
+    cert-cohort root, as the check page reads it. Any revocation block naming the fingerprint
+    revokes it; the page finds that block through ledger/certs/revoked/, which `cohort
+    revoke` keeps pointing at it (and `cohort verify` warns when it does not). The chain's own state is verify's to report."""
     if not verify_proof(proof):
         return "INVALID", ["the path does not lead from this certificate to the root it names"]
     p = parse_proof(proof)
@@ -327,9 +334,7 @@ def status(proof: dict, ledger) -> tuple[str, list[str]]:
     if blk.roots != [{"kind": KIND, "sha256": p["root"]}]:
         return "NOT FOUND", [f"block {p['block']} does not seal cohort {p['root']}"]
     lines = [f"in cohort {p['root']}, sealed in block {blk.index} ({blk.timestamp})"]
-    revoked = [b for b in blocks.values()
-               if b.roots == [{"kind": "revocation", "sha256": p["leaf"]}]]
-    if revoked:
-        b = min(revoked, key=lambda b: b.index)
+    b = revocation_block(p["leaf"], blocks.values())
+    if b is not None:
         return "REVOKED", lines + [f"revoked in block {b.index} ({b.timestamp})"]
     return "VALID", lines

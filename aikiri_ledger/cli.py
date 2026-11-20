@@ -931,7 +931,21 @@ def _cohort(a, L: Ledger) -> int:
     proof = _read_proof(a.proof)
     verdict, why = _verdict(a, L, proof)
     if verdict == "REVOKED":
-        print(f"certificate {proof['leaf']} is already {why[-1]}; nothing changed")
+        mark, named, real = _mark_state(L, proof["leaf"])
+        if named == real:
+            print(f"certificate {proof['leaf']} is already {why[-2]}; nothing changed")
+            return 0
+        # Revoked on the ledger, but the page's pointer is missing or wrong: put it right,
+        # or the check page would go on calling the certificate valid.
+        _public_ok(_certs(L)); _public_ok(mark.parent)
+        if mark.is_symlink():
+            raise SystemExit(f"refused: {mark} is a link; nothing overwritten")
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(mark, cohort.revoked_json(proof["leaf"], real))
+        print(f"certificate {proof['leaf']} is already {why[-2]}; {mark} now names block {real}")
+        if a.push:
+            return _push_pointer(L, mark, real)
+        print(f"next: commit and push {mark}")
         return 0
     if verdict != "VALID":
         raise SystemExit(f"refused: {verdict}: {'; '.join(why)}")
@@ -957,11 +971,63 @@ def _cohort(a, L: Ledger) -> int:
     return 0
 
 
+_FP_NAME = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+def _named_right(path: Path, proof: dict) -> None:
+    """A proof filed under a fingerprint's name must be that certificate's proof."""
+    if _FP_NAME.match(path.stem) and path.suffix == ".json" and proof["leaf"] != path.stem:
+        raise SchemaError(f"{path.name} holds the proof of another certificate ({proof['leaf']})")
+
+
+def _push_pointer(L: Ledger, mark: Path, block: int) -> int:
+    """Commit and push the repaired pointer alone: no request, no passphrase (it asserts
+    nothing the ledger does not already say, and every reader checks the block it names)."""
+    root, _, allowed = _checkout(L, mark, ())
+    _unpublished_only(root, allowed)
+    if _git_add(root, allowed).returncode:
+        raise SystemExit(f"not pushed: git add {mark} failed")
+    staged = [f for f in _git(root, "diff", "--cached", "--name-only", "-z").stdout.split("\0") if f]
+    if not set(staged) <= allowed:
+        raise SystemExit("not pushed: other files are staged; commit or unstage them first")
+    if staged:
+        c = _git(root, "commit", "-q", "-m", f"Point the revoked certificate at block {block}")
+        if c.returncode:
+            raise SystemExit(f"not pushed: git commit failed: {c.stderr.strip()[:300]}")
+    head = _git(root, "symbolic-ref", "-q", "HEAD").stdout.strip()
+    up = _git(root, "for-each-ref", "--format=%(upstream:remotename)%09%(upstream:remoteref)", head)
+    remote, _, ref = up.stdout.strip().partition("\t")
+    if not (remote and ref):
+        raise SystemExit("not pushed: the branch has no upstream")
+    p = _git(root, "push", remote, f"HEAD:{ref}")
+    if p.returncode:
+        raise SystemExit(f"not pushed: git push failed: {p.stderr.strip()[:300]}")
+    print("pushed")
+    return 0
+
+
 def _read_proof(path: str) -> dict:
     try:
-        return cohort.parse_proof(Path(path).read_bytes())
+        proof = cohort.parse_proof(Path(path).read_bytes())
+        _named_right(Path(path), proof)
+        return proof
     except (SchemaError, OSError) as e:
         raise SystemExit(f"INVALID  {path}: {e}")
+
+
+def _mark_state(L: Ledger, fingerprint: str) -> tuple[Path, int | None, int | None]:
+    """The revoked/ pointer, the block it names (None if absent or unreadable), and the
+    block that really revokes the fingerprint (None if none)."""
+    mark = _certs(L) / cohort.REVOKED_DIR / f"{fingerprint}.json"
+    named = None
+    if mark.is_file() and not mark.is_symlink():
+        try:
+            r = cohort.parse_revoked(mark.read_bytes())
+            named = r["block"] if r["fingerprint"] == fingerprint else None
+        except (SchemaError, OSError):
+            named = None
+    blk = cohort.revocation_block(fingerprint, L.blocks())
+    return mark, named, (blk.index if blk is not None else None)
 
 
 def _verdict(a, L: Ledger, proof: dict) -> tuple[str, list[str]]:
@@ -992,6 +1058,7 @@ def _cohort_verify(a, L: Ledger) -> int:
             obj = cohort._loads(p.read_bytes())
             if isinstance(obj, dict) and "path" in obj:
                 proof = cohort.parse_proof(obj)
+                _named_right(p, proof)
                 fp = None
             else:
                 fp = cohort.record_fingerprint(obj)
@@ -1016,9 +1083,13 @@ def _cohort_verify(a, L: Ledger) -> int:
             return 1
 
     verdict, why = _verdict(a, L, proof)
-    mark = _certs(L) / cohort.REVOKED_DIR / f"{proof['leaf']}.json"
+    mark, named, real = _mark_state(L, proof["leaf"])
     if verdict == "VALID" and mark.is_file() and not mark.is_symlink():
         why.insert(-1, f"a revocation is requested ({mark.name}) but no block on this ledger seals it yet")
+    if verdict == "REVOKED" and named != real:
+        why.insert(-1, f"warning: {mark} {'is missing' if named is None else f'names block {named}'}, "
+                       f"so the check page does not show this revocation; "
+                       f"`aikiri-ledger cohort revoke` on this proof puts it right")
     print(f"{verdict}  certificate {proof['leaf']}")
     for line in why:
         print(f"  {line}")
