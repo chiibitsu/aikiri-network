@@ -1,0 +1,307 @@
+{
+ "about": "Certificate cohort Merkle vectors. Leaves are sha256 of the ASCII strings test-cert-1 to test-cert-5: obviously fake fixtures. Changing any byte here is a protocol version change, not an edit.",
+ "cohorts": [
+  {
+   "leaves": [
+    "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043"
+   ],
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+     "path": [],
+     "root": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+     "v": 1
+    }
+   ],
+   "root": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+   "size": 1
+  },
+  {
+   "leaves": [
+    "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+    "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b"
+   ],
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+     "path": [
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "5450e43296853e0f88af6613f007ecef120732df672ccaada8b28bfbdc7e7488",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+     "path": [
+      {
+       "sha256": "d9c8286e8c37be8e9abf37f2eb3c6b03ce4d86f0804d46e9960d8ef7e9ac174a",
+       "side": "left"
+      }
+     ],
+     "root": "5450e43296853e0f88af6613f007ecef120732df672ccaada8b28bfbdc7e7488",
+     "v": 1
+    }
+   ],
+   "root": "5450e43296853e0f88af6613f007ecef120732df672ccaada8b28bfbdc7e7488",
+   "size": 2
+  },
+  {
+   "leaves": [
+    "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+    "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+    "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f"
+   ],
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+     "path": [
+      {
+       "sha256": "1a18c94de65bb8fe4efe93ad7d75910336b6a1221e6c131961f5a3277349734a",
+       "side": "right"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "10949e1184ea55ef18a67f463c7e6ed446a649bc460701476d1ce6dedb36b29e",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+     "path": [
+      {
+       "sha256": "d9c8286e8c37be8e9abf37f2eb3c6b03ce4d86f0804d46e9960d8ef7e9ac174a",
+       "side": "left"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "10949e1184ea55ef18a67f463c7e6ed446a649bc460701476d1ce6dedb36b29e",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+     "path": [
+      {
+       "sha256": "aaebe2dfe7eae0d9937a8c563ed45dc5628a3b566a0d2aa9f0c08b740d5e07e9",
+       "side": "left"
+      }
+     ],
+     "root": "10949e1184ea55ef18a67f463c7e6ed446a649bc460701476d1ce6dedb36b29e",
+     "v": 1
+    }
+   ],
+   "root": "10949e1184ea55ef18a67f463c7e6ed446a649bc460701476d1ce6dedb36b29e",
+   "size": 3
+  },
+  {
+   "leaves": [
+    "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+    "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+    "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+    "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491"
+   ],
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+     "path": [
+      {
+       "sha256": "1a18c94de65bb8fe4efe93ad7d75910336b6a1221e6c131961f5a3277349734a",
+       "side": "right"
+      },
+      {
+       "sha256": "1f22586086290d3b3266a06159c3edc4922602f4f45c3a6284d7a61c29ffc952",
+       "side": "right"
+      }
+     ],
+     "root": "d7971134c9d8238cd72353ca85fb17c9fc30abe2719bb5b527f1dc2dddf542b2",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+     "path": [
+      {
+       "sha256": "d9c8286e8c37be8e9abf37f2eb3c6b03ce4d86f0804d46e9960d8ef7e9ac174a",
+       "side": "left"
+      },
+      {
+       "sha256": "1f22586086290d3b3266a06159c3edc4922602f4f45c3a6284d7a61c29ffc952",
+       "side": "right"
+      }
+     ],
+     "root": "d7971134c9d8238cd72353ca85fb17c9fc30abe2719bb5b527f1dc2dddf542b2",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491",
+     "path": [
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      },
+      {
+       "sha256": "aaebe2dfe7eae0d9937a8c563ed45dc5628a3b566a0d2aa9f0c08b740d5e07e9",
+       "side": "left"
+      }
+     ],
+     "root": "d7971134c9d8238cd72353ca85fb17c9fc30abe2719bb5b527f1dc2dddf542b2",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+     "path": [
+      {
+       "sha256": "3c28aace9a7300e59ed15d37743532e9896644eb6267175972382dadd2f51c7a",
+       "side": "left"
+      },
+      {
+       "sha256": "aaebe2dfe7eae0d9937a8c563ed45dc5628a3b566a0d2aa9f0c08b740d5e07e9",
+       "side": "left"
+      }
+     ],
+     "root": "d7971134c9d8238cd72353ca85fb17c9fc30abe2719bb5b527f1dc2dddf542b2",
+     "v": 1
+    }
+   ],
+   "root": "d7971134c9d8238cd72353ca85fb17c9fc30abe2719bb5b527f1dc2dddf542b2",
+   "size": 4
+  },
+  {
+   "leaves": [
+    "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+    "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+    "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+    "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491",
+    "1cd3aff11052664a41bf894df7a34d7f864eb2cc929fb9239964ebbc0a459d72"
+   ],
+   "proofs": [
+    {
+     "block": null,
+     "leaf": "1cd3aff11052664a41bf894df7a34d7f864eb2cc929fb9239964ebbc0a459d72",
+     "path": [
+      {
+       "sha256": "d9c8286e8c37be8e9abf37f2eb3c6b03ce4d86f0804d46e9960d8ef7e9ac174a",
+       "side": "right"
+      },
+      {
+       "sha256": "be82452319fed6b2980491c5b75eafcc810af3ed16213b1fa4f3b089eab05399",
+       "side": "right"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+     "path": [
+      {
+       "sha256": "20a51122444dab6daa47ea13cc869bf36888409dbe888857eefa06407a0f0674",
+       "side": "left"
+      },
+      {
+       "sha256": "be82452319fed6b2980491c5b75eafcc810af3ed16213b1fa4f3b089eab05399",
+       "side": "right"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+     "path": [
+      {
+       "sha256": "3c28aace9a7300e59ed15d37743532e9896644eb6267175972382dadd2f51c7a",
+       "side": "right"
+      },
+      {
+       "sha256": "fa846373b366df5bb92e73ad58c4e0ca1e0ba8110c9db3857c61de8a97fef136",
+       "side": "left"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491",
+     "path": [
+      {
+       "sha256": "1a18c94de65bb8fe4efe93ad7d75910336b6a1221e6c131961f5a3277349734a",
+       "side": "left"
+      },
+      {
+       "sha256": "fa846373b366df5bb92e73ad58c4e0ca1e0ba8110c9db3857c61de8a97fef136",
+       "side": "left"
+      },
+      {
+       "sha256": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5",
+       "side": "right"
+      }
+     ],
+     "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+     "v": 1
+    },
+    {
+     "block": null,
+     "leaf": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+     "path": [
+      {
+       "sha256": "c05900af9f0539a18e3eb3ac17a3bcefa1033f7c97425fdeb5fa67ab37a0497c",
+       "side": "left"
+      }
+     ],
+     "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+     "v": 1
+    }
+   ],
+   "root": "845e6fb6fff5a48ff2aa3ca8760b92801160bd75b68ba5e1ea8b085dfa4e17cd",
+   "size": 5
+  }
+ ],
+ "inputs": {
+  "test-cert-1": "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043",
+  "test-cert-2": "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b",
+  "test-cert-3": "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f",
+  "test-cert-4": "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491",
+  "test-cert-5": "1cd3aff11052664a41bf894df7a34d7f864eb2cc929fb9239964ebbc0a459d72"
+ },
+ "leaf_domain": "aikiri-ledger/cert-leaf/v1\n",
+ "leaf_hashes": {
+  "1cd3aff11052664a41bf894df7a34d7f864eb2cc929fb9239964ebbc0a459d72": "20a51122444dab6daa47ea13cc869bf36888409dbe888857eefa06407a0f0674",
+  "27d76de70d66bf4f87d5153fc6c658e505dcd89cbcd9f1d4db31ee750dd23f6b": "d9c8286e8c37be8e9abf37f2eb3c6b03ce4d86f0804d46e9960d8ef7e9ac174a",
+  "36343db6cee404e07fbd04f80707cffd30fe1ede15520bebab4bf204e4258d6f": "1a18c94de65bb8fe4efe93ad7d75910336b6a1221e6c131961f5a3277349734a",
+  "7434143e7d50cc6a6065b6187c08dba7858b8cc007cb6fc492c92531dbef6491": "3c28aace9a7300e59ed15d37743532e9896644eb6267175972382dadd2f51c7a",
+  "c39e4fe697b07d0fe9a736040be03c09d772e852a33f1658e40281851bc15043": "8e0280ff099081f742691677992d5aeb53313c76be89065a94e604ef0ed41ae5"
+ },
+ "node_domain": "aikiri-ledger/cert-node/v1\n"
+}

@@ -32,6 +32,7 @@ A block needs all three. Holding the two automated keys is not consent, because 
 - `aikiri_ledger/approval.py` ~ P-256 approval from a registered device
 - `aikiri_ledger/request.py` ~ the sealed request: one root, one nonce, consumed once
 - `aikiri_ledger/seal.py` ~ `seal <document> <id> <sha256>`: a client's agreement or invoice by its hash, then the report to the app; see `docs/sealing.md`
+- `aikiri_ledger/cohort.py` ~ a certificate cohort's Merkle root (RFC 9162 shape, domain-separated) and one proof per certificate; see `docs/certificates.md`
 - `aikiri_ledger/trust.py` ~ where the verifier's expectations come from
 - `aikiri_ledger/verify.py` ~ the four states
 - `aikiri_ledger/witness.py` ~ Base contract, RPC quorum, Bitcoin proofs (`ots` stamps and upgrades them; verify reads them)
@@ -88,6 +89,16 @@ aikiri-ledger seal invoice <record id> <sha256>     # also: agreement; seal-acce
 ```
 
 The line the app posts ends in `--push`: it writes the request, asks your passphrase, commits and pushes it. After your approval in GitHub, `block.yml` writes the block and reports it to the app by fingerprint (`report-block`). The record id never reaches the ledger. Command and contract: `docs/sealing.md`.
+
+## Sealing a certificate cohort
+
+```
+aikiri-ledger cohort seal <fingerprints.txt> --out <folder> --push        # folder outside this repo
+aikiri-ledger --trust ~/aikiri-trust.json cohort verify <proof.json>   # VALID, REVOKED, NOT SEALED, INVALID
+aikiri-ledger cohort revoke <proof.json> --push
+```
+
+A whole cohort's certificates in one block: the root is the Merkle root of their fingerprints (kind `cert-cohort`), and each certificate gets a proof file. One paste, one passphrase, one approval, as for `seal`. Revoking one certificate seals its fingerprint as a `revocation`. Only fingerprints ever reach this repository; the certificate records stay with the issuer. Contract, tree and proof format: `docs/certificates.md`.
 
 ## Run
 
