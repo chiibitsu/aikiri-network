@@ -339,6 +339,36 @@ def test_the_request_goes_only_where_block_yml_looks(world, tmp_path):
     assert [p.name for p in L.requests_dir.glob("*.json")] == ["next.json"]
 
 
+def _dangling_request_link(L, tmp_path):
+    target = tmp_path / "target.json"
+    L.requests_dir.mkdir(parents=True, exist_ok=True)
+    link = L.requests_dir / "next.json"
+    link.symlink_to(target)
+    return link, target
+
+
+def test_a_dangling_link_at_the_request_path_is_refused(world, tmp_path):
+    """The CLI says refused, not a traceback, and nothing is created behind the link."""
+    L, trust, tf = world
+    link, target = _dangling_request_link(L, tmp_path)
+    with pytest.raises(SystemExit, match="refused"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE)
+    assert link.is_symlink() and not link.exists()   # still the same dangling link
+    assert not target.exists()
+
+
+def test_the_request_is_never_written_through_a_link_that_appears_after_the_scan(world, tmp_path, monkeypatch):
+    """exists() is False for a dangling link, so a plain write_text would follow it and create the
+    target. The request is created with O_EXCL, which refuses any link, whatever it points at."""
+    L, trust, tf = world
+    link, target = _dangling_request_link(L, tmp_path)
+    monkeypatch.setattr(cli, "_requests", lambda ledger: [])   # the link came after the scan
+    with pytest.raises(SystemExit, match="refused"):
+        run(L, tf, "seal", "invoice", RECORD, INVOICE)
+    assert link.is_symlink() and not link.exists()
+    assert not target.exists()
+
+
 # --- block.yml's report, by fingerprint alone, and `seal --push` ---
 
 def test_block_yml_reports_by_fingerprint_without_the_record_id(world, sk, mac, monkeypatch, capsys):

@@ -751,10 +751,15 @@ def _seal(a, L: Ledger) -> int:
     # Always here: block.yml runs on ledger/requests/*.json and nowhere else, and only
     # a request here is seen by the next run of this line.
     out = L.requests_dir / "next.json"
-    if out.exists():
-        raise SystemExit(f"refused: {out} exists; nothing overwritten")
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    # O_EXCL, not exists(): exists() is False for a dangling symlink, and a plain write
+    # would follow it and create its target. O_EXCL refuses any link, whatever it points at.
+    try:
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    except FileExistsError:
+        raise SystemExit(f"refused: {out} exists; nothing overwritten")
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"unsigned request for block {payload['index']} written to {out}: {kind} {sha}")
     if a.push:
         return _push_request(out, a.device, a.keyfile, L)
