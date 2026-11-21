@@ -81,7 +81,7 @@ def pending(requests: list[Path]) -> list[tuple[Path, dict]]:
     for p in requests:
         try:
             out.append((p, parse_roots(loads_strict(p.read_text())["roots"])[0]))
-        except (KeyError, TypeError, SchemaError, ValueError) as e:
+        except (KeyError, TypeError, SchemaError, ValueError, OSError) as e:
             raise SchemaError(f"{p} is not a request: {e}")
     return out
 
