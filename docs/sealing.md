@@ -1,6 +1,6 @@
 # Sealing a client's document
 
-An app that issues documents to a client (today the Kreativ Dental Blueprint flow) seals each one on this ledger by its SHA-256. One record can have several documents: the accepted agreement, then the official invoice. Each gets its own block.
+An app that issues documents to a client (today a client app's Blueprint flow) seals each one on this ledger by its SHA-256. One record can have several documents: the accepted agreement, then the official invoice. Each gets its own block.
 
 ## The command
 

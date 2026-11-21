@@ -1,6 +1,6 @@
 """Sealing a client's document: one line from the app's chat, the hash only.
 
-An app that issues documents (today the Kreativ Dental Blueprint flow) posts one
+An app that issues documents (today a client app's Blueprint flow) posts one
 line per document for Chii to paste on the sealing machine:
 
     aikiri-ledger seal agreement <record id> <sha256>
