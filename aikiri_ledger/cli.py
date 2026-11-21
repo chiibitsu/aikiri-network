@@ -935,7 +935,7 @@ def _cohort(a, L: Ledger) -> int:
     # revoke: only a certificate verify would call VALID here, after the pull
     if a.push:
         _sync(L)        # first: the proof is read from the checkout as it is after the pull
-    proof = _read_proof(a.proof)
+    proof = _read_proof(a.proof, _certs(L))
     verdict, why = _verdict(a, L, proof)
     if verdict == "REVOKED":
         mark, named, real = _mark_state(L, proof["leaf"])
@@ -983,10 +983,18 @@ def _cohort(a, L: Ledger) -> int:
 _FP_NAME = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
-def _named_right(path: Path, proof: dict) -> None:
-    """A proof filed under a fingerprint's name must be that certificate's proof."""
-    if _FP_NAME.match(path.stem) and path.suffix == ".json" and proof["leaf"] != path.stem:
+def _named_right(path: Path, proof: dict, certs: Path | None = None) -> None:
+    """A proof filed under a fingerprint's name must be that certificate's proof, in any
+    letter case; and a file in ledger/certs/ must be named exactly <its leaf>.json."""
+    stem = path.stem.lower()
+    if _FP_NAME.match(stem) and path.suffix.lower() == ".json" and proof["leaf"] != stem:
         raise SchemaError(f"{path.name} holds the proof of another certificate ({proof['leaf']})")
+    try:
+        in_certs = certs is not None and path.resolve().parent == certs.resolve()
+    except OSError:
+        in_certs = False
+    if in_certs and path.name != f"{proof['leaf']}.json":
+        raise SchemaError(f"{path.name} in {certs.name}/ is not named for the certificate it proves")
 
 
 def _push_pointer(L: Ledger, mark: Path, block: int) -> int:
@@ -1021,13 +1029,15 @@ def _push_files(L: Ledger, files, message: str) -> int:
     return 0
 
 
-def _read_proof(path: str) -> dict:
+def _read_proof(path: str, certs: Path | None = None) -> dict:
     try:
         proof = cohort.parse_proof(Path(path).read_bytes())
-        _named_right(Path(path), proof)
+        _named_right(Path(path), proof, certs)
         return proof
-    except (SchemaError, OSError) as e:
+    except SchemaError as e:
         raise SystemExit(f"INVALID  {path}: {e}")
+    except OSError:
+        raise SystemExit(f"INVALID  {path}: could not read the file")
 
 
 def _mark_state(L: Ledger, fingerprint: str) -> tuple[Path, int | None, int | None]:
@@ -1063,24 +1073,45 @@ def _verdict(a, L: Ledger, proof: dict) -> tuple[str, list[str]]:
                            f"`aikiri-ledger verify` checks Base and Bitcoin)"]
 
 
+def _as_file(given: str) -> Path | None:
+    """The file `given` names, or None when it is a link or payload. A link (it has a '#')
+    goes straight to the payload reader; anything else is a file only if it opens as one.
+    A payload too long to be a file name makes the filesystem refuse it: that, too, means
+    payload, never an error carrying the payload's text."""
+    if "#" in given:
+        return None
+    try:
+        p = Path(given)
+        return p if p.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
 def _cohort_verify(a, L: Ledger) -> int:
     """One certificate, given as its proof file, its issuer record (a JSON file) or the
     payload of its link. A record or payload is looked up by fingerprint in ledger/certs."""
     given = a.proof
-    p = Path(given)
+    # Never print `given`, and never let it near the filesystem unless it can be a path: a
+    # payload is the whole record, holder's name included, and a long one is no file name.
     try:
-        if p.is_file():
+        p = _as_file(given)
+        if p is not None:
             obj = cohort._loads(p.read_bytes())
-            if isinstance(obj, dict) and "path" in obj:
+            if not isinstance(obj, dict):
+                raise SchemaError("the file holds neither a proof nor a record")
+            if "path" in obj:
                 proof = cohort.parse_proof(obj)
-                _named_right(p, proof)
+                _named_right(p, proof, _certs(L))
                 fp = None
             else:
                 fp = cohort.record_fingerprint(obj)
         else:
             fp = cohort.record_fingerprint(cohort.decode_payload(given))
-    except (SchemaError, OSError, ValueError) as e:
+    except SchemaError as e:
         print(f"INVALID  {e}")
+        return 1
+    except (OSError, ValueError):
+        print("INVALID  could not read that file")
         return 1
     if fp is not None:
         f = _certs(L) / f"{fp}.json"

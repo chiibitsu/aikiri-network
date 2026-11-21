@@ -901,3 +901,68 @@ def test_a_planted_temp_link_is_never_written_through(world, tmp_path):
     for f in FIVE:
         p = certs(L) / f"{f}.json"
         assert not p.is_symlink() and cohort.parse_proof(p.read_text())["leaf"] == f
+
+
+def _long_record(i=1):
+    """A fake record whose payload is far longer than any file name (over 255 bytes)."""
+    return {**RECORD, "number": f"{i:02x}" * 16, "holder": "Test Holder " + "x" * 150,
+            "course": "Example Course " + "y" * 150, "host": "Example Host"}
+
+
+def test_a_long_bare_payload_reads_valid_not_a_file_name_error(world, sk, mac, tmp_path, capsys):
+    L, trust, tf = world
+    rec = _long_record()
+    pl = cohort.encode_payload(rec)
+    assert len(pl) > 255
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [cohort.record_fingerprint(rec)]))) == 0
+    land(L, sk, mac, 1)
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", pl) == 0                       # bare payload
+    assert run(L, tf, "cohort", "verify", "https://example.test/network/cert#" + pl) == 0
+    out = capsys.readouterr().out
+    assert out.count("VALID  certificate") == 2 and pl not in out and "Test Holder" not in out
+
+
+@pytest.mark.parametrize("bad", ["corrupt", "truncated", "not-canonical", "unknown"])
+def test_verify_errors_never_echo_the_input(world, capsys, bad):
+    L, trust, tf = world
+    pl = cohort.encode_payload(_long_record())
+    import base64
+    v2 = json.dumps({**_long_record(), "v": 2}, sort_keys=True, separators=(",", ":")).encode()
+    given = {"corrupt": lambda: pl[:100] + "!" + pl[101:], "truncated": lambda: pl[:-3],
+             "not-canonical": lambda: pl + "AAAA",
+             "unknown": lambda: base64.urlsafe_b64encode(v2).rstrip(b"=").decode()}[bad]()
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", given) == 1
+    out = capsys.readouterr().out
+    assert out.startswith(("INVALID", "NOT FOUND"))
+    assert given not in out and given[:40] not in out and "Test Holder" not in out
+
+
+def test_a_file_holding_a_json_string_is_not_a_second_form_of_a_record(world, sk, mac, tmp_path, capsys):
+    L, trust, tf = world
+    rec = {**RECORD, "number": "ab" * 16}
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, [cohort.record_fingerprint(rec)]))) == 0
+    land(L, sk, mac, 1)
+    good = tmp_path / "rec.json"; good.write_text(json.dumps(rec))
+    quoted = tmp_path / "quoted.json"; quoted.write_text(json.dumps(json.dumps(rec)))
+    capsys.readouterr()
+    assert run(L, tf, "cohort", "verify", str(good)) == 0
+    assert run(L, tf, "cohort", "verify", str(quoted)) == 1
+    assert capsys.readouterr().out.splitlines()[-1].startswith("INVALID  the file holds neither")
+
+
+def test_the_proof_name_check_ignores_case_and_covers_ledger_certs(world, sk, mac, tmp_path, capsys):
+    L, trust, tf = world
+    assert run(L, tf, "cohort", "seal", str(write_fps(tmp_path, FIVE))) == 0
+    land(L, sk, mac, 1)
+    other = (certs(L) / f"{FIVE[1]}.json").read_bytes()
+    upper = tmp_path / f"{FIVE[0].upper()}.JSON"; upper.write_bytes(other)       # wrong cert, shouted
+    neutral = certs(L) / "proof.json"; neutral.write_bytes(other)               # any name in certs/
+    outside = tmp_path / "my-proof.json"; outside.write_bytes(other)            # any name elsewhere: fine
+    for f, want in ((upper, 1), (neutral, 1), (outside, 0)):
+        capsys.readouterr()
+        assert run(L, tf, "cohort", "verify", str(f)) == want, f.name
+    with pytest.raises(SystemExit, match="not named for the certificate"):
+        run(L, tf, "cohort", "revoke", str(neutral))
+    assert not (L.requests_dir / "next.json").exists()
