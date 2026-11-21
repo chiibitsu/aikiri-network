@@ -20,7 +20,7 @@ from .errors import SchemaError
 REQUEST_FIELDS = ("v", "index", "prev_hash", "roots", "nonce", "validator", "approval")
 ROOT_FIELDS = ("kind", "sha256")
 ROOT_KINDS = ("journal", "scenario", "revocation", "deliverable", "acceptance", "invoice",
-              "raw")
+              "raw", "cert-cohort")
 REQUEST_VERSION = 1
 
 
