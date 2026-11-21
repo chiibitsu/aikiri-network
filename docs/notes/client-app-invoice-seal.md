@@ -1,4 +1,4 @@
-# Note for chiibitsu/kreativ-dental-US: seal the official invoice
+# Note for the client app's repo: seal the official invoice
 
 From `aikiri-network`, 2026-10-19. The network side is built: `aikiri-ledger seal invoice <id> <sha256>`, contract in `docs/sealing.md`. This is what the app must change to use it. Nothing here edits that repo.
 
